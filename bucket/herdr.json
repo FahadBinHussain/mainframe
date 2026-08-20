@@ -1,0 +1,27 @@
+{
+    "version": "0.7.4-preview.20260717.813fec141faa",
+    "description": "Agent multiplexer — one terminal for the whole herd",
+    "homepage": "https://herdr.dev",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-2026-07-17-813fec141faa/herdr-windows-x86_64.exe",
+            "hash": "2b53a21755d6393515f84c246b6297d46103e7e741714bcf2244b408c1178d57"
+        }
+    },
+    "bin": [
+        ["herdr-windows-x86_64.exe", "herdr"]
+    ],
+    "checkver": {
+        "url": "https://herdr.dev/preview.json",
+        "jsonpath": "$.build_id",
+        "regex": "(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})-(?<commit>[a-f0-9]+)"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/ogulcancelik/herdr/releases/download/preview-$version/herdr-windows-x86_64.exe"
+            }
+        }
+    }
+}

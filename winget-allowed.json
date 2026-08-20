@@ -1,0 +1,45 @@
+{
+  "packages": [
+    {
+      "id": "AnyDesk.AnyDesk",
+      "persist": [
+        {
+          "path": "%ProgramData%\\AnyDesk",
+          "archivePath": "winget-persist\\AnyDesk\\ProgramData\\AnyDesk"
+        },
+        {
+          "path": "%APPDATA%\\AnyDesk",
+          "archivePath": "winget-persist\\AnyDesk\\AppData\\Roaming\\AnyDesk"
+        }
+      ]
+    },
+    {
+      "id": "AutoHotkey.AutoHotkey"
+    },
+    {
+      "id": "GPSoftware.DirectoryOpus",
+      "persist": [
+        {
+          "path": "%APPDATA%\\GPSoftware\\Directory Opus",
+          "archivePath": "winget-persist\\DirectoryOpus\\AppData\\Roaming\\GPSoftware\\Directory Opus"
+        },
+        {
+          "path": "%LOCALAPPDATA%\\GPSoftware\\Directory Opus",
+          "archivePath": "winget-persist\\DirectoryOpus\\AppData\\Local\\GPSoftware\\Directory Opus"
+        }
+      ]
+    },
+    {
+      "id": "Windscribe.Windscribe"
+    },
+    {
+      "id": "StartIsBack.StartAllBack"
+    },
+    {
+      "id": "Tonec.InternetDownloadManager"
+    },
+    {
+      "id": "Wakatime.DesktopWakatime"
+    }
+  ]
+}

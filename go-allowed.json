@@ -1,0 +1,9 @@
+{
+  "packages": [
+    {
+      "path": "github.com/openclaw/wacli/cmd/wacli",
+      "version": "v0.15.0",
+      "tags": ["sqlite_fts5"]
+    }
+  ]
+}
