@@ -398,6 +398,61 @@ function Restore-EdgeExtensions {
     # the Edge Add-ons store (delisted / renamed) will silently not install.
     Write-Host "  Requested $($exts.Count) extensions via policy. If any are missing after the next Edge launch,"
     Write-Host "  reinstall them manually from the Chrome Web Store or Edge Add-ons (they were delisted)."
+
+    # Unpacked developer-mode extensions (loc=4). Edge 151+ prunes these from a
+    # cross-machine profile too, but --load-extension re-registers them as loc=8
+    # (command-line loaded) which PERSISTS across plain relaunches (verified).
+    # backup.ps1 copied the source folders to edge-profile\unpacked-extensions\
+    # and wrote unpacked-extensions.json with their original source paths.
+    $unpackedListPath = Join-Path $BackupRoot 'edge-profile\unpacked-extensions.json'
+    if (Test-Path -LiteralPath $unpackedListPath) {
+        try {
+            $unpacked = Get-Content -LiteralPath $unpackedListPath -Raw | ConvertFrom-Json
+        } catch {
+            $unpacked = $null
+        }
+        if ($unpacked -and $unpacked.Count -gt 0) {
+            $unpackedSrc = Join-Path $BackupRoot 'edge-profile\unpacked-extensions'
+            $restoredPaths = @()
+            foreach ($ux in $unpacked) {
+                $backupPath = Join-Path $unpackedSrc $ux.relative_path
+                $orig = $ux.path
+                if (Test-Path -LiteralPath $backupPath) {
+                    # restore to the same path as the source machine if possible
+                    $target = $orig
+                    if ($target -and $target -notmatch '^C:\\Users\\Admin') {
+                        # different windows user root - just keep original path;
+                        # robocopy handles it if the dir exists, else skip
+                    }
+                    $dir = Split-Path -Parent $target
+                    try {
+                        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                        & robocopy $backupPath $target /E /COPYALL /R:1 /W:1 /NP /NDL /NFL | Out-Null
+                        if (Test-Path -LiteralPath (Join-Path $target 'manifest.json')) {
+                            $restoredPaths += $target
+                            Write-Host "  Restored unpacked extension $($ux.name) to $target"
+                        } else {
+                            Write-Warning "  Unpacked extension $($ux.name) restore produced no manifest at $target - skipped"
+                        }
+                    } catch {
+                        Write-Warning "  Could not restore unpacked extension $($ux.name): $($_.Exception.Message)"
+                    }
+                } else {
+                    Write-Warning "  Unpacked extension backup folder not found: $backupPath"
+                }
+            }
+            if ($restoredPaths.Count -gt 0 -and (Test-Path -LiteralPath $edgeExe)) {
+                $loadArg = '--load-extension=' + ($restoredPaths -join ',')
+                Write-Host "  Launching Edge once with --load-extension to register unpacked extensions..."
+                $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
+                Start-Process -FilePath $edgeExe -ArgumentList '--no-first-run', $loadArg, 'about:blank' | Out-Null
+                Start-Sleep -Seconds 25
+                Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2
+                Write-Host "  Registered $($restoredPaths.Count) unpacked extensions via --load-extension"
+            }
+        }
+    }
 }
 
 $totalSteps = if ($Mode -eq 'quick') { 4 } else { 12 }

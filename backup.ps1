@@ -599,6 +599,51 @@ if (Test-Path -LiteralPath $edgeBackupProfile) {
     Write-Host "  No Edge Secure Preferences found to extract extensions from"
 }
 
+# Back up unpacked developer-mode extensions (loc=4) — they load from local
+# project folders outside the Edge profile. Edge 151+ prunes loc=4 entries
+# cross-machine, but --load-extension on the target machine re-registers them
+# as loc=8 (command-line loaded) which persists. We copy the source folders
+# into the backup so restore.ps1 can place them on the target.
+$edgeBackupProfile = Join-Path $OutputDir 'edge-profile\Default\Secure Preferences'
+if (Test-Path -LiteralPath $edgeBackupProfile) {
+    try {
+        $edgeSp = Get-Content -LiteralPath $edgeBackupProfile -Raw | ConvertFrom-Json
+        $unpackedExts = @()
+        if ($edgeSp.extensions.settings.PSObject.Properties) {
+            foreach ($prop in $edgeSp.extensions.settings.PSObject.Properties) {
+                $ext = $prop.Value
+                if ($ext.location -eq 4 -and $ext.path) {
+                    $unpackedExts += [pscustomobject]@{
+                        id   = $prop.Name
+                        name = $ext.manifest.name
+                        path = $ext.path
+                    }
+                }
+            }
+        }
+        if ($unpackedExts.Count -gt 0) {
+            $unpackedDest = Join-Path $OutputDir 'edge-profile\unpacked-extensions'
+            New-Item -ItemType Directory -Force -Path $unpackedDest | Out-Null
+            foreach ($ux in $unpackedExts) {
+                $src = $ux.path
+                if (Test-Path -LiteralPath $src) {
+                    $folderName = Split-Path -Leaf $src
+                    $dest = Join-Path $unpackedDest "$($ux.id)-$folderName"
+                    & robocopy $src $dest /E /COPYALL /R:1 /W:1 /NP /NDL /NFL | Out-Null
+                    $ux.relative_path = "$($ux.id)-$folderName"
+                } else {
+                    Write-Warning "  Unpacked extension source not found: $src"
+                }
+            }
+            $unpackedListPath = Join-Path $OutputDir 'edge-profile\unpacked-extensions.json'
+            $unpackedExts | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $unpackedListPath -Encoding UTF8
+            Write-Host "  Backed up $($unpackedExts.Count) unpacked dev-mode extensions to edge-profile\unpacked-extensions"
+        }
+    } catch {
+        Write-Warning "Could not extract unpacked extension info: $($_.Exception.Message)"
+    }
+}
+
 Write-Host "Exporting scheduled tasks..."
 $tasksDir = Join-Path $OutputDir 'scheduled-tasks'
 New-Item -ItemType Directory -Force -Path $tasksDir | Out-Null
