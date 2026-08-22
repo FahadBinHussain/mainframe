@@ -547,6 +547,15 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
   auth prompts/hangs. always set `$env:TAILSCALE_SSH_KEY_NAME = '<fleet key name>'` in the
   same command before calling `tailscale-account.ps1 ssh ...`, and wrap the ssh in
   `Start-Job` + `Wait-Job -Timeout` so the shell tool returns even if ssh stalls.
+- **reusable remote script runner**: `automata\tailscale.com\remote-run.ps1` wraps the
+  scp + ssh + Start-Job/Wait-Job pattern for running a local script on a remote tailnet
+  peer from an agent shell. usage: `remote-run.ps1 C:\path\script.ps1 [-Timeout 120]`.
+  defaults to the home desktop (`REMOTE_HOST`/`REMOTE_USER`/`TAILSCALE_SSH_KEY_NAME` in
+  `tailscale.com\.env.local`). gotchas baked into the script: the remote script always
+  lands at the fixed `C:\Users\<user>\AppData\Local\Temp\remote-run-script.ps1` (a space
+  in the remote path breaks remote `powershell -File`), the scp target must be ONE
+  `user@host:path` argument (a separate path string is misread as a hostname), and a
+  timeout kills the lingering ssh process so the remote command can't run away.
 - **VPN clients can block direct sockets**: a VPN service can WFP-block ALL non-tunnel
   traffic incl. LAN + tailnet peer dials. for direct-socket work on such a machine:
   stop the VPN client + service, do the work, then restore. the NCF is per-process and NOT
