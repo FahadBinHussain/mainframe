@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\vercel'
 $currentFile = Join-Path $accountRoot 'current.json'
 $legacyCurrentFile = Join-Path $accountRoot 'current.txt'
@@ -222,19 +224,9 @@ function Convert-SecureStringToPlainText {
 }
 
 function Read-ProfileToken {
-    param([string]$ProfilePath)
+    param([string]$Email)
 
-    $tokenPath = Get-ProfileTokenPath -ProfilePath $ProfilePath
-    if (-not (Test-Path -LiteralPath $tokenPath)) {
-        return $null
-    }
-
-    $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($token)) {
-        return $null
-    }
-
-    return $token
+    return Read-VaultSecret -Email $Email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'
 }
 
 function Write-ProfileToken {
@@ -247,8 +239,9 @@ function Write-ProfileToken {
     $profilePath = Get-ProfilePath -Email $normalized
     Ensure-ProfileDirectory -ProfilePath $profilePath
 
-    Convert-SecureStringToPlainText -SecureString $Token |
-        Set-Content -LiteralPath (Get-ProfileTokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $plainToken = Convert-SecureStringToPlainText -SecureString $Token
+    $userPrefix = ($normalized -split '@')[0]
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'vercel.com*' -Header '[tokens]' -Value $plainToken.Trim() -ItemName "vercel.com - $userPrefix" -Username $normalized -Uri 'https://vercel.com/account/tokens'
     Set-ActiveEmail -Email $normalized
 }
 
@@ -266,8 +259,8 @@ function Write-ProfileTokenText {
     $profilePath = Get-ProfilePath -Email $normalized
     Ensure-ProfileDirectory -ProfilePath $profilePath
 
-    $Token.Trim() |
-        Set-Content -LiteralPath (Get-ProfileTokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $userPrefix = ($normalized -split '@')[0]
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'vercel.com*' -Header '[tokens]' -Value $Token.Trim() -ItemName "vercel.com - $userPrefix" -Username $normalized -Uri 'https://vercel.com/account/tokens'
     Set-ActiveEmail -Email $normalized
 }
 
@@ -329,7 +322,7 @@ function Get-VercelProfileStatus {
         }
     }
 
-    $hasToken = -not [string]::IsNullOrWhiteSpace((Read-ProfileToken -ProfilePath $profilePath))
+    $hasToken = -not [string]::IsNullOrWhiteSpace((Read-ProfileToken -Email $normalized))
     return [pscustomobject]@{
         Email = $normalized
         Exists = $true
@@ -433,7 +426,7 @@ function Invoke-VercelProfile {
         throw "Vercel token profile does not exist yet: $normalized. Run .\vercel-account.ps1 token-add first; the profile email must be detected from the token."
     }
 
-    $token = Read-ProfileToken -ProfilePath $profilePath
+    $token = Read-ProfileToken -Email $normalized
     if ([string]::IsNullOrWhiteSpace($token)) {
         throw "Vercel token profile has no saved token: $normalized. Run .\vercel-account.ps1 token-add; the profile email must be detected from the token."
     }
@@ -549,7 +542,7 @@ function Invoke-VercelRest {
         throw "Vercel token profile does not exist yet: $normalized. Run .\vercel-account.ps1 token-add first."
     }
 
-    $token = Read-ProfileToken -ProfilePath $profilePath
+    $token = Read-ProfileToken -Email $normalized
     if ([string]::IsNullOrWhiteSpace($token)) {
         throw "Vercel token profile has no saved token: $normalized. Run .\vercel-account.ps1 token-add first."
     }
@@ -603,7 +596,7 @@ function Invoke-VercelRestViaCli {
 
     $normalized = Normalize-Email -Email $Email
     $profilePath = Get-ProfilePath -Email $normalized
-    $token = Read-ProfileToken -ProfilePath $profilePath
+    $token = Read-ProfileToken -Email $normalized
     if ([string]::IsNullOrWhiteSpace($token)) {
         throw "Vercel token profile has no saved token: $normalized. Run .\vercel-account.ps1 token-add first."
     }
@@ -847,7 +840,7 @@ function Get-VercelProfileAuthority {
 
     $normalized = Normalize-Email -Email $Email
     $profilePath = Get-ProfilePath -Email $normalized
-    $token = Read-ProfileToken -ProfilePath $profilePath
+    $token = Read-ProfileToken -Email $normalized
     if ([string]::IsNullOrWhiteSpace($token)) {
         return [pscustomobject]@{
             Service = 'vercel.com'

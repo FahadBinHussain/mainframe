@@ -459,6 +459,25 @@ if (-not $pnpmGlobalBinDir) {
 @{ globalBinDir = $pnpmGlobalBinDir } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $pnpmConfigFile -Encoding UTF8
 Write-Host "Exported pnpm global-bin-dir: $pnpmGlobalBinDir"
 
+Write-Host "Exporting pip packages..."
+$pipAllowedFile = Join-Path $PSScriptRoot 'pip-allowed.json'
+$pipPackagesFile = Join-Path $OutputDir 'pip-packages.json'
+if (-not (Test-Path -LiteralPath $pipAllowedFile)) {
+    throw "Missing required allowlist: $pipAllowedFile"
+}
+
+$allowed = (Get-Content -LiteralPath $pipAllowedFile -Raw | ConvertFrom-Json).packages
+$installed = @()
+$freezeLines = & pip list --format=freeze 2>$null
+foreach ($line in $freezeLines) {
+    if ($line -match '^([^=]+)==') {
+        $installed += $matches[1]
+    }
+}
+$filtered = @($installed | Where-Object { $allowed -contains $_ })
+@{ packages = @($filtered) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $pipPackagesFile -Encoding UTF8
+Write-Host "Exported $($filtered.Count) pip packages (from $($allowed.Count) in allowlist)"
+
 Write-Host "Backing up OBS Studio settings..."
 $obsPersistConfig = Join-Path $persistPath 'obs-studio\config\obs-studio'
 if (Test-Path -LiteralPath $obsPersistConfig) {
@@ -564,7 +583,7 @@ foreach ($script in @('restore.cmd', 'restore.ps1', 'restore-secrets.ps1', 'tool
     }
 }
 
-foreach ($allowlist in @('scoop-allowed.json', 'pnpm-allowed.json', 'uv-allowed.json', 'go-allowed.json', 'winget-allowed.json')) {
+foreach ($allowlist in @('scoop-allowed.json', 'pnpm-allowed.json', 'uv-allowed.json', 'go-allowed.json', 'winget-allowed.json', 'pip-allowed.json')) {
     $src = Join-Path $PSScriptRoot $allowlist
     if (Test-Path -LiteralPath $src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $OutputDir $allowlist) -Force

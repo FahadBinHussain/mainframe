@@ -12,7 +12,7 @@ It can also restore native Windows apps that should not be Scoop-owned. These ar
 - Installed Scoop apps and held-package metadata
 - Scoop persisted app data from `$SCOOP\persist`
 - Native app installers and settings described in `native-apps.json`
-- Optional encrypted tool auth/config from `tool-secrets.manifest.json`
+- Optional encrypted tool auth/config from `tool-secrets.manifest.json` (for tools not yet on vault-native secrets: gcloud, gws, firebase, tailscale, telegram, whatsapp, microsoft, bitwarden session)
 - Optional user-managed Agent skills from `%USERPROFILE%\.agents\skills`
 - Optional Windsurf app data from `%USERPROFILE%\.codeium\windsurf`
 - Optional Git global config from `%USERPROFILE%\.gitconfig`
@@ -23,8 +23,9 @@ It can also restore native Windows apps that should not be Scoop-owned. These ar
 - `restore.ps1` restores Scoop, persisted settings, buckets, apps, native app exceptions, and encrypted secrets from `mainframe-backup.zip`
 - `backup-secrets.ps1` creates standalone `tool-secrets.zip` from the paths in `tool-secrets.manifest.json` (used by `restore-secrets.ps1`)
 - `restore-secrets.ps1` restores `tool-secrets.zip` and backs up overwritten targets first
+- `vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
 - `account-contract.ps1` checks that every `*-account.ps1` helper keeps the shared mainframe account command contract
-- `scoop-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, and `go-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot
+- `scoop-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`, and `pip-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot
 - `vercel-account.ps1` manages separate token-only Vercel CLI profiles by email
 - `neon-account.ps1` manages separate Neon CLI profiles by email using Neon CLI's per-profile config directory support
 - `gws-account.ps1` manages separate Google Workspace CLI profiles by email using `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; it also reuses those OAuth profiles for Google Search Console API commands

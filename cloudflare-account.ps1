@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\cloudflare'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.cloudflare.com/client/v4'
@@ -243,7 +245,8 @@ function Write-ProfileTokenValue {
     $normalized = Normalize-ProfileName -Profile $Profile
     $profilePath = Get-ProfilePath -Profile $normalized
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
-    $Token.Trim() | Set-Content -LiteralPath (Get-TokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $userPrefix = ($normalized -split '@')[0]
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'dash.cloudflare.com' -Header '[API Tokens]' -Value $Token.Trim() -ItemName 'dash.cloudflare.com' -Username $normalized -Uri 'https://dash.cloudflare.com/profile/api-tokens'
     if (-not [string]::IsNullOrWhiteSpace($AccountId)) {
         $AccountId.Trim() | Set-Content -LiteralPath (Get-AccountIdPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
     }
@@ -288,15 +291,9 @@ function Read-ProfileToken {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    $profilePath = Get-ProfilePath -Profile $normalized
-    $tokenPath = Get-TokenPath -ProfilePath $profilePath
-    if (-not (Test-Path -LiteralPath $tokenPath)) {
-        throw "Cloudflare API token does not exist for profile: $normalized. Run .\cloudflare-account.ps1 token-add for API calls, or use .\cloudflare-account.ps1 run/whoami if this is a browser-login profile."
-    }
-
-    $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'dash.cloudflare.com' -ValueRegex 'cfut_[A-Za-z0-9]+'
     if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "Cloudflare token profile is empty: $normalized"
+        throw "Cloudflare API token does not exist for profile: $normalized. Run .\cloudflare-account.ps1 token-add for API calls, or use .\cloudflare-account.ps1 run/whoami if this is a browser-login profile."
     }
 
     return $token
@@ -676,7 +673,8 @@ function Get-ProfileStatus {
     $wranglerStatePath = Get-WranglerStatePath -ProfilePath $profilePath
     $accountId = Read-ProfileAccountId -Profile $normalized
     $exists = Test-Path -LiteralPath $profilePath
-    $hasToken = Test-Path -LiteralPath $tokenPath
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'dash.cloudflare.com' -ValueRegex 'cfut_[A-Za-z0-9]+'
+    $hasToken = -not [string]::IsNullOrWhiteSpace($token)
     $hasWranglerState = Test-Path -LiteralPath $wranglerStatePath
     $active = Get-ActiveProfile
 
@@ -857,7 +855,7 @@ switch ($command) {
 
         $profile = Normalize-ProfileName -Profile $remaining[0]
         $profilePath = Get-ProfilePath -Profile $profile
-        $hasToken = Test-Path -LiteralPath (Get-TokenPath -ProfilePath $profilePath)
+        $hasToken = -not [string]::IsNullOrWhiteSpace((Read-VaultSecret -Email $profile -NamePattern 'dash.cloudflare.com' -ValueRegex 'cfut_[A-Za-z0-9]+'))
         $hasWranglerState = Test-Path -LiteralPath (Get-WranglerStatePath -ProfilePath $profilePath)
         if (-not ($hasToken -or $hasWranglerState)) {
             throw "Cloudflare profile does not exist yet: $profile"

@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\github'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.github.com'
@@ -221,7 +223,9 @@ function Write-ProfileTokenValue {
     $normalized = Normalize-ProfileName -Profile $Profile
     $profilePath = Get-ProfilePath -Profile $normalized
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
-    $Token.Trim() | Set-Content -LiteralPath (Get-TokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $userPrefix = ($normalized -split '@')[0]
+    $vaultName = if ($GitHubLogin) { "github.com - $GitHubLogin" } else { "github.com - $userPrefix" }
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'github.com*' -Header '[tokens]' -Value $Token.Trim() -ItemName $vaultName -Username $GitHubLogin -Uri 'https://github.com/settings/tokens'
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath -GitHubLogin $GitHubLogin
     Set-ActiveProfile -Profile $normalized
 }
@@ -230,16 +234,7 @@ function Read-ProfileToken {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    $profilePath = Get-ProfilePath -Profile $normalized
-    $tokenPath = Get-TokenPath -ProfilePath $profilePath
-    if (Test-Path -LiteralPath $tokenPath) {
-        $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($token)) {
-            return $token
-        }
-    }
-
-    return $null
+    return Read-VaultSecret -Email $normalized -NamePattern 'github.com*' -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
 }
 
 function Invoke-WithGitHubProfile {

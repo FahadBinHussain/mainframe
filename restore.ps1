@@ -643,6 +643,23 @@ foreach ($pkg in $uvPackages) {
 }
 Write-Host "Done: $($uvPackages.Count) uv tools"
 
+Update-Step 'Installing pip packages'
+$pipAllowedFile = Get-MainframeConfigPath -FileName 'pip-allowed.json'
+$pipCmd = Get-Command pip -ErrorAction SilentlyContinue
+if (-not $pipCmd) {
+    throw 'pip command was not found after Scoop restore.'
+}
+$pipPackages = @((Get-Content -LiteralPath $pipAllowedFile -Raw | ConvertFrom-Json).packages | Where-Object { $_ })
+Write-Host "Using pip allowlist: $pipAllowedFile ($($pipPackages.Count) packages)"
+foreach ($pkg in $pipPackages) {
+    Write-Host "Installing pip package: $pkg"
+    & $pipCmd.Source install $pkg
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "pip install $pkg failed with exit code $LASTEXITCODE. Skipping."
+    }
+}
+Write-Host "Done: $($pipPackages.Count) pip packages"
+
 Update-Step 'Restoring OBS Studio settings'
 $obsBackupDir = Join-Path $BackupRoot 'obs-studio'
 if (Test-Path -LiteralPath $obsBackupDir) {

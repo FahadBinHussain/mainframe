@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\supabase'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.supabase.com'
@@ -136,7 +138,9 @@ function Write-ProfileToken {
     $normalized = Normalize-ProfileName -Profile $Profile
     $profilePath = Get-ProfilePath -Profile $normalized
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
-    Convert-SecureStringToPlainText -SecureString $Token | Set-Content -LiteralPath (Get-ProfileTokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $plainToken = Convert-SecureStringToPlainText -SecureString $Token
+    $userPrefix = ($normalized -split '@')[0]
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'supabase.com*' -Header 'Access Tokens' -Value $plainToken.Trim() -ItemName "supabase.com - $userPrefix" -Username $normalized -Uri 'https://supabase.com/dashboard/account/tokens'
     Set-ActiveProfile -Profile $normalized
 }
 
@@ -144,15 +148,9 @@ function Read-ProfileToken {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    $profilePath = Get-ProfilePath -Profile $normalized
-    $tokenPath = Get-ProfileTokenPath -ProfilePath $profilePath
-    if (-not (Test-Path -LiteralPath $tokenPath)) {
-        throw "Supabase token profile does not exist yet: $normalized. Run .\supabase-account.ps1 login $normalized first."
-    }
-
-    $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'supabase.com*' -ValueRegex 'sbp_v0_[A-Za-z0-9]+'
     if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "Supabase token profile is empty: $normalized"
+        throw "Supabase token profile does not exist yet: $normalized. Run .\supabase-account.ps1 login $normalized first."
     }
 
     return $token
@@ -238,8 +236,8 @@ function Get-ProfileStatus {
     $profilePath = Get-ProfilePath -Profile $normalized
     $tokenPath = Get-ProfileTokenPath -ProfilePath $profilePath
     $exists = Test-Path -LiteralPath $profilePath
-    $hasToken = Test-Path -LiteralPath $tokenPath
-    $token = if ($hasToken) { (Get-Content -LiteralPath $tokenPath -Raw).Trim() } else { $null }
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'supabase.com*' -ValueRegex 'sbp_v0_[A-Za-z0-9]+'
+    $hasToken = -not [string]::IsNullOrWhiteSpace($token)
     $active = Get-ActiveProfile
 
     [pscustomobject]@{

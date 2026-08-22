@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\uptimerobot'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.uptimerobot.com'
@@ -143,7 +145,8 @@ function Write-ProfileKey {
     $normalized = Normalize-ProfileName -Profile $Profile
     $profilePath = Get-ProfilePath -Profile $normalized
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
-    Convert-SecureStringToPlainText -SecureString $Token | Set-Content -LiteralPath (Get-ProfileKeyPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $plainToken = Convert-SecureStringToPlainText -SecureString $Token
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'uptimerobot.com' -Header '[api key]' -Value $plainToken.Trim() -ItemName 'uptimerobot.com' -Username $normalized -Uri 'https://uptimerobot.com/dashboard#mySettings'
     Set-ActiveProfile -Profile $normalized
 }
 
@@ -151,15 +154,9 @@ function Read-ProfileKey {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    $profilePath = Get-ProfilePath -Profile $normalized
-    $keyPath = Get-ProfileKeyPath -ProfilePath $profilePath
-    if (-not (Test-Path -LiteralPath $keyPath)) {
-        throw "UptimeRobot API key profile does not exist yet: $normalized. Run .\uptimerobot-account.ps1 token-add $normalized first."
-    }
-
-    $token = (Get-Content -LiteralPath $keyPath -Raw).Trim()
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'uptimerobot.com' -ValueRegex 'u\d{4,}-[0-9a-f]+'
     if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "UptimeRobot API key profile is empty: $normalized"
+        throw "UptimeRobot API key profile does not exist yet: $normalized. Run .\uptimerobot-account.ps1 token-add $normalized first."
     }
 
     return $token
@@ -245,8 +242,8 @@ function Get-ProfileStatus {
     $profilePath = Get-ProfilePath -Profile $normalized
     $keyPath = Get-ProfileKeyPath -ProfilePath $profilePath
     $exists = Test-Path -LiteralPath $profilePath
-    $hasApiKey = Test-Path -LiteralPath $keyPath
-    $token = if ($hasApiKey) { (Get-Content -LiteralPath $keyPath -Raw).Trim() } else { $null }
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'uptimerobot.com' -ValueRegex 'u\d{4,}-[0-9a-f]+'
+    $hasApiKey = -not [string]::IsNullOrWhiteSpace($token)
     $active = Get-ActiveProfile
 
     [pscustomobject]@{

@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\neon'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiBase = 'https://console.neon.tech/api/v2'
@@ -359,7 +361,8 @@ function Write-ProfileApiKeyValue {
 
     $profilePath = Get-ProfilePath -Email $detectedEmail
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
-    $ApiKey.Trim() | Set-Content -LiteralPath (Get-ApiKeyPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $userPrefix = ($detectedEmail -split '@')[0]
+    Write-VaultSecretToExisting -Email $detectedEmail -NamePattern 'console.neon.tech*' -Header '[api keys]' -Value $ApiKey.Trim() -ItemName "console.neon.tech - $userPrefix" -Username $detectedEmail -Uri 'https://console.neon.tech/app/settings#password'
     Write-ProfileMetadata -Email $detectedEmail -ProfilePath $profilePath -AuthType 'api-key' -Authority $authority
     Set-ActiveEmail -Email $detectedEmail
     $label = if ($authority.FullAuthority) { 'full-authority' } else { 'limited' }
@@ -380,18 +383,7 @@ function Read-ProfileApiKey {
     param([string]$Email)
 
     $normalized = Normalize-Email -Email $Email
-    $profilePath = Get-ProfilePath -Email $normalized
-    $apiKeyPath = Get-ApiKeyPath -ProfilePath $profilePath
-    if (-not (Test-Path -LiteralPath $apiKeyPath)) {
-        return $null
-    }
-
-    $apiKey = (Get-Content -LiteralPath $apiKeyPath -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($apiKey)) {
-        return $null
-    }
-
-    return $apiKey
+    return Read-VaultSecret -Email $normalized -NamePattern 'console.neon.tech*' -ValueRegex 'napi_[A-Za-z0-9]+'
 }
 
 function Invoke-NeonProfile {
@@ -861,7 +853,7 @@ function Get-ProfileStatus {
         $configItems = @(Get-ChildItem -LiteralPath $profilePath -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'profile.json' })
     }
     $apiKeyPath = if ($exists) { Get-ApiKeyPath -ProfilePath $profilePath } else { $null }
-    $hasApiKey = $apiKeyPath -and (Test-Path -LiteralPath $apiKeyPath) -and -not [string]::IsNullOrWhiteSpace((Get-Content -LiteralPath $apiKeyPath -Raw))
+    $hasApiKey = -not [string]::IsNullOrWhiteSpace((Read-ProfileApiKey -Email $normalized))
 
     [pscustomobject]@{
         Email = $normalized

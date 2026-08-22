@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\notion'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.notion.com'
@@ -295,7 +297,7 @@ function Write-ProfileTokenValue {
     $normalized = Normalize-ProfileName -Profile $Profile
     $profilePath = Get-ProfilePath -Profile $normalized
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
-    $Token.Trim() | Set-Content -LiteralPath (Get-TokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'www.notion.so' -Header '[token]' -Value $Token.Trim() -ItemName 'www.notion.so' -Username $normalized -Uri 'https://www.notion.so/my-integrations'
     if (-not [string]::IsNullOrWhiteSpace($WorkspaceId)) {
         $WorkspaceId.Trim() | Set-Content -LiteralPath (Get-WorkspaceIdPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
     }
@@ -308,16 +310,7 @@ function Read-ProfileToken {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    $profilePath = Get-ProfilePath -Profile $normalized
-    $tokenPath = Get-TokenPath -ProfilePath $profilePath
-    if (Test-Path -LiteralPath $tokenPath) {
-        $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
-        if (-not [string]::IsNullOrWhiteSpace($token)) {
-            return $token
-        }
-    }
-
-    return $null
+    return Read-VaultSecret -Email $normalized -NamePattern 'www.notion.so' -ValueRegex '(ntn_|secret_)[A-Za-z0-9]+'
 }
 
 function Invoke-WithNotionProfile {

@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\cronjob'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.cron-job.org'
@@ -151,7 +153,9 @@ function Write-ProfileToken {
     $normalized = Normalize-ProfileName -Profile $Profile
     $profilePath = Get-ProfilePath -Profile $normalized
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
-    Convert-SecureStringToPlainText -SecureString $Token | Set-Content -LiteralPath (Get-ProfileTokenPath -ProfilePath $profilePath) -NoNewline -Encoding UTF8
+    $plainToken = Convert-SecureStringToPlainText -SecureString $Token
+    $userPrefix = ($normalized -split '@')[0]
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'console.cron-job.org' -Header '[api keys]' -Value $plainToken.Trim() -ItemName "console.cron-job.org - $userPrefix" -Username $normalized -Uri 'https://console.cron-job.org/settings/api'
     Set-ActiveProfile -Profile $normalized
 }
 
@@ -159,15 +163,9 @@ function Read-ProfileToken {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    $profilePath = Get-ProfilePath -Profile $normalized
-    $tokenPath = Get-ProfileTokenPath -ProfilePath $profilePath
-    if (-not (Test-Path -LiteralPath $tokenPath)) {
-        throw "cron-job.org API key profile does not exist yet: $normalized. Run .\cronjob-account.ps1 token-add $normalized first."
-    }
-
-    $token = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'console.cron-job.org' -ValueRegex '[A-Za-z0-9+/]{20,}={0,2}'
     if ([string]::IsNullOrWhiteSpace($token)) {
-        throw "cron-job.org API key profile is empty: $normalized"
+        throw "cron-job.org API key profile does not exist yet: $normalized. Run .\cronjob-account.ps1 token-add $normalized first."
     }
 
     return $token
@@ -253,8 +251,8 @@ function Get-ProfileStatus {
     $profilePath = Get-ProfilePath -Profile $normalized
     $tokenPath = Get-ProfileTokenPath -ProfilePath $profilePath
     $exists = Test-Path -LiteralPath $profilePath
-    $hasApiKey = Test-Path -LiteralPath $tokenPath
-    $token = if ($hasApiKey) { (Get-Content -LiteralPath $tokenPath -Raw).Trim() } else { $null }
+    $token = Read-VaultSecret -Email $normalized -NamePattern 'console.cron-job.org' -ValueRegex '[A-Za-z0-9+/]{20,}={0,2}'
+    $hasApiKey = -not [string]::IsNullOrWhiteSpace($token)
     $active = Get-ActiveProfile
 
     [pscustomobject]@{
