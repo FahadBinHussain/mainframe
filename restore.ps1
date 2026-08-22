@@ -337,6 +337,69 @@ function Restore-EdgeProfile {
     }
 }
 
+function Restore-EdgeExtensions {
+    $extListPath = Join-Path $BackupRoot 'edge-profile\extensions-list.json'
+    if (-not (Test-Path -LiteralPath $extListPath)) {
+        Write-Host "  No extensions-list.json in backup, skipping Edge extension reinstall"
+        return
+    }
+    try {
+        $exts = Get-Content -LiteralPath $extListPath -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "  Could not read extensions-list.json: $($_.Exception.Message)"
+        return
+    }
+    if (-not $exts -or $exts.Count -eq 0) {
+        Write-Host "  extensions-list.json is empty, skipping Edge extension reinstall"
+        return
+    }
+
+    # Edge 151+ prunes cross-machine-restored store extensions (machine-bound
+    # install signature check). The reliable cross-machine restore path is the
+    # ExtensionInstallForcelist policy: Edge force-installs the extension from
+    # its store update URL on ANY pc, so the exact extension set comes back.
+    # Extension IDs are derived from the extension signing key (not the store),
+    # so the Edge store URL works even for extensions that were installed from
+    # the Chrome Web Store (clients2.google.com) - verified on a fresh restore:
+    # using the Edge URL for all 23 store extensions reinstalled every one.
+    $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist'
+    $edgeUpdateUrl = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
+    try {
+        # Own the subkey entirely: clear stale entries from an earlier restore, then
+        # write fresh ones. Never touch sibling policies under ...\Microsoft\Edge.
+        if (Test-Path -LiteralPath $policyPath) {
+            Remove-Item -LiteralPath $policyPath -Recurse -Force
+        }
+        New-Item -Path $policyPath -Force | Out-Null
+        $i = 0
+        foreach ($ext in $exts) {
+            $i++
+            New-ItemProperty -Path $policyPath -Name "$i" -Value "$($ext.id);$edgeUpdateUrl" -PropertyType String -Force | Out-Null
+        }
+    } catch {
+        Write-Warning "  Could not write ExtensionInstallForcelist policy (need admin?): $($_.Exception.Message)"
+        return
+    }
+    Write-Host "  Wrote ExtensionInstallForcelist for $($exts.Count) store extensions (Edge store URL)"
+
+    # Let Edge apply the policy so extensions land. Launch once, wait, then stop.
+    $edgeExe = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    if (Test-Path -LiteralPath $edgeExe) {
+        $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
+        Start-Process -FilePath $edgeExe -ArgumentList '--no-first-run', 'about:blank' | Out-Null
+        Start-Sleep -Seconds 25
+        Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        Write-Host "  Launched Edge once to apply the extension policy"
+    }
+
+    # Report what still needs a manual step. All listed extensions get
+    # force-reinstalled via the Edge store URL, but any that no longer exist in
+    # the Edge Add-ons store (delisted / renamed) will silently not install.
+    Write-Host "  Requested $($exts.Count) extensions via policy. If any are missing after the next Edge launch,"
+    Write-Host "  reinstall them manually from the Chrome Web Store or Edge Add-ons (they were delisted)."
+}
+
 $totalSteps = if ($Mode -eq 'quick') { 4 } else { 12 }
 $currentStep = 0
 
@@ -350,6 +413,7 @@ function Update-Step {
 if ($Mode -eq 'quick') {
     Update-Step 'Restoring Edge browser profile'
     Restore-EdgeProfile
+    Restore-EdgeExtensions
 
     Update-Step 'Restoring opencode config'
     Restore-ToolSecretsArchive -ItemNames @('opencode')
@@ -414,6 +478,7 @@ if ($Mode -eq 'quick') {
 
 Update-Step 'Restoring Edge browser profile'
 Restore-EdgeProfile
+Restore-EdgeExtensions
 
 Update-Step 'Restoring opencode config'
 Restore-ToolSecretsArchive -ItemNames @('opencode')

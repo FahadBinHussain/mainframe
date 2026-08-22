@@ -564,6 +564,41 @@ if (Test-Path -LiteralPath $edgeUserData) {
     Write-Warning "Edge User Data not found: $edgeUserData"
 }
 
+# Extract the store-installed extension list from the backed-up profile so a
+# restore on a DIFFERENT pc can force-reinstall them from the store. Edge 151+
+# validates store-extension install signatures against the machine ID (RLZ) -
+# a profile restored on another pc fails that check and Edge silently removes
+# every loc=1 store extension on first launch. The extension FILES and settings
+# we copy can't survive that, but the store reinstall via ExtensionInstallForcelist
+# policy can (see restore.ps1 Restore-EdgeExtensions).
+$edgeBackupProfile = Join-Path $OutputDir 'edge-profile\Default\Secure Preferences'
+if (Test-Path -LiteralPath $edgeBackupProfile) {
+    try {
+        $edgeSp = Get-Content -LiteralPath $edgeBackupProfile -Raw | ConvertFrom-Json
+        $edgeStoreExts = @()
+        if ($edgeSp.extensions.settings.PSObject.Properties) {
+            foreach ($prop in $edgeSp.extensions.settings.PSObject.Properties) {
+                $ext = $prop.Value
+                if ($ext.location -eq 1 -and $ext.manifest.update_url) {
+                    $edgeStoreExts += [pscustomobject]@{
+                        id         = $prop.Name
+                        name       = $ext.manifest.name
+                        update_url = $ext.manifest.update_url
+                        version    = $ext.manifest.version
+                    }
+                }
+            }
+        }
+        $edgeExtListPath = Join-Path $OutputDir 'edge-profile\extensions-list.json'
+        $edgeStoreExts | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $edgeExtListPath -Encoding UTF8
+        Write-Host "  Saved $($edgeStoreExts.Count) Edge store extensions to edge-profile\extensions-list.json"
+    } catch {
+        Write-Warning "Could not extract Edge extension list: $($_.Exception.Message)"
+    }
+} else {
+    Write-Host "  No Edge Secure Preferences found to extract extensions from"
+}
+
 Write-Host "Exporting scheduled tasks..."
 $tasksDir = Join-Path $OutputDir 'scheduled-tasks'
 New-Item -ItemType Directory -Force -Path $tasksDir | Out-Null
