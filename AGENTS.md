@@ -653,3 +653,14 @@ helper: `<repo>\supabase-account.ps1` (contract PASS). profiles at `%APPDATA%\ma
 - if an extension was delisted/renamed in the Edge Add-ons store, it silently won't install - reinstall manually from Chrome Web Store.
 - count grows across launches (first launch installs a batch, next ones finish the rest) - verify with `edge://extensions` or the Secure Preferences enabled count after 2-3 launches.
 - this does NOT apply to agent-browser's profile sync (different mechanism, see agent-browser section); that one prunes in a throwaway copy which is re-synced from real Edge each run.
+
+### unpacked (dev-mode, loc=4) extensions — the --load-extension bypass
+
+Edge 151+ prunes unpacked developer-mode extensions (loc=4) from a cross-machine profile exactly like store ones: the loc=4 entry in `Secure Preferences` is deleted on first launch, even with `extensions.ui.developer_mode=true` pre-set (which Edge also wipes). there is NO policy that force-loads a local folder, so the forcelist trick doesn't apply to them.
+
+**the bypass (verified on the desktop)**: launch Edge once with `--load-extension=<path1>,<path2>,...`. Edge registers each as **loc=8 (command-line loaded)** which PERSISTS across plain relaunches (no flag needed afterward). measured: 6 unpacked extensions restored, 5 kept their original IDs, 1 (a manifest without a `key` field) got a path-derived ID (case of the target user dir differs). all were enabled and survived 3+ plain relaunches.
+
+**how backup/restore handle it**:
+- backup.ps1: reads loc=4 entries from the backed-up `Secure Preferences`, copies each source folder into `edge-profile\unpacked-extensions\<id>-<foldername>\`, and writes `edge-profile\unpacked-extensions.json` (id, name, original path, relative_path).
+- restore.ps1 `Restore-EdgeExtensions`: copies each folder back to its original path, then launches Edge once with `--load-extension=` for all restored paths.
+- extension IDs for loc=4 come from the manifest `key` when present; without a `key`, the ID is path-derived (case-sensitive), so the target user dir case must match the source (e.g. `Admin` vs `admin`) to keep the SAME id - otherwise the extension works but under a different id.
