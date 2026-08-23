@@ -358,49 +358,54 @@ function Restore-EdgeExtensions {
     # install signature check). The cross-machine restore path differs for
     # ENABLED vs DISABLED extensions:
     #
-    # ENABLED -> ExtensionInstallForcelist policy. Edge force-installs from the
-    # Edge store update URL. NOTE: only works for extensions the Edge Add-ons
-    # store hosts -- Chrome-Web-Store-only extensions return
-    # "error-unknownApplication" (verified) and silently never install.
+    # ENABLED (Edge-store) -> ExtensionInstallForcelist policy. Edge
+    # force-installs from the Edge store URL. The forcelist only accepts
+    # the Edge store URL -- CWS URLs are silently dropped by the policy handler.
     #
-    # DISABLED -> Windows registry external loader
-    # (HKLM\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions\<id>). The forcelist
-    # CANNOT preserve disabled state: force-installed extensions are re-enabled
-    # on every startup (ExtensionRegistrar::GetDisableReasonsOnInstalled returns
-    # {} for policy installs), so writing disable_reasons back does not stick.
-    # The registry loader installs as loc=6 (external pre-download), NOT
-    # policy-controlled: it loads disabled (dr=[8192] DISABLE_EXTERNAL_EXTENSION)
-    # and STAYS disabled across relaunches (verified on the desktop: 8/8).
+    # ENABLED (CWS-only) + DISABLED (any store) -> Windows registry external
+    # loader (HKLM\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions\<id>).
+    # The forcelist CANNOT preserve disabled state (GetDisableReasonsOnInstalled
+    # returns {} for policy installs). The registry loader installs as loc=6
+    # (external pre-download), NOT policy-controlled: it loads disabled
+    # (dr=[8192] DISABLE_EXTERNAL_EXTENSION) and STAYS disabled across
+    # relaunches (verified). For enabled CWS-only extensions, the registry
+    # loader also installs them disabled -- Edge re-downloads external
+    # extensions whenever Secure Preferences is rewritten (ConvertTo-Json
+    # triggers it), so ack_external can't be set via prefs edit. The user
+    # must enable them once in edge://extensions (one click each).
     # The update_url must be the extension's OWN store URL (from backup):
     # Edge store for Edge-store extensions, clients2.google.com for CWS-only.
-    $enabledExts = @($exts | Where-Object { -not $_.disable_reason })
+    $enabledEdgeExts = @($exts | Where-Object { -not $_.disable_reason -and $_.update_url -match 'edge.microsoft.com' })
+    $enabledCwsExts = @($exts | Where-Object { -not $_.disable_reason -and $_.update_url -match 'clients2.google.com' })
     $disabledExts = @($exts | Where-Object { $_.disable_reason })
     $regBase = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions'
     $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist'
     $edgeUpdateUrl = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
 
     try {
-        # Write forcelist for ENABLED extensions only.
+        # Write forcelist for ENABLED Edge-store extensions only.
         if (Test-Path -LiteralPath $policyPath) {
             Remove-Item -LiteralPath $policyPath -Recurse -Force
         }
         New-Item -Path $policyPath -Force | Out-Null
         $i = 0
-        foreach ($ext in $enabledExts) {
+        foreach ($ext in $enabledEdgeExts) {
             $i++
             New-ItemProperty -Path $policyPath -Name "$i" -Value "$($ext.id);$edgeUpdateUrl" -PropertyType String -Force | Out-Null
         }
-        Write-Host "  Wrote ExtensionInstallForcelist for $($enabledExts.Count) enabled store extensions"
+        Write-Host "  Wrote ExtensionInstallForcelist for $($enabledEdgeExts.Count) enabled Edge-store extensions"
     } catch {
         Write-Warning "  Could not write ExtensionInstallForcelist policy (need admin?): $($_.Exception.Message)"
         return
     }
 
-    # Write registry external loader keys for DISABLED extensions.
-    # Each uses its own update_url from the backup (Edge store or CWS).
+    # Write registry external loader keys for DISABLED extensions AND enabled
+    # CWS-only extensions (the Edge store can't serve CWS-only ones, so the
+    # forcelist path can't install them). Each uses its own update_url from the
+    # backup (Edge store or CWS).
     try {
         $regCount = 0
-        foreach ($ext in $disabledExts) {
+        foreach ($ext in ($enabledCwsExts + $disabledExts)) {
             $url = if ($ext.update_url) { $ext.update_url } else { $edgeUpdateUrl }
             $rk = "$regBase\$($ext.id)"
             if (Test-Path $rk) { Remove-Item $rk -Recurse -Force }
@@ -408,7 +413,7 @@ function Restore-EdgeExtensions {
             New-ItemProperty -Path $rk -Name 'update_url' -Value $url -PropertyType String -Force | Out-Null
             $regCount++
         }
-        Write-Host "  Wrote registry external loader keys for $regCount disabled extensions"
+        Write-Host "  Wrote registry external loader keys for $regCount extensions ($($enabledCwsExts.Count) enabled CWS, $($disabledExts.Count) disabled)"
     } catch {
         Write-Warning "  Could not write registry external loader keys: $($_.Exception.Message)"
     }
@@ -424,12 +429,15 @@ function Restore-EdgeExtensions {
         Write-Host "  Launched Edge once to apply extension policy"
     }
 
-    if ($enabledExts.Count -gt 0) {
-        Write-Host "  $($enabledExts.Count) enabled extensions requested via forcelist. If any are missing,"
-        Write-Host "  they may be Chrome-Web-Store-only (Edge store can't serve them)."
+    if ($enabledEdgeExts.Count -gt 0) {
+        Write-Host "  $($enabledEdgeExts.Count) enabled Edge-store extensions requested via forcelist."
     }
     if ($disabledExts.Count -gt 0) {
         Write-Host "  $($disabledExts.Count) disabled extensions restored via registry external loader (dr=8192, persistent)."
+    }
+    if ($enabledCwsExts.Count -gt 0) {
+        Write-Host "  $($enabledCwsExts.Count) Chrome-Web-Store-only extensions installed via registry loader but DISABLED."
+        Write-Host "  Enable them once in edge://extensions (one click each): $($enabledCwsExts.id -join ', ')"
     }
 
     # Unpacked developer-mode extensions (loc=4). Edge 151+ prunes these from a
