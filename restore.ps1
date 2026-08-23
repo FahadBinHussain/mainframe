@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ScoopRoot = $(if ($env:SCOOP) { $env:SCOOP } else { "$env:USERPROFILE\scoop" }),
     [string]$BackupRoot,
     [ValidateSet('quick', 'full')][string]$Mode,
@@ -9,7 +9,6 @@
     [hashtable]$CloneRepos = @{
         mainframe = 'https://github.com/<owner>/mainframe.git'
         automata  = 'https://github.com/<owner>/automata.git'
-        murmur    = 'https://github.com/<owner>/murmur.git'
     },
     [string]$DownloadsRoot = "$env:USERPROFILE\Downloads"
 )
@@ -860,16 +859,6 @@ if (-not (Test-Path -LiteralPath $automataDest)) {
     git -C $automataDest pull --ff-only
 }
 
-$murmurRepo = $CloneRepos['murmur']
-$murmurDest = Join-Path $DownloadsRoot 'murmur'
-if (-not (Test-Path -LiteralPath $murmurDest)) {
-    Write-Host "Cloning $murmurRepo to $murmurDest"
-    git clone $murmurRepo $murmurDest
-} else {
-    Write-Host "Murmur repo already exists at $murmurDest, pulling latest"
-    git -C $murmurDest pull --ff-only
-}
-
 Import-AppRegistryFile -AppName 'python' -RelativePath 'install-pep-514.reg'
 Import-AppRegistryFile -AppName '7zip' -RelativePath 'install-context.reg'
 
@@ -1086,3 +1075,4 @@ if (-not $wingetCmd) {
 
 Write-Progress -Activity 'Restoring mainframe' -Completed
 Write-Host 'Bootstrap complete. Restart PowerShell or log out/in if shell integration is not visible yet.'
+
