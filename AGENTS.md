@@ -574,7 +574,7 @@ nested `skills` dirs via `/XD skills` when archiving `~/.agents\skills`. if nest
 
 ## uptimerobot: status page + monitor helper
 
-helper: `<repo>\uptimerobot-account.ps1` (contract PASS). profiles at `%APPDATA%\mainframe\accounts\uptimerobot\<email>\` (api-key.txt).
+helper: `<repo>\..\automata\uptimerobot.com\uptimerobot-account.ps1` (moved to automata, contract PASS). profiles at `%APPDATA%\mainframe\accounts\uptimerobot\<email>\` (api-key.txt).
 
 ### v3 is the ONLY API that works for writes
 - v2 `/v2/newMonitor` returns HTTP 403 `access_denied: You are not allowed to use some settings with your current plan` on current accounts (all fields, even minimal). do NOT debug v2 - it is broken.
