@@ -355,34 +355,65 @@ function Restore-EdgeExtensions {
     }
 
     # Edge 151+ prunes cross-machine-restored store extensions (machine-bound
-    # install signature check). The reliable cross-machine restore path is the
-    # ExtensionInstallForcelist policy: Edge force-installs the extension from
-    # its store update URL on ANY pc, so the exact extension set comes back.
-    # Extension IDs are derived from the extension signing key (not the store),
-    # so the Edge store URL works even for extensions that were installed from
-    # the Chrome Web Store (clients2.google.com) - verified on a fresh restore:
-    # using the Edge URL for all 23 store extensions reinstalled every one.
+    # install signature check). The cross-machine restore path differs for
+    # ENABLED vs DISABLED extensions:
+    #
+    # ENABLED -> ExtensionInstallForcelist policy. Edge force-installs from the
+    # Edge store update URL. NOTE: only works for extensions the Edge Add-ons
+    # store hosts -- Chrome-Web-Store-only extensions return
+    # "error-unknownApplication" (verified) and silently never install.
+    #
+    # DISABLED -> Windows registry external loader
+    # (HKLM\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions\<id>). The forcelist
+    # CANNOT preserve disabled state: force-installed extensions are re-enabled
+    # on every startup (ExtensionRegistrar::GetDisableReasonsOnInstalled returns
+    # {} for policy installs), so writing disable_reasons back does not stick.
+    # The registry loader installs as loc=6 (external pre-download), NOT
+    # policy-controlled: it loads disabled (dr=[8192] DISABLE_EXTERNAL_EXTENSION)
+    # and STAYS disabled across relaunches (verified on the desktop: 8/8).
+    # The update_url must be the extension's OWN store URL (from backup):
+    # Edge store for Edge-store extensions, clients2.google.com for CWS-only.
+    $enabledExts = @($exts | Where-Object { -not $_.disable_reason })
+    $disabledExts = @($exts | Where-Object { $_.disable_reason })
+    $regBase = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions'
     $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist'
     $edgeUpdateUrl = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
+
     try {
-        # Own the subkey entirely: clear stale entries from an earlier restore, then
-        # write fresh ones. Never touch sibling policies under ...\Microsoft\Edge.
+        # Write forcelist for ENABLED extensions only.
         if (Test-Path -LiteralPath $policyPath) {
             Remove-Item -LiteralPath $policyPath -Recurse -Force
         }
         New-Item -Path $policyPath -Force | Out-Null
         $i = 0
-        foreach ($ext in $exts) {
+        foreach ($ext in $enabledExts) {
             $i++
             New-ItemProperty -Path $policyPath -Name "$i" -Value "$($ext.id);$edgeUpdateUrl" -PropertyType String -Force | Out-Null
         }
+        Write-Host "  Wrote ExtensionInstallForcelist for $($enabledExts.Count) enabled store extensions"
     } catch {
         Write-Warning "  Could not write ExtensionInstallForcelist policy (need admin?): $($_.Exception.Message)"
         return
     }
-    Write-Host "  Wrote ExtensionInstallForcelist for $($exts.Count) store extensions (Edge store URL)"
 
-    # Let Edge apply the policy so extensions land. Launch once, wait, then stop.
+    # Write registry external loader keys for DISABLED extensions.
+    # Each uses its own update_url from the backup (Edge store or CWS).
+    try {
+        $regCount = 0
+        foreach ($ext in $disabledExts) {
+            $url = if ($ext.update_url) { $ext.update_url } else { $edgeUpdateUrl }
+            $rk = "$regBase\$($ext.id)"
+            if (Test-Path $rk) { Remove-Item $rk -Recurse -Force }
+            New-Item -Path $rk -Force | Out-Null
+            New-ItemProperty -Path $rk -Name 'update_url' -Value $url -PropertyType String -Force | Out-Null
+            $regCount++
+        }
+        Write-Host "  Wrote registry external loader keys for $regCount disabled extensions"
+    } catch {
+        Write-Warning "  Could not write registry external loader keys: $($_.Exception.Message)"
+    }
+
+    # Let Edge apply the policies so extensions land. Launch once, wait, then stop.
     $edgeExe = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
     if (Test-Path -LiteralPath $edgeExe) {
         $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
@@ -390,46 +421,23 @@ function Restore-EdgeExtensions {
         Start-Sleep -Seconds 25
         Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
-        Write-Host "  Launched Edge once to apply the extension policy"
+        Write-Host "  Launched Edge once to apply extension policy"
     }
 
-    # Report what still needs a manual step. All listed extensions get
-    # force-reinstalled via the Edge store URL, but any that no longer exist in
-    # the Edge Add-ons store (delisted / renamed) will silently not install.
-    Write-Host "  Requested $($exts.Count) extensions via policy. If any are missing after the next Edge launch,"
-    Write-Host "  reinstall them manually from the Chrome Web Store or Edge Add-ons (they were delisted)."
-
-    # Re-apply the source machine's enable/disable state. The forcelist policy
-    # force-installs every extension as ENABLED, so extensions that were disabled
-    # on the source (disable_reasons captured by backup.ps1) would come back
-    # enabled. Writing disable_reasons back into Secure Preferences restores the
-    # exact state (verified: stays disabled across relaunches).
-    $spPath = Join-Path $edgeDest 'Default\Secure Preferences'
-    if (Test-Path -LiteralPath $spPath) {
-        try {
-            $sp = Get-Content -LiteralPath $spPath -Raw | ConvertFrom-Json
-            $disabledCount = 0
-            foreach ($ext in $exts) {
-                if ($ext.disable_reason) {
-                    $prop = $sp.extensions.settings.PSObject.Properties[$ext.id]
-                    if ($prop) {
-                        $prop.Value | Add-Member -NotePropertyName disable_reasons -NotePropertyValue $ext.disable_reason -Force
-                        $disabledCount++
-                    }
-                }
-            }
-            if ($disabledCount -gt 0) {
-                $sp | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $spPath -Encoding UTF8
-                Write-Host "  Re-applied disabled state to $disabledCount extensions (disable_reasons)"
-            }
-        } catch {
-            Write-Warning "  Could not re-apply extension disable state: $($_.Exception.Message)"
-        }
+    if ($enabledExts.Count -gt 0) {
+        Write-Host "  $($enabledExts.Count) enabled extensions requested via forcelist. If any are missing,"
+        Write-Host "  they may be Chrome-Web-Store-only (Edge store can't serve them)."
+    }
+    if ($disabledExts.Count -gt 0) {
+        Write-Host "  $($disabledExts.Count) disabled extensions restored via registry external loader (dr=8192, persistent)."
     }
 
     # Unpacked developer-mode extensions (loc=4). Edge 151+ prunes these from a
-    # cross-machine profile too, but --load-extension re-registers them as loc=8
-    # (command-line loaded) which PERSISTS across plain relaunches (verified).
+    # cross-machine profile too, and --load-extension re-registers them as loc=8
+    # (command-line loaded) -- but loc=8 is SKIPPED by InstalledLoader on plain
+    # relaunches (extension_registrar/installed_loader.cc), so command-line
+    # extensions only persist while the flag is passed. Kept as best-effort for
+    # dev-mode folders that need to exist on the target.
     # backup.ps1 copied the source folders to edge-profile\unpacked-extensions\
     # and wrote unpacked-extensions.json with their original source paths.
     $unpackedListPath = Join-Path $BackupRoot 'edge-profile\unpacked-extensions.json'

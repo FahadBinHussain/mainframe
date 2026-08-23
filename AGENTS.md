@@ -641,17 +641,40 @@ helper: `<repo>\supabase-account.ps1` (contract PASS). profiles at `%APPDATA%\ma
 - `run` restricts the host to `api.supabase.com` (path can be full URL or bare like `v1/projects`; bare paths get `/v1` prefixed).
 - profiles keyed by account email only — never store username/label/project-name fallbacks.
 
-## edge: cross-machine extension restore (ExtensionInstallForcelist)
+## edge: cross-machine extension restore (forcelist + registry external loader)
 
 **the problem**: Edge 151+ validates store-extension install signatures against the machine ID (`install_signer.cc` `HashWithMachineId` via RLZ). a profile restored on a DIFFERENT pc fails that check, and Edge silently removes every `location=1` store extension from `Secure Preferences` on first launch (measured 53 enabled -> 24, same on every attempt). extension FILES on disk survive (`Default\Extensions` still has 29 dirs) but the settings entries are wiped, so the extensions are gone. file-level fixes that do NOT work (all verified on the desktop): stripping `install_signature`/`microsoft_install_signature` from `Preferences`, stripping per-extension `installation_signature` from `Secure Preferences`, wiping `extensions.settings` entirely, setting `location=4`, deleting `Local State`, deleting `_metadata/verified_contents.json`, `icacls /reset`. the stored signature can never verify on another machine because the RLZ machine id differs.
 
-**the fix (works on any pc)**: reinstall from the store via `ExtensionInstallForcelist` policy. backup.ps1 extracts the `location=1` extension list (id + name + update_url) from the backed-up profile into `edge-profile\extensions-list.json`; restore.ps1 `Restore-EdgeExtensions` writes each `id;https://edge.microsoft.com/extensionwebstorebase/v1/crx` under `HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist` and launches Edge once to apply it. Edge then force-installs the extensions from the store on the target pc, replacing the pruned set. extension IDs are derived from the signing key, NOT the store, so the Edge store URL works for Chrome-Web-Store-installed extensions too (verified: all 23 store extensions returned via the Edge URL even though 13 originally came from clients2.google.com). extension data (`Local Extension Settings`, `IndexedDB`, `Extensions` dirs) is carried by the restore and reused because the reinstall keeps the same extension ID.
+**the fix**: TWO mechanisms depending on enable/disable state:
+
+### ENABLED store extensions — ExtensionInstallForcelist (same as before)
+
+policy reinstall from the Edge store. backup.ps1 extracts the `location=1` extension list (id, name, update_url, version, disable_reason) into `edge-profile\extensions-list.json`. restore.ps1 `Restore-EdgeExtensions` writes each enabled id to `HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist` with the Edge store URL. Edge force-installs them on the target pc.
+
+**CAVEAT**: the Edge store URL ONLY works for extensions the Edge Add-ons store hosts. Chrome-Web-Store-only extensions return `error-unknownApplication` from the Edge store and silently never install (verified with `Invoke-WebRequest` against the Edge store update URL — CWS-only extensions get `status="error-unknownApplication"` in the Omaha gupdate response). The older claim that "all 23 store extensions returned via the Edge URL" is WRONG. **CWS-only extensions (both enabled and disabled) are NOT installable via the Edge store URL.** The workaround is the registry external loader (see below).
+
+### DISABLED store extensions — Windows registry external loader
+
+**Why the forcelist can't preserve disabled state**: force-installed (policy) extensions are re-enabled on every startup. The root cause is `ExtensionRegistrar::GetDisableReasonsOnInstalled` in `extension_registrar.cc` — when `MustRemainEnabled` returns true (which it always does for policy-installed extensions), it returns `{}` (empty reasons), wiping any existing `disable_reasons` from prefs. Writing `disable_reasons` back into Secure Preferences does NOT help — the external provider re-triggers this install/update path every startup (`CheckForExternalUpdates` → `OnExternalExtensionUpdateUrlFound` → `AddNewOrUpdatedExtension` → `GetDisableReasonsOnInstalled` → `{}`). Verified empirically on the desktop: dr=[1] written to a force-installed extension gets wiped on the next relaunch.
+
+**The solution**: use Edge's Windows registry external loader (`ExternalRegistryLoaderWin`). The loader reads `HKLM\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions\<id>` (with `KEY_WOW64_32KEY` — the 32-bit registry view). The `update_url` value must be the extension's OWN store URL (from the backup's `update_url` field):
+
+- Edge-store extensions: `https://edge.microsoft.com/extensionwebstorebase/v1/crx`
+- CWS-only extensions: `https://clients2.google.com/service/update2/crx`
+
+The registry loader installs the extension as `location=6` (kExternalPrefDownload), which is NOT a policy location (`IsPolicyLocation` returns false). Therefore `AdminPolicyIsModifiable` returns true → `MustRemainEnabled` returns false → `GetDisableReasonsOnInstalled` inherits existing reasons. The extension loads as disabled with `disable_reasons=[8192]` (DISABLE_EXTERNAL_EXTENSION, pending user acknowledgment) and STAYS disabled across relaunches. Verified on the desktop: 8/8 disabled extensions installed this way remained disabled through 5+ relaunches.
+
+**Restore flow**:
+- For each extension in `extensions-list.json`:
+  - If `disable_reason` is empty → add to `ExtensionInstallForcelist` (Edge store URL).
+  - If `disable_reason` is non-empty → write registry key `HKLM:\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions\<id>` with `update_url` = the extension's own `update_url`.
 
 **caveats**:
-- the policy must STAY installed for the extensions to persist - removing the forcelist uninstalls some of them (measured 47 -> 44). the restore writes it to HKLM and leaves it; that's the intended end state (extensions show as "managed by your organization"). if the user wants to remove the policy later, they accept losing the force-installed extensions.
-- requires admin (HKLM write) and network (store download). fully offline restore cannot reinstall store extensions.
-- if an extension was delisted/renamed in the Edge Add-ons store, it silently won't install - reinstall manually from Chrome Web Store.
-- count grows across launches (first launch installs a batch, next ones finish the rest) - verify with `edge://extensions` or the Secure Preferences enabled count after 2-3 launches.
+- registry keys + forcelist must STAY installed for the extensions to persist. removing the forcelist uninstalls the enabled ones; removing the registry keys uninstalls the disabled ones (Edge treats them as orphaned external extensions).
+- requires admin (HKLM write) and network (store download). fully offline restore cannot reinstall extensions.
+- the Edge store URL **does not serve CWS-only extensions**. If any of the ENABLED extensions are CWS-only (many are — 7 of 15 in testing), the forcelist silently skips them. A future fix could use the registry external loader for ALL CWS-only extensions (both enabled and disabled), with `ack_external: true` written to the settings entry to install them ENABLED (the `IsExternalExtensionAcknowledged` check in `GetDisableReasonsOnInstalled` suppresses the 8192 disable when true). This needs verification on the desktop.
+- count grows across launches (first launch installs a batch, next ones finish the rest) — verify with `edge://extensions` or the Secure Preferences enabled count after 2-3 launches.
+- `--load-extension` (loc=8) does NOT persist across plain relaunches — `InstalledLoader::LoadAllExtensions` explicitly skips `kCommandLine` extensions (`if (info.extension_location == mojom::ManifestLocation::kCommandLine) continue;`). The mainframe notes claiming it persisted were WRONG. Verified on the desktop: loc=8 entries vanished on the next relaunch without the flag.
 - this does NOT apply to agent-browser's profile sync (different mechanism, see agent-browser section); that one prunes in a throwaway copy which is re-synced from real Edge each run.
 
 ### unpacked (dev-mode, loc=4) extensions — the --load-extension bypass
