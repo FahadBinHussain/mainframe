@@ -176,6 +176,9 @@ endpoints that do NOT exist: `/api/v2/orgs`, `/api/v2/users/me/orgs`, `/api/v2/u
    this is the only place to get authoritative `compute_time_seconds`, `consumption_period_start/end`, `default_endpoint_settings`, and `owner.subscription_type`.
 6. compute per project: `cu_h_used = compute_time_seconds / 3600`, `cu_h_left = (360000 - compute_time_seconds) / 3600`. status OVER >= 100%, LOW >= 85%, else OK.
 
+### gotcha: native stderr aborts restore under Windows PowerShell 5.1
+`restore.ps1` sets `$ErrorActionPreference='Stop'`. In PS 5.1, ANY native command stderr line becomes an error record, and under 'Stop' that terminates the whole restore. Commands like `uv tool install` ("already installed"), `reg.exe import` ("The operation completed successfully."), and `git` (divergence hints) all write to stderr and silently killed the restore at those points. The fix is `Invoke-Native` helper (line 134): it runs the command with `$ErrorActionPreference='Continue'` temporarily and `2>&1 | Out-Host` so stderr lines are displayed but don't terminate. Wrap every new native-command call in `Invoke-Native` or the savedEap pattern, NOT bare `& cmd`. Checked call sites as of 2026-08-23: git, reg, go, winget, uv, pip are wrapped; robocopy and scoop/pnpm were empirically safe (their stderr didn't trip). If a future restore step aborts mid-way, check for a bare `& <native>` call and wrap it.
+
 ### gotcha: neonctl is currently broken on windows under pnpm
 `neon-account.ps1 run`/`projects-json` still invoke `neonctl` via `& $neon.Source ...`. if neonctl was installed through `pnpm add -g neonctl`, only a `/bin/sh` shell shim is left at `scoop\apps\pnpm\current\bin\neonctl` with no matching `neonctl.cmd`/`neonctl.ps1`, pointing at a `global/.../node_modules/neonctl/dist/cli.js` that may not exist. under pwsh on windows these shims can't run, so the scripts silently fail. sanity-check: if a script reports 0 projects for every account, the neonctl call almost certainly failed.
 
@@ -679,7 +682,7 @@ The registry loader installs the extension as `location=6` (kExternalPrefDownloa
 
 Edge 151+ prunes unpacked developer-mode extensions (loc=4) from a cross-machine profile exactly like store ones: the loc=4 entry in `Secure Preferences` is deleted on first launch, even with `extensions.ui.developer_mode=true` pre-set (which Edge also wipes). there is NO policy that force-loads a local folder, so the forcelist trick doesn't apply to them.
 
-**the bypass (verified on the desktop)**: launch Edge once with `--load-extension=<path1>,<path2>,...`. Edge registers each as **loc=8 (command-line loaded)** which PERSISTS across plain relaunches (no flag needed afterward). measured: 6 unpacked extensions restored, 5 kept their original IDs, 1 (a manifest without a `key` field) got a path-derived ID (case of the target user dir differs). all were enabled and survived 3+ plain relaunches.
+**the bypass (verified on the desktop)**: launch Edge once with `--load-extension=<path1>,<path2>,...`. Edge registers each as **loc=8 (command-line loaded)**. NOTE: loc=8 does NOT survive plain relaunches — `InstalledLoader` skips `kCommandLine` entries (`installed_loader.cc`), so the extensions only exist while the flag is passed. the older note claiming it "persists" was wrong; treat this as best-effort for dev-mode folders that must exist on the target, and expect to pass `--load-extension` each session.
 
 **how backup/restore handle it**:
 - backup.ps1: reads loc=4 entries from the backed-up `Secure Preferences`, copies each source folder into `edge-profile\unpacked-extensions\<id>-<foldername>\`, and writes `edge-profile\unpacked-extensions.json` (id, name, original path, relative_path).
