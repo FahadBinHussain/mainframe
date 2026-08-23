@@ -581,10 +581,11 @@ if (Test-Path -LiteralPath $edgeBackupProfile) {
                 $ext = $prop.Value
                 if ($ext.location -eq 1 -and $ext.manifest.update_url) {
                     $edgeStoreExts += [pscustomobject]@{
-                        id         = $prop.Name
-                        name       = $ext.manifest.name
-                        update_url = $ext.manifest.update_url
-                        version    = $ext.manifest.version
+                        id             = $prop.Name
+                        name           = $ext.manifest.name
+                        update_url     = $ext.manifest.update_url
+                        version        = $ext.manifest.version
+                        disable_reason = $ext.disable_reasons
                     }
                 }
             }

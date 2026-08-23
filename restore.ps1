@@ -338,6 +338,7 @@ function Restore-EdgeProfile {
 }
 
 function Restore-EdgeExtensions {
+    $edgeDest = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
     $extListPath = Join-Path $BackupRoot 'edge-profile\extensions-list.json'
     if (-not (Test-Path -LiteralPath $extListPath)) {
         Write-Host "  No extensions-list.json in backup, skipping Edge extension reinstall"
@@ -398,6 +399,34 @@ function Restore-EdgeExtensions {
     # the Edge Add-ons store (delisted / renamed) will silently not install.
     Write-Host "  Requested $($exts.Count) extensions via policy. If any are missing after the next Edge launch,"
     Write-Host "  reinstall them manually from the Chrome Web Store or Edge Add-ons (they were delisted)."
+
+    # Re-apply the source machine's enable/disable state. The forcelist policy
+    # force-installs every extension as ENABLED, so extensions that were disabled
+    # on the source (disable_reasons captured by backup.ps1) would come back
+    # enabled. Writing disable_reasons back into Secure Preferences restores the
+    # exact state (verified: stays disabled across relaunches).
+    $spPath = Join-Path $edgeDest 'Default\Secure Preferences'
+    if (Test-Path -LiteralPath $spPath) {
+        try {
+            $sp = Get-Content -LiteralPath $spPath -Raw | ConvertFrom-Json
+            $disabledCount = 0
+            foreach ($ext in $exts) {
+                if ($ext.disable_reason) {
+                    $prop = $sp.extensions.settings.PSObject.Properties[$ext.id]
+                    if ($prop) {
+                        $prop.Value | Add-Member -NotePropertyName disable_reasons -NotePropertyValue $ext.disable_reason -Force
+                        $disabledCount++
+                    }
+                }
+            }
+            if ($disabledCount -gt 0) {
+                $sp | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $spPath -Encoding UTF8
+                Write-Host "  Re-applied disabled state to $disabledCount extensions (disable_reasons)"
+            }
+        } catch {
+            Write-Warning "  Could not re-apply extension disable state: $($_.Exception.Message)"
+        }
+    }
 
     # Unpacked developer-mode extensions (loc=4). Edge 151+ prunes these from a
     # cross-machine profile too, but --load-extension re-registers them as loc=8
