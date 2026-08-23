@@ -14,6 +14,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Native commands (uv, pip, etc.) that write to stderr (e.g. "already
+# installed") would otherwise become terminating errors under Stop and abort
+# the whole restore. Let $LASTEXITCODE checks handle native failures instead.
+$PSNativeCommandUseErrorActionPreference = $false
 
 # robocopy /COPYALL (ACLs, owner, auditing) requires the "Manage Auditing" user
 # right, which only elevated shells have. Running non-elevated used to make every
@@ -122,6 +126,26 @@ function Invoke-Scoop {
     }
 }
 
+# Run a native command while suppressing $ErrorActionPreference='Stop' aborts
+# from native stderr. Windows PowerShell 5.1 turns ANY native stderr line into
+# an error record, and under 'Stop' that terminates the whole restore (seen
+# with `uv tool install` on an already-installed tool). Restore the caller's
+# preference afterwards so cmdlet errors still behave as the script intends.
+function Invoke-Native {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Arguments[0] @($Arguments | Select-Object -Skip 1) 2>&1 | Out-Host
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 function Get-PnpmCommand {
     $cmd = Get-Command pnpm -ErrorAction SilentlyContinue
     if ($cmd) {
@@ -183,14 +207,17 @@ function Import-AppRegistryFile {
         return
     }
 
+    $savedEapLocal = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $prefix = & $cmd prefix $AppName 2>$null
+    $ErrorActionPreference = $savedEapLocal
     if ($LASTEXITCODE -ne 0 -or -not $prefix) {
         return
     }
 
     $regFile = Join-Path $prefix $RelativePath
     if (Test-Path -LiteralPath $regFile) {
-        reg import $regFile
+        Invoke-Native reg import $regFile
     }
 }
 
@@ -800,7 +827,10 @@ $uvPackages = @((Get-Content -LiteralPath $uvAllowedFile -Raw | ConvertFrom-Json
 Write-Host "Using uv allowlist: $uvAllowedFile ($($uvPackages.Count) tools)"
 foreach ($pkg in $uvPackages) {
     Write-Host "Installing uv tool: $pkg"
-    & uv tool install $pkg
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & uv tool install $pkg 2>&1 | Out-Host
+    $ErrorActionPreference = $savedEap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "uv tool install $pkg failed with exit code $LASTEXITCODE. Skipping."
     }
@@ -817,7 +847,10 @@ $pipPackages = @((Get-Content -LiteralPath $pipAllowedFile -Raw | ConvertFrom-Js
 Write-Host "Using pip allowlist: $pipAllowedFile ($($pipPackages.Count) packages)"
 foreach ($pkg in $pipPackages) {
     Write-Host "Installing pip package: $pkg"
-    & $pipCmd.Source install $pkg
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $pipCmd.Source install $pkg 2>&1 | Out-Host
+    $ErrorActionPreference = $savedEap
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "pip install $pkg failed with exit code $LASTEXITCODE. Skipping."
     }
@@ -859,20 +892,20 @@ $mainframeRepo = $CloneRepos['mainframe']
 $mainframeDest = Join-Path $DownloadsRoot 'mainframe'
 if (-not (Test-Path -LiteralPath $mainframeDest)) {
     Write-Host "Cloning $mainframeRepo to $mainframeDest"
-    git clone $mainframeRepo $mainframeDest
+    Invoke-Native git clone $mainframeRepo $mainframeDest
 } else {
     Write-Host "Mainframe repo already exists at $mainframeDest, pulling latest"
-    git -C $mainframeDest pull --ff-only
+    Invoke-Native git -C $mainframeDest pull --ff-only
 }
 
 $automataRepo = $CloneRepos['automata']
 $automataDest = Join-Path $DownloadsRoot 'automata'
 if (-not (Test-Path -LiteralPath $automataDest)) {
     Write-Host "Cloning $automataRepo to $automataDest"
-    git clone $automataRepo $automataDest
+    Invoke-Native git clone $automataRepo $automataDest
 } else {
     Write-Host "Automata repo already exists at $automataDest, pulling latest"
-    git -C $automataDest pull --ff-only
+    Invoke-Native git -C $automataDest pull --ff-only
 }
 
 Import-AppRegistryFile -AppName 'python' -RelativePath 'install-pep-514.reg'
@@ -882,7 +915,7 @@ Import-AppRegistryFile -AppName '7zip' -RelativePath 'install-context.reg'
 $appAssoc = Get-ChildItem -LiteralPath $BackupRoot -Filter '*-assoc-*.reg' -ErrorAction SilentlyContinue
 foreach ($f in $appAssoc) {
     Write-Host "Importing $($f.Name)"
-    & reg.exe import $f.FullName | Out-Null
+    Invoke-Native reg.exe import $f.FullName
 }
 
 # mpv context menu ("Play with mpv") + user environment (PATH with python312 /
@@ -892,7 +925,7 @@ foreach ($mpvReg in @('mpv-contextmenu.reg', 'user-env.reg')) {
     $f = Join-Path $BackupRoot $mpvReg
     if (Test-Path -LiteralPath $f) {
         Write-Host "Importing $mpvReg"
-        & reg.exe import $f | Out-Null
+        Invoke-Native reg.exe import $f
     }
 }
 
@@ -982,7 +1015,7 @@ foreach ($pkg in @($goPkgImport.packages)) {
         $installArgs += @('-tags', ($tags -join ','))
     }
     $installArgs += "$pkgPath@$version"
-    & go @installArgs
+    Invoke-Native go @installArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "go $($installArgs -join ' ') failed with exit code $LASTEXITCODE. Skipping."
     } else {
@@ -1011,14 +1044,17 @@ if (-not $wingetCmd) {
     foreach ($pkg in @($wingetImport.packages)) {
         $pkgId = if ($pkg -is [string]) { $pkg } else { $pkg.id }
         # Check if already installed
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
         $existing = winget list --id $pkgId -e --accept-source-agreements 2>$null | Out-String
+        $ErrorActionPreference = $savedEap
         if ($LASTEXITCODE -eq 0 -and $existing -match [regex]::Escape($pkgId)) {
             Write-Host "Skip (installed): $pkgId"
             $skipped++
             continue
         }
         Write-Host "Installing winget package: $pkgId"
-        winget install --id $pkgId -e --scope machine --accept-package-agreements --accept-source-agreements 2>&1 | Out-Host
+        Invoke-Native winget install --id $pkgId -e --scope machine --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -ne 0) {
             # 0x8a150010 = APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER. manifests
             # with no declared Scope (Unknown) can never match a forced --scope machine
@@ -1026,7 +1062,7 @@ if (-not $wingetCmd) {
             # scope flag so winget uses the installer's own scope.
             if (([uint32]$LASTEXITCODE) -eq 0x8a150010) {
                 Write-Warning "winget install $pkgId failed with 0x8a150010 (no applicable installer for machine scope). Retrying without --scope..."
-                winget install --id $pkgId -e --accept-package-agreements --accept-source-agreements 2>&1 | Out-Host
+                Invoke-Native winget install --id $pkgId -e --accept-package-agreements --accept-source-agreements
                 if ($LASTEXITCODE -ne 0) {
                     Write-Warning "winget install $pkgId (unscoped retry) failed with exit code $LASTEXITCODE. Skipping."
                 } else {
