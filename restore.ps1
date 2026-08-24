@@ -1138,7 +1138,7 @@ if (Test-Path -LiteralPath $alistPatcher) {
 } else {
     Write-Warning "alist patcher not found: $alistPatcher"
 }
-$dittoPatcher = Join-Path $automata 'tools\alist-terabox\ditto-fork-build.ps1'
+$dittoPatcher = Join-Path $automata 'github.com\sabrogden\Ditto\ditto-fork-build.ps1'
 if (Test-Path -LiteralPath $dittoPatcher) {
     Write-Host 'Re-building Ditto from fork (starred-clips PRs)...'
     & pwsh -NoProfile -File $dittoPatcher 2>&1 | Write-Host
