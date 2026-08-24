@@ -625,20 +625,32 @@ if (Test-Path -LiteralPath $edgeBackupProfile) {
         if ($unpackedExts.Count -gt 0) {
             $unpackedDest = Join-Path $OutputDir 'edge-profile\unpacked-extensions'
             New-Item -ItemType Directory -Force -Path $unpackedDest | Out-Null
+            $withPaths = @()
             foreach ($ux in $unpackedExts) {
                 $src = $ux.path
+                $rel = $null
                 if (Test-Path -LiteralPath $src) {
                     $folderName = Split-Path -Leaf $src
                     $dest = Join-Path $unpackedDest "$($ux.id)-$folderName"
                     & robocopy $src $dest /E /COPYALL /R:1 /W:1 /NP /NDL /NFL | Out-Null
-                    $ux.relative_path = "$($ux.id)-$folderName"
+                    $rel = "$($ux.id)-$folderName"
                 } else {
                     Write-Warning "  Unpacked extension source not found: $src"
                 }
+                # Build the record in one shot so relative_path is always a member
+                # (mutating a hashtable-derived PSCustomObject via $ux.x = throws
+                # under StrictMode and previously swallowed the whole try block,
+                # leaving unpacked-extensions.json unwritten).
+                $withPaths += [pscustomobject]@{
+                    id            = $ux.id
+                    name          = $ux.name
+                    path          = $ux.path
+                    relative_path = $rel
+                }
             }
             $unpackedListPath = Join-Path $OutputDir 'edge-profile\unpacked-extensions.json'
-            $unpackedExts | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $unpackedListPath -Encoding UTF8
-            Write-Host "  Backed up $($unpackedExts.Count) unpacked dev-mode extensions to edge-profile\unpacked-extensions"
+            $withPaths | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $unpackedListPath -Encoding UTF8
+            Write-Host "  Backed up $($withPaths.Count) unpacked dev-mode extensions to edge-profile\unpacked-extensions"
         }
     } catch {
         Write-Warning "Could not extract unpacked extension info: $($_.Exception.Message)"
