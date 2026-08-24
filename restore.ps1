@@ -1131,7 +1131,7 @@ if (-not $wingetCmd) {
 # Both patchers live in automata; skip quietly if absent (backup may not include automata).
 Update-Step 'Re-applying local binary patches (alist, ditto)'
 $automata = Join-Path $env:USERPROFILE 'Downloads\automata'
-$alistPatcher = Join-Path $automata 'tools\alist-terabox\alist-terabox-patcher.ps1'
+$alistPatcher = Join-Path $automata 'github.com\AlistGo\alist\alist-terabox-patcher.ps1'
 if (Test-Path -LiteralPath $alistPatcher) {
     Write-Host 'Re-applying AList terabox patch...'
     & pwsh -NoProfile -File $alistPatcher -NoRestart 2>&1 | Write-Host
