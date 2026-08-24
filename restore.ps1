@@ -1125,6 +1125,27 @@ if (-not $wingetCmd) {
     }
 }
 
+# Re-apply local patches that the fresh scoop installs wipe out.
+# - alist: terabox dm-domain fix (scoop reinstalls official binary without the patch)
+# - ditto: user's merged-but-unreleased starred-clips PRs (scoop reinstalls official 3.25.113.0)
+# Both patchers live in automata; skip quietly if absent (backup may not include automata).
+Update-Step 'Re-applying local binary patches (alist, ditto)'
+$automata = Join-Path $env:USERPROFILE 'Downloads\automata'
+$alistPatcher = Join-Path $automata 'tools\alist-terabox\alist-terabox-patcher.ps1'
+if (Test-Path -LiteralPath $alistPatcher) {
+    Write-Host 'Re-applying AList terabox patch...'
+    & pwsh -NoProfile -File $alistPatcher -NoRestart 2>&1 | Write-Host
+} else {
+    Write-Warning "alist patcher not found: $alistPatcher"
+}
+$dittoPatcher = Join-Path $automata 'tools\alist-terabox\ditto-fork-build.ps1'
+if (Test-Path -LiteralPath $dittoPatcher) {
+    Write-Host 'Re-building Ditto from fork (starred-clips PRs)...'
+    & pwsh -NoProfile -File $dittoPatcher 2>&1 | Write-Host
+} else {
+    Write-Warning "ditto patcher not found: $dittoPatcher"
+}
+
 Write-Progress -Activity 'Restoring mainframe' -Completed
 Write-Host 'Bootstrap complete. Restart PowerShell or log out/in if shell integration is not visible yet.'
 

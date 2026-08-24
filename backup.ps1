@@ -370,6 +370,9 @@ if ($SkipPersist) {
                 Invoke-RobocopyLockedAware -RobocopyArgs $torRoboArgs -Context "persist tor-browser"
             } elseif ($item.Name -eq 'windhawk') {
                 Invoke-RobocopyLockedAware -RobocopyArgs @($item.FullName, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', 'Cache', 'CachedData', 'Service Worker', 'Code Cache', 'GPUCache') -Context "persist windhawk"
+            } elseif ($item.Name -eq 'ditto') {
+                # Ditto's clip DB can be huge (2GB+); keep settings, skip the DB.
+                Invoke-RobocopyLockedAware -RobocopyArgs @($item.FullName, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XF', 'Ditto.db') -Context "persist ditto"
             } else {
                 Invoke-RobocopyLockedAware -RobocopyArgs @($item.FullName, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL') -Context "persist $($item.Name)"
             }
