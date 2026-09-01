@@ -171,6 +171,14 @@ $body = @{ project = @{ name = '<new-project-name>'; region_id = '<region-id>'; 
 $r = Invoke-WebRequest -Uri 'https://console.neon.tech/api/v2/projects' -Method Post -Headers $headers -Body $body -ContentType 'application/json' -UseBasicParsing -SkipHttpErrorCheck
 # note: the response body contains project_id but the connection_uri field is empty — fetch it separately with the connection_uri endpoint above using the returned branch id
 ```
+
+### ⚠️ TRAP: creating a project returns 400 "org_id is required" even with ?org_id= query param
+witnessed 2026-09-01 when provisioning the taskflow db. the create-project endpoint does NOT accept `org_id` as a query parameter (`?org_id=org-...` → 400 "org_id is required"), and a top-level body field also fails. the `org_id` must go INSIDE the `project` body object:
+```powershell
+$body = @{ project = @{ name='<name>'; region_id='aws-ap-southeast-1'; pg_version=17; org_id='org-<id>' } } | ConvertTo-Json -Depth 3
+Invoke-WebRequest -Uri 'https://console.neon.tech/api/v2/projects' -Method Post -Headers $headers -Body $body -ContentType 'application/json' -UseBasicParsing -SkipHttpErrorCheck
+```
+note: the 201 response DOES include `connection_uris[0].connection_uri` on create (no need to fetch it separately when creating fresh).
 the only endpoints that exist for discovery are:
 - `GET /api/v2/users/me/organizations` (✅ the only org-listing endpoint — plural, full word)
 - `GET /api/v2/projects?org_id=<org_id>` (✅ requires org_id on v2)
