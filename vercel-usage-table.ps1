@@ -38,6 +38,9 @@
 #     VERCEL_USAGE_INCLUDE_PRO=1 and ensure the token has the right scope.
 
 $ErrorActionPreference = 'Stop'
+
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\vercel'
 $apiBase = 'https://api.vercel.com'
 
@@ -46,8 +49,10 @@ if (-not (Test-Path $accountRoot)) {
     exit 0
 }
 
+# email-shaped dirs only (matches vercel-account.ps1 Get-VercelProfileDirectories);
+# tokens are vault-native, so a profile without a vault entry is simply skipped.
 $accounts = Get-ChildItem $accountRoot -Directory |
-    Where-Object { $_.Name -match '^[^\s@]+@[^\s@]+\.[^\s@]+$' -or $_.Name -match '@vercel$' } |
+    Where-Object { $_.Name -match '^[^\s@]+@[^\s@]+\.[^\s@]+$' -and $_.Name -notmatch '\.(deleted|wrong|logged-out|backup)-' } |
     Select-Object -ExpandProperty Name
 
 # Time window for "recent deployments" count (last 30 days, unix ms)
@@ -58,9 +63,8 @@ $projectRows = @()
 $blockedRows = @()
 
 foreach ($email in $accounts) {
-    $tokenPath = Join-Path $accountRoot "$email\token.txt"
-    if (-not (Test-Path $tokenPath)) { continue }
-    $token = (Get-Content $tokenPath -Raw).Trim()
+    # vault-native token read (no token.txt in profile dirs since 2026-08-22)
+    $token = Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'
     if ([string]::IsNullOrWhiteSpace($token)) { continue }
     $headers = @{ 'Authorization' = "Bearer $token" }
 

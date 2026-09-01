@@ -1,5 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\tailscale'
 $currentFile = Join-Path $accountRoot 'current.json'
 
@@ -39,10 +41,10 @@ function Show-Usage {
         '  .\tailscale-account.ps1 restore [email]',
         '  .\tailscale-account.ps1 logout [email]',
         '',
-        'Fleet workflow (10 pcs, mainframe backup/restore):',
-        '  1. on one machine: key-add <email> <reusable-tskey-...>  (stored under',
-        '     %APPDATA%\mainframe\accounts\tailscale\<email>\authkey.txt - travels',
-        '     with the mainframe backup automatically)',
+        'Fleet workflow (N pcs, mainframe backup/restore):',
+        '  1. on one machine: key-add <email> <reusable-tskey-...>  (stored in the',
+        '     Bitwarden vault item "console.tailscale.com" notes under "Auth keys";',
+        '     legacy authkey.txt also written for backward compat)',
         '  2. on any machine: scoop install tailscale, then',
         '     provision <email> <hostname>  (joins the tailnet as its own node,',
         '     no browser, no per-machine key)',
@@ -195,6 +197,59 @@ function Get-AuthKeyPath {
     param([string]$ProfilePath)
 
     return Join-Path $ProfilePath 'authkey.txt'
+}
+
+# The reusable tailnet auth key is vault-native: stored in the Bitwarden item
+# "console.tailscale.com" notes under the "Auth keys" header (matches the oauth
+# client secret that lives in the same item). authkey.txt is a legacy on-disk
+# copy; key-add writes the vault, provision reads the vault, key-remove clears
+# the vault value. tailscaled.state (machine identity) stays on disk.
+function Write-AuthKeyVault {
+    param(
+        [string]$Profile,
+        [string]$Key
+    )
+
+    $normalized = Normalize-ProfileName -Profile $Profile
+    if ([string]::IsNullOrWhiteSpace($Key)) {
+        return
+    }
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'console.tailscale.com' -Header 'Auth keys' -Value $Key.Trim() -ItemName 'console.tailscale.com' -Username $normalized -Uri 'https://console.tailscale.com/admin/settings/keys'
+}
+
+function Read-AuthKeyVault {
+    param([string]$Profile)
+
+    $normalized = Normalize-ProfileName -Profile $Profile
+    return Read-VaultSecret -Email $normalized -NamePattern 'console.tailscale.com' -ValueRegex 'tskey-auth-[A-Za-z0-9_-]+'
+}
+
+function Remove-AuthKeyVault {
+    param([string]$Profile)
+
+    $normalized = Normalize-ProfileName -Profile $Profile
+    $item = Find-VaultItemByEmail -Email $normalized -NamePattern 'console.tailscale.com'
+    if (-not $item) {
+        return
+    }
+    $oldNotes = if ($item.notes) { [string]$item.notes } else { '' }
+    $remaining = @()
+    $oldLines = @($oldNotes -split "`r?`n")
+    $skipCount = 0
+    for ($i = 0; $i -lt $oldLines.Count; $i++) {
+        $line = $oldLines[$i]
+        if ($skipCount -gt 0) {
+            $skipCount--
+            continue
+        }
+        if ($line.Trim() -eq 'Auth keys') {
+            $skipCount = 1
+            continue
+        }
+        $remaining += $line
+    }
+    $tail = @($remaining | Where-Object { $_ -and $_.Trim() }) -join "`n"
+    Update-VaultItemNotes -ItemId $item.id -NewNotes $tail
 }
 
 function Get-StateFileCandidates {
@@ -402,18 +457,18 @@ switch ($args[0]) {
         }
         $profilePath = Get-ProfilePath -Profile $profile
         New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
+        Write-AuthKeyVault -Profile $profile -Key $key
         Set-Content -LiteralPath (Get-AuthKeyPath -ProfilePath $profilePath) -Value $key -Encoding ASCII -NoNewline
-        Write-Host "Auth key stored for $profile (last 4: ...$($key.Substring([Math]::Max(0, $key.Length - 4))))"
+        Write-Host "Auth key stored in vault for $profile (last 4: ...$($key.Substring([Math]::Max(0, $key.Length - 4))))"
     }
     'key-remove' {
         $profile = Get-ProfileOrActive -Profile $(if ($args.Count -ge 2) { $args[1] } else { $null })
+        Remove-AuthKeyVault -Profile $profile
         $keyPath = Get-AuthKeyPath -ProfilePath (Get-ProfilePath -Profile $profile)
         if (Test-Path -LiteralPath $keyPath) {
             Remove-Item -LiteralPath $keyPath -Force
-            Write-Host "Auth key removed for $profile"
-        } else {
-            Write-Host "No auth key stored for $profile"
         }
+        Write-Host "Auth key removed for $profile (vault + legacy authkey.txt)"
     }
     'provision' {
         if ($args.Count -lt 2) {
@@ -422,11 +477,14 @@ switch ($args[0]) {
         $profile = Normalize-ProfileName -Profile $args[1]
         $hostname = $args[2]
         $profilePath = Get-ProfilePath -Profile $profile
-        $keyPath = Get-AuthKeyPath -ProfilePath $profilePath
-        if (-not (Test-Path -LiteralPath $keyPath)) {
-            throw "No auth key stored for $profile. Run key-add <email> <tskey-...> first."
+        $key = Read-AuthKeyVault -Profile $profile
+        if ([string]::IsNullOrWhiteSpace($key)) {
+            $keyPath = Get-AuthKeyPath -ProfilePath $profilePath
+            if (-not (Test-Path -LiteralPath $keyPath)) {
+                throw "No auth key stored for $profile (vault or disk). Run key-add <email> <tskey-...> first."
+            }
+            $key = (Get-Content -LiteralPath $keyPath -Raw).Trim()
         }
-        $key = (Get-Content -LiteralPath $keyPath -Raw).Trim()
         if (-not (Test-AuthKeyValid -Key $key)) {
             throw "Stored key for $profile is not a valid tskey-... value. Re-run key-add."
         }
