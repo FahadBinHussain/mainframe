@@ -33,15 +33,15 @@ It can also restore native Windows apps that should not be Scoop-owned. These ar
 - `firebase-account.ps1` manages separate Firebase CLI profiles by email using profile-local `XDG_CONFIG_HOME`
 - `render-account.ps1` manages separate Render CLI profiles by account email using Render's official `RENDER_CLI_CONFIG_PATH` setting
 - `cronjob-account.ps1` manages separate cron-job.org API key profiles by account email for creating, updating, disabling, and inspecting scheduled HTTP jobs
-- `cloudflare-account.ps1` manages separate Cloudflare profiles by detected account email, using either API tokens or isolated Wrangler browser auth for Wrangler commands, API calls, zone/DNS inspection, and private state exports
+- `cloudflare-account.ps1` manages separate Cloudflare profiles by detected account email, using either API tokens or isolated Wrangler browser auth for Wrangler commands, API calls, zone/DNS inspection, and private state exports (moved to `C:\Users\Admin\Downloads\automata\cloudflare.com\cloudflare-account.ps1` in 2026-08-17)
 - `github-account.ps1` manages separate GitHub CLI/API token profiles by detected account email for `gh` commands and API calls
 - `notion-account.ps1` manages separate Notion API token profiles by account email for API calls, optional `ntn` CLI commands, and page/block inspection
-- `microsoft-account.ps1` manages separate Microsoft Graph OAuth profiles by detected account email for delegated Microsoft automation across mail, calendar, contacts, files, tasks, and notes
-- `outlook-account.ps1` is a compatibility wrapper around `microsoft-account.ps1` for mail-focused workflows
+- `microsoft-account.ps1` manages separate Microsoft Graph OAuth profiles by detected account email for delegated Microsoft automation across mail, calendar, contacts, files, tasks, and notes (moved to `C:\Users\Admin\Downloads\automata\outlook.com\microsoft-account.ps1` in 2026-08-17)
+- `outlook-account.ps1` is a compatibility wrapper around `microsoft-account.ps1` for mail-focused workflows (moved to `C:\Users\Admin\Downloads\automata\outlook.com\outlook-account.ps1` in 2026-08-17)
 - `hf-account.ps1` manages separate Hugging Face CLI profiles by detected account email using `HF_HOME` and profile-local token paths
-- `devvit-account.ps1` manages separate Reddit Devvit CLI profiles by account email, swapping Devvit's official `%USERPROFILE%\.devvit\token` file into per-profile mainframe storage
-- `reddit-account.ps1` manages separate Reddit API OAuth profiles by account email for posting as your own Reddit account
-- `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed
+- `devvit-account.ps1` manages separate Reddit Devvit CLI profiles by account email, swapping Devvit's official `%USERPROFILE%\.devvit\token` file into per-profile mainframe storage (moved to `C:\Users\Admin\Downloads\automata\reddit.com\devvit-account.ps1` in 2026-08-17)
+- `reddit-account.ps1` manages separate Reddit API OAuth profiles by account email for posting as your own Reddit account (moved to `C:\Users\Admin\Downloads\automata\reddit.com\reddit-account.ps1` in 2026-08-17)
+- `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed (tracked here; requires reddit-account.ps1 from `C:\Users\Admin\Downloads\automata\reddit.com\`)
 - `scoopfile.json` is the exported package snapshot
 - `native-apps.json` describes non-Scoop apps that should be installed normally, plus settings-only entries with `SkipInstall`
 - `tool-secrets.manifest.json` is the editable list of auth/config/skill paths to carry across machines
@@ -101,7 +101,7 @@ You can also refresh only the encrypted secrets archive:
 
 ## Tool Account Profiles
 
-Vercel token-only profiles plus Neon, Google Workspace CLI, Google Cloud CLI, Firebase CLI, Browser UI automation, Render CLI, cron-job.org API, Cloudflare API, GitHub CLI/API, Notion API/CLI, Microsoft Graph, Hugging Face CLI, Reddit Devvit CLI, and Reddit API OAuth profiles are stored under:
+Vercel token-only profiles plus Neon, Google Workspace CLI, Google Cloud CLI, Firebase CLI, Browser UI automation, Render CLI, cron-job.org API, GitHub CLI/API, Notion API/CLI, Hugging Face CLI, and Tailscale profiles are stored under:
 
 ```text
 %APPDATA%\mainframe\accounts\
@@ -204,52 +204,6 @@ For custom cron-job.org API calls, use the raw API wrapper:
 
 cron-job.org API keys are saved as `api-key.txt` under the account profile folder. Job exports are saved as `jobs-export.json` under that same folder by default. Treat both files as secrets; back them up only through the encrypted backup flow. If you enable cron-job.org IP restrictions, commands from non-allowlisted machines can fail with HTTP 403.
 
-Create and use Cloudflare profiles:
-
-Use Cloudflare browser auth when you do not want to type the account email. Mainframe runs Wrangler with isolated XDG config/cache paths but leaves the normal Windows browser profile environment alone, so `wrangler login --browser true` opens your default browser profile. After auth, it detects the email from `wrangler whoami --json` and saves that browser auth under the detected email:
-
-```powershell
-.\cloudflare-account.ps1 login
-.\cloudflare-account.ps1 whoami user@example.com
-.\cloudflare-account.ps1 run user@example.com --version
-.\cloudflare-account.ps1 run --version
-```
-
-For Cloudflare API calls and exports, create a Cloudflare API token from the Cloudflare dashboard, then save it once. The token must be able to read user details so mainframe can detect the email:
-
-```powershell
-.\cloudflare-account.ps1 token-add
-.\cloudflare-account.ps1 use user@example.com
-.\cloudflare-account.ps1 verify user@example.com
-.\cloudflare-account.ps1 accounts user@example.com
-.\cloudflare-account.ps1 zones user@example.com
-```
-
-Inspect DNS records or run raw Cloudflare API calls:
-
-```powershell
-.\cloudflare-account.ps1 dns user@example.com ZONE_ID
-.\cloudflare-account.ps1 api user@example.com GET /zones
-```
-
-If Wrangler is installed, run it through the selected profile. This works with either saved API-token profiles or saved Wrangler browser-auth profiles:
-
-```powershell
-.\cloudflare-account.ps1 run user@example.com --version
-.\cloudflare-account.ps1 run --version
-.\cloudflare-account.ps1 run user@example.com deploy
-```
-
-Running `login` detects the Cloudflare account email through Wrangler browser auth and saves a profile-local Wrangler state folder, so multiple Cloudflare accounts can coexist without relying on Wrangler's global last-login state. Running `token-add` detects the Cloudflare account email from token metadata and refuses to save username, account name, account ID, or manual label fallbacks. Some restricted tokens cannot reveal the email; use `login` for Wrangler commands, or create a token that can read the user profile for API/export commands. Some Wrangler commands still need an `account_id` in the project config, or token scopes that allow account lookups. Use `whoami`, `verify`, `accounts`, and `zones` to check the selected profile first.
-
-Export Cloudflare account, zone, and DNS state into the profile folder:
-
-```powershell
-.\cloudflare-account.ps1 export user@example.com
-```
-
-Cloudflare tokens are saved as `token.txt` under the account profile folder. Browser-login state is saved under `wrangler-oauth` in that same profile folder. State exports are saved as `cloudflare-export.json` under that same folder by default. Treat these files as secrets; DNS records, hostnames, comments, account IDs, routes, OAuth sessions, and origin details can be sensitive. Cloudflare import is intentionally not automated here because blindly replaying DNS or zone state can break production traffic.
-
 Create and use GitHub profiles:
 
 If you already have a normal machine-level GitHub CLI login, import it into mainframe once:
@@ -304,26 +258,7 @@ When Notion exposes the owner's email from `/users/me`, `token-add` and `import-
 
 Create and use Microsoft Graph profiles:
 
-Register or reuse a Microsoft public client app that supports personal Microsoft accounts and set its loopback redirect URI to:
-
-```text
-http://127.0.0.1:8595/callback/
-```
-
-Then log in with delegated Graph scopes and automate Microsoft surfaces through one email-keyed profile:
-
-```powershell
-.\microsoft-account.ps1 login user@outlook.com -ClientId YOUR_PUBLIC_CLIENT_ID
-.\microsoft-account.ps1 use user@outlook.com
-.\microsoft-account.ps1 me user@outlook.com
-.\microsoft-account.ps1 unread user@outlook.com -Since 2026-05-30T12:00:00Z
-.\microsoft-account.ps1 messages user@outlook.com -Folder inbox -Unread -Top 20
-.\microsoft-account.ps1 run user@outlook.com GET /me/drive
-.\microsoft-account.ps1 run user@outlook.com GET /me/events?`$top=10
-.\microsoft-account.ps1 run user@outlook.com POST /me/sendMail '{"message":{"subject":"Test","body":{"contentType":"Text","content":"Hello"},"toRecipients":[{"emailAddress":{"address":"person@example.com"}}]},"saveToSentItems":true}'
-```
-
-`microsoft-account.ps1` uses Microsoft Graph directly instead of the broken local `m365` CLI. The helper defaults to the `consumers` tenant for personal Outlook/Hotmail/Live accounts and asks for broad delegated scopes by default: `openid profile offline_access User.Read Mail.ReadWrite Mail.Send MailboxSettings.ReadWrite Calendars.ReadWrite Contacts.ReadWrite Files.ReadWrite.All Tasks.ReadWrite Notes.ReadWrite ShortNotes.ReadWrite`. It calls Graph `/me`, saves the profile under the detected email only, rejects account mismatches, stores `refresh-token.txt` and `access-token.txt` under `%APPDATA%\mainframe\accounts\microsoft\<email>`, and never prints token values from `status` or `env`. Generic Graph `run`/`api` support `GET`, `POST`, `PATCH`, `PUT`, and `DELETE`, so only run write/delete calls intentionally. `outlook-account.ps1` remains as a thin wrapper for existing mail automation commands.
+Moved to `C:\Users\Admin\Downloads\automata\outlook.com\microsoft-account.ps1` in 2026-08-17. See that repo's README for usage.
 
 Create and use Hugging Face profiles:
 
@@ -349,45 +284,11 @@ Hugging Face profiles use profile-local `HF_HOME`, `HF_TOKEN_PATH`, and `HF_STOR
 
 Create and use Reddit Devvit profiles:
 
-Devvit's official CLI stores the current auth token at `%USERPROFILE%\.devvit\token`. This helper keeps per-profile copies under mainframe, then installs the selected token before running `devvit` commands.
-
-```powershell
-.\devvit-account.ps1 login user@example.com --copy-paste
-.\devvit-account.ps1 list
-.\devvit-account.ps1 whoami user@example.com
-.\devvit-account.ps1 apps user@example.com
-.\devvit-account.ps1 installs user@example.com mySubreddit
-.\devvit-account.ps1 run user@example.com upload
-.\devvit-account.ps1 run upload
-```
-
-If you already logged in with plain `npx devvit login`, import the current token without opening a new browser auth flow:
-
-```powershell
-.\devvit-account.ps1 import-current user@example.com
-```
-
-Devvit exposes Reddit usernames more naturally than account emails, so mainframe requires the email explicitly and rejects Reddit username/manual-label profile names.
+Moved to `C:\Users\Admin\Downloads\automata\reddit.com\devvit-account.ps1` in 2026-08-17. See that repo's README for usage.
 
 Create and use Reddit API OAuth profiles:
 
-This is the path for posting as your own Reddit account. Create an installed app at https://www.reddit.com/prefs/apps and set its redirect URI to:
-
-```text
-http://127.0.0.1:8585/callback/
-```
-
-Then log in and post with dry-run first:
-
-```powershell
-.\reddit-account.ps1 login user@example.com -ClientId YOUR_CLIENT_ID
-.\reddit-account.ps1 whoami user@example.com
-.\reddit-account.ps1 run GET /api/v1/me
-.\reddit-post.ps1 submit user@example.com r/test "Test title" -Text "Test body" -DryRun
-.\reddit-post.ps1 submit user@example.com r/test "Test title" -Text "Test body" -ConfirmPost
-```
-
-Reddit OAuth exposes Reddit usernames more naturally than account emails, so mainframe requires the email explicitly and rejects Reddit username/manual-label profile names.
+Moved to `C:\Users\Admin\Downloads\automata\reddit.com\reddit-account.ps1` and `reddit-post.ps1` in 2026-08-17. See that repo's README for usage.
 
 Create and use Google Cloud CLI profiles:
 

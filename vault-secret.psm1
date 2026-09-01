@@ -9,6 +9,15 @@
 # Session: read from %APPDATA%\mainframe\accounts\bitwarden\session.key (written
 # by automata\bitwarden.com\unlock.ps1) or $env:BW_SESSION. If the vault is locked,
 # calls fail with a clear message asking the user to unlock first.
+#
+# Performance: Get-VaultItems caches bw list items per session so the vault is
+# queried at most once per process. Write operations (Update-VaultItemNotes,
+# New-VaultItem, Write-VaultSecretToExisting) invalidate the cache so subsequent
+# reads see the new item. Call Clear-VaultItemsCache to force a re-read.
+
+$script:VaultItemsCache = $null
+$script:VaultItemsCacheSession = $null
+$script:VaultSessionOkSession = $null
 
 function Get-VaultSession {
     if ($env:BW_SESSION) {
@@ -29,13 +38,27 @@ function Test-VaultSession {
         return $false
     }
 
+    # cache a positive result per session so repeated calls (e.g. status-all
+    # iterating every profile) don't spawn `bw status` each time.
+    if ($script:VaultSessionOkSession -eq $session) {
+        return $true
+    }
+
     $env:BW_SESSION = $session
     try {
         $status = bw status 2>$null | ConvertFrom-Json
-        return ($status.status -eq 'unlocked')
+        if ($status.status -eq 'unlocked') {
+            $script:VaultSessionOkSession = $session
+            return $true
+        }
+        return $false
     } catch {
         return $false
     }
+}
+
+function Clear-VaultSessionCache {
+    $script:VaultSessionOkSession = $null
 }
 
 function Get-VaultItems {
@@ -43,8 +66,20 @@ function Get-VaultItems {
         throw 'Bitwarden vault is locked or no session found. Run automata\bitwarden.com\unlock.ps1 first, or set $env:BW_SESSION.'
     }
 
+    $session = Get-VaultSession
+    if ($null -ne $script:VaultItemsCache -and $script:VaultItemsCacheSession -eq $session) {
+        return $script:VaultItemsCache
+    }
+
     $items = @(bw list items --session $env:BW_SESSION 2>$null | ConvertFrom-Json)
+    $script:VaultItemsCache = $items
+    $script:VaultItemsCacheSession = $session
     return $items
+}
+
+function Clear-VaultItemsCache {
+    $script:VaultItemsCache = $null
+    $script:VaultItemsCacheSession = $null
 }
 
 function Find-VaultItemByEmail {
@@ -133,6 +168,8 @@ function Update-VaultItemNotes {
     }
 
     $item | ConvertTo-Json -Depth 12 | bw encode | bw edit item $ItemId --session $env:BW_SESSION | Out-Null
+    Clear-VaultItemsCache
+    Clear-VaultSessionCache
 }
 
 function New-VaultItem {
@@ -163,6 +200,8 @@ function New-VaultItem {
 
     $created = $newItem | bw encode | bw create item --session $env:BW_SESSION
     $obj = $created | ConvertFrom-Json
+    Clear-VaultItemsCache
+    Clear-VaultSessionCache
     return $obj.id
 }
 
@@ -218,4 +257,4 @@ function Write-VaultSecretToExisting {
     return $item.id
 }
 
-Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Get-VaultItems, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem
+Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache

@@ -15,6 +15,7 @@ every `*-account.ps1` helper implements the same contract (`login`, `use`, `curr
 
 - profiles are keyed by account email only; if email cannot be detected after auth, fail or ask — never save a username/label/workspace fallback.
 - **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the platform (e.g. `console.neon.tech - <user>`, `vercel.com - <user>`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64. some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes.
+- **vault cache (2026-09-01)**: `vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles.
 - before using a service, check the active account first (`status-all`/`current`); if the task targets a specific project/repo/space, verify which account owns it and switch before proceeding.
 
 ## neon: list all projects for an account
@@ -70,6 +71,16 @@ context: neon projects can be under personal accounts or organizations. `project
    ```
    <repo>\neon-account.ps1 run <email> connection-string --project-id <project-id> --branch main --database <dbname> --role <role> --output json --no-color
    ```
+
+8. **count projects across all accounts (or one) — REST, no neonctl**
+   ```
+   <repo>\neon-account.ps1 projects-count
+   <repo>\neon-account.ps1 projects-count <email>
+   ```
+   lists each profile with its project count (org-scoped keys auto-detected via
+   `GET /api/v2/users/me/organizations` + `GET /api/v2/projects?org_id=...`), then prints
+   the accounts with 0 projects. added 2026-09-01 to replace the manual per-account
+   REST dance when answering "which neon account has 0 projects".
 
 ### notes
 - personal projects = no `--org-id` flag

@@ -40,6 +40,7 @@ Usage:
   .\neon-account.ps1 capabilities-json [email]
   .\neon-account.ps1 status [email]
   .\neon-account.ps1 status-all
+  .\neon-account.ps1 projects-count [email]
   .\neon-account.ps1 logout [email]
   .\neon-account.ps1 list
   .\neon-account.ps1 current
@@ -866,6 +867,60 @@ function Get-ProfileStatus {
     }
 }
 
+# Count projects for an account via the REST API (no neonctl dependency).
+# v2 requires org_id for org-scoped keys; a personal-only key works without it.
+# Returns a ps custom object with Count, Projects (list), and Note (error/plan context).
+function Get-ProfileProjectCount {
+    param([string]$Email)
+
+    $normalized = Normalize-Email -Email $Email
+    $apiKey = Read-ProfileApiKey -Email $normalized
+    if ([string]::IsNullOrWhiteSpace($apiKey)) {
+        return [pscustomobject]@{ Email = $normalized; Count = -1; Projects = @(); Note = 'no api key' }
+    }
+
+    $headers = @{
+        Authorization = "Bearer $apiKey"
+        Accept = 'application/json'
+    }
+
+    $projects = @()
+    try {
+        # personal projects first (no org_id)
+        $resp = Invoke-RestMethod -Uri "$apiBase/projects?limit=100" -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+        $projects = @($resp.projects)
+    } catch {
+        # org-scoped key: 400 "org_id is required" -> enumerate orgs then projects per org
+        try {
+            $orgsResp = Invoke-RestMethod -Uri "$apiBase/users/me/organizations" -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+            foreach ($org in @($orgsResp.organizations)) {
+                $rp = Invoke-RestMethod -Uri "$apiBase/projects?org_id=$($org.id)&limit=100" -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+                foreach ($p in @($rp.projects)) {
+                    $projects += [pscustomobject]@{ id = $p.id; name = $p.name; org = $org.name; org_id = $org.id }
+                }
+            }
+        } catch {
+            return [pscustomobject]@{ Email = $normalized; Count = -1; Projects = @(); Note = "api error: $($_.Exception.Message)" }
+        }
+    }
+
+    # if personal response had no projects and no org enumeration ran, try orgs as fallback
+    if ($projects.Count -eq 0) {
+        try {
+            $orgsResp = Invoke-RestMethod -Uri "$apiBase/users/me/organizations" -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+            foreach ($org in @($orgsResp.organizations)) {
+                $rp = Invoke-RestMethod -Uri "$apiBase/projects?org_id=$($org.id)&limit=100" -Headers $headers -TimeoutSec 20 -ErrorAction Stop
+                foreach ($p in @($rp.projects)) {
+                    $projects += [pscustomobject]@{ id = $p.id; name = $p.name; org = $org.name; org_id = $org.id }
+                }
+            }
+        } catch {}
+    }
+
+    $note = if ($projects.Count -eq 0) { 'no projects' } else { 'ok' }
+    return [pscustomobject]@{ Email = $normalized; Count = $projects.Count; Projects = $projects; Note = $note }
+}
+
 function Clear-ProfileApiKey {
     param([string]$Email)
 
@@ -1212,6 +1267,44 @@ switch ($action.ToLowerInvariant()) {
         $profiles |
             ForEach-Object { Get-ProfileStatus -Email (Get-ProfileEmail -Directory $_) } |
             Format-Table -AutoSize
+    }
+
+    'projects-count' {
+        if ($remaining.Count -gt 1) {
+            throw 'Usage: .\neon-account.ps1 projects-count [email]'
+        }
+
+        $target = if ($remaining.Count -eq 1) { Normalize-Email -Email $remaining[0] } else { $null }
+        if (-not (Test-Path -LiteralPath $accountRoot)) {
+            Write-Host 'No Neon profiles found.'
+            return
+        }
+
+        $profiles = @(Get-ChildItem -LiteralPath $accountRoot -Directory -Force | Where-Object { $_.Name -match '^[^\s@]+@[^\s@]+\.[^\s@]+$' } | Sort-Object Name)
+        if ($profiles.Count -eq 0) {
+            Write-Host 'No Neon profiles found.'
+            return
+        }
+
+        $rows = @()
+        foreach ($profile in $profiles) {
+            $email = Get-ProfileEmail -Directory $profile
+            if ($target -and $email -ne $target) {
+                continue
+            }
+            $row = Get-ProfileProjectCount -Email $email
+            $rows += $row
+        }
+
+        $rows | Sort-Object Count, Email | Format-Table Email, Count, Note -AutoSize
+        Write-Host ''
+        Write-Host 'Accounts with 0 projects:'
+        $zero = @($rows | Where-Object { $_.Count -eq 0 })
+        if ($zero.Count -eq 0) {
+            Write-Host '  (none)'
+        } else {
+            $zero | ForEach-Object { Write-Host "  $($_.Email)" }
+        }
     }
 
     'current' {
