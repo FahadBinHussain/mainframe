@@ -14,7 +14,7 @@ conventions used below:
 every `*-account.ps1` helper implements the same contract (`login`, `use`, `current`, `list`, `status`, `status-all`, `path`, `env`, `run`) plus tool-specific subcommands. `account-contract.ps1` validates the contract across all helpers — run it after adding or editing a helper.
 
 - profiles are keyed by account email only; if email cannot be detected after auth, fail or ask — never save a username/label/workspace fallback.
-- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the platform (e.g. `console.neon.tech - <user>`, `vercel.com - <user>`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64. some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes.
+- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the platform (e.g. `console.neon.tech - <user>`, `vercel.com - <user>`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes.
 - **vault cache (2026-09-01)**: `vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles.
 - before using a service, check the active account first (`status-all`/`current`); if the task targets a specific project/repo/space, verify which account owns it and switch before proceeding.
 
@@ -205,7 +205,7 @@ both `neon-hours-table.ps1` and `neon-projects-table.ps1` were migrated to the r
 
 ## vercel: bulk scripts at mainframe root
 
-- `<repo>\vercel-usage-table.ps1` — per-account + per-project usage overview across all mainframe vercel profiles. reports plan, billing status, `softBlock` flag, projects count, prod deployments in last 30d, BLOCKED projects, runtime (Functions created), last prod deploy, repo, domains. this is the "vercel what's left / who's blocked" check.
+- `<repo>\vercel-usage-table.ps1` — per-account + per-project usage overview across all mainframe vercel profiles. reads tokens from the Bitwarden vault via `Read-VaultSecret` (no `token.txt` files in profile dirs since 2026-08-22 vault migration). reports plan, billing status, `softBlock` flag, projects count, prod deployments in last 30d, BLOCKED projects, runtime (Functions created), last prod deploy, repo, domains. this is the "vercel what's left / who's blocked" check.
 - `<repo>\vercel-projects-table.ps1` — older script, prints a simple per-account list of personal + team projects. `vercel-usage-table.ps1` supersedes this for usage/limits audits.
 
 ### run
@@ -256,8 +256,10 @@ to get concrete numeric usage on Hobby (CPU-h, GB-h, invocations) — open the V
 ### how the script queries vercel (no vercel CLI dependency)
 `vercel-usage-table.ps1` calls the REST API directly (no vercel CLI). the vercel CLI can be broken on windows under pnpm — same shim issue as neonctl — only a stale `/bin/sh` shim remains pointing at a non-existent `vc.js`. the script does NOT depend on the CLI.
 
+**2026-09-01 vault migration:** tokens are no longer stored in `token.txt` files in the profile dir. the script now imports `vault-secret.psm1` and calls `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'` per profile. profiles without a vault entry (e.g. the `daffodilresourcehub-8188@vercel` stub) are skipped silently.
+
 rest api flow:
-1. get the token: `(Get-Content "$env:APPDATA\mainframe\accounts\vercel\<email>\token.txt" -Raw).Trim()`
+1. get the token from the vault: `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'`
 2. headers: `Authorization: Bearer <token>`.
 3. user info (plan, softBlock):
    ```
@@ -484,6 +486,12 @@ different wifi/networks. installed via scoop (`extras/tailscale`, MSI-extracted)
 windows service is `Automatic` and runs `<scoop>\apps\tailscale\current\tailscaled.exe`
 (substitute the scoop root path if different).
 helper: `<repo>\tailscale-account.ps1` (contract PASS).
+**vault-native authkey (2026-09-01)**: the reusable auth key is stored in the
+Bitwarden item `console.tailscale.com` notes under the `Auth keys` header (same item
+that holds the oauth client secret), keyed by profile email. `key-add` writes the
+vault + a legacy `authkey.txt`; `provision` reads the vault (falls back to
+authkey.txt); `key-remove` clears both. `tailscaled.state` (machine identity) stays
+on disk — that is backup/restore state, not a vault secret.
 
 ### setup pattern
 - node: `<hostname>` (100.x tailnet IP, DNS <hostname>.ts.net.), tailnet owner:
@@ -518,16 +526,20 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 1. **once per tailnet**: generate ONE *reusable* auth key in the admin console
    (Settings > Keys > Auth keys > Generate > Reusable ON, Ephemeral OFF) and store it:
    `tailscale-account.ps1 key-add <email> tskey-...`
-   → saved to `%APPDATA%\mainframe\accounts\tailscale\<email>\authkey.txt`.
-   mainframe `backup.ps1` already snapshots `%APPDATA%\mainframe\accounts\` so the key
-   travels with every mainframe backup/restore automatically. (auth keys max 90-day
-   expiry — rotation only affects NEW joins, existing nodes keep working; regenerate +
-   `key-add` once a year, or store a non-expiring API access token in the same file and
-   mint one-shot keys via the admin API instead.)
+   → saved vault-native to the Bitwarden item `console.tailscale.com` notes under the
+   `Auth keys` header (the same item that holds the oauth client secret). a legacy
+   `authkey.txt` copy is also written to the profile dir for backward compat, but the
+   vault is the source of truth. mainframe `backup.ps1` already snapshots
+   `%APPDATA%\mainframe\accounts\` and the vault travels via bitwarden, so the key is
+   safe either way. (auth keys max 90-day expiry — rotation only affects NEW joins,
+   existing nodes keep working; regenerate + `key-add` once a year, or store a
+   non-expiring API access token in the same item and mint one-shot keys via the admin
+   API instead.)
 2. **on any new pc**: `scoop install tailscale` (service auto-registers) → restore the
    mainframe backup (or copy just that profile dir) →
    `tailscale-account.ps1 provision <email> <hostname>` → joins the tailnet as its OWN
    node (own 100.x IP, `--unattended --auto-update`), no browser, no per-machine key.
+   provision reads the auth key from the vault (falls back to the legacy authkey.txt).
    check it: `tailscale-account.ps1 nodes` or `status-all`.
 3. **identity migration (same node on another machine)**: `backup <email>` on the source
    machine (snapshots `tailscaled.state` into the profile dir) → copy profile dir →
@@ -637,6 +649,20 @@ helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile d
 - fix: create a local deployment-alignment commit authored with the target Vercel account email before deploying: `git -c user.email="<target-vercel-email>" -c user.name="<name>" commit --allow-empty -m "deployment alignment"` (empty commit only when there is no real scoped change to commit).
 - then redeploy and verify the live URL/domain.
 - never pay for team-member seat upgrades or reconnect GitHub per account to work around this.
+
+### vercel: alias/deployment URL hits "Log in to Vercel" wall (SSO protection)
+
+- **symptom**: a freshly-created alias (or even the raw deployment URL `*-ncattys-projects.vercel.app`) redirects to `vercel.com/login` with `sso-api` `next=` param, while the auto-generated alias (e.g. `taskflow-nine-ivory.vercel.app`) works fine.
+- **root cause**: project-level **SSO Protection** (Vercel Authentication, `ssoProtection.deploymentType=all_except_custom_domains`). The auto-alias Vercel generates on link is exempt; anything else (manual aliases, raw URLs) is walled.
+- **detect**: `GET /v9/projects?teamId=<teamId>` → `ssoProtection.deploymentType`. team id from `GET /v2/teams`.
+- **fix** (one API call, no dashboard click needed):
+  ```powershell
+  $body = @{ ssoProtection = $null } | ConvertTo-Json
+  Invoke-WebRequest -Uri "https://api.vercel.com/v9/projects/<projectName>?teamId=<teamId>" -Method Patch -Headers @{Authorization="Bearer <token>"; 'Content-Type'='application/json'} -Body $body
+  ```
+  (project can be the name or id; `null` removes SSO protection entirely. verified 2026-09-01 on ncattys-projects/taskflow.)
+- aliases created via `vercel alias set <deployment-url> <alias>.vercel.app` — check availability first; many short names are taken. probe-and-clean: `vercel alias set` then immediately `vercel alias rm` if just checking.
+
 
 ## supabase: account helper
 
