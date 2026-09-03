@@ -1128,8 +1128,9 @@ if (-not $wingetCmd) {
 # Re-apply local patches that the fresh scoop installs wipe out.
 # - alist: terabox dm-domain fix (scoop reinstalls official binary without the patch)
 # - ditto: user's merged-but-unreleased starred-clips PRs (scoop reinstalls official 3.25.113.0)
-# Both patchers live in automata; skip quietly if absent (backup may not include automata).
-Update-Step 'Re-applying local binary patches (alist, ditto)'
+# - opencode: bash pipe hang fix #44601 (scoop reinstalls official binary without the patch)
+# All patchers live in automata; skip quietly if absent (backup may not include automata).
+Update-Step 'Re-applying local binary patches (alist, ditto, opencode)'
 $automata = Join-Path $env:USERPROFILE 'Downloads\automata'
 $alistPatcher = Join-Path $automata 'github.com\AlistGo\alist\alist-terabox-patcher.ps1'
 if (Test-Path -LiteralPath $alistPatcher) {
@@ -1144,6 +1145,13 @@ if (Test-Path -LiteralPath $dittoPatcher) {
     & pwsh -NoProfile -File $dittoPatcher 2>&1 | Write-Host
 } else {
     Write-Warning "ditto patcher not found: $dittoPatcher"
+}
+$opencodePatcher = Join-Path $automata 'github.com\anomalyco\opencode\opencode-patcher.ps1'
+if (Test-Path -LiteralPath $opencodePatcher) {
+    Write-Host 'Re-building opencode from fork (bash pipe hang #44601)...'
+    & pwsh -NoProfile -File $opencodePatcher 2>&1 | Write-Host
+} else {
+    Write-Warning "opencode patcher not found: $opencodePatcher"
 }
 
 Write-Progress -Activity 'Restoring mainframe' -Completed
