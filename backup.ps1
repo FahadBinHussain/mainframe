@@ -603,24 +603,57 @@ if (Test-Path -LiteralPath $edgeBackupProfile) {
     Write-Host "  No Edge Secure Preferences found to extract extensions from"
 }
 
-# Back up unpacked developer-mode extensions (loc=4) — they load from local
-# project folders outside the Edge profile. Edge 151+ prunes loc=4 entries
-# cross-machine, but --load-extension on the target machine re-registers them
-# as loc=8 (command-line loaded) which persists. We copy the source folders
-# into the backup so restore.ps1 can place them on the target.
+# Back up unpacked developer-mode extensions — they load from local project
+# folders outside the Edge profile. Two volatility traps (both verified):
+# - Edge 151+ prunes loc=4 entries on cross-machine restore (machine-bound
+#   Secure Preferences signatures); restore.ps1 re-registers them via
+#   --load-extension as loc=8 (command-line loaded).
+# - loc=8 does NOT survive a plain relaunch (InstalledLoader skips
+#   kCommandLine), so a backup taken after normal Edge use finds NEITHER loc=4
+#   NOR loc=8 in prefs. A fresh-scan-only backup therefore loses the list, and
+#   the NEXT restore drops the extensions ("1st run stays, 2nd run drops").
+#   The old comment claiming loc=8 "persists" was wrong.
+# Fix: the list is CUMULATIVE. Fresh prefs detections (loc=4 AND loc=8) are
+# unioned with the machine-local breadcrumb restore.ps1 maintains at
+# %LOCALAPPDATA%\Microsoft\Edge\unpacked-extensions.local.json (survives
+# profile wipes + Edge relaunches). A carried entry is dropped only when its
+# source folder is gone from disk AND it is absent from fresh prefs (folder
+# present = keep, covers the Edge-pruned case; Edge keeps prefs entries for
+# merely-missing folders, so gone+gone = user-removed).
 $edgeBackupProfile = Join-Path $OutputDir 'edge-profile\Default\Secure Preferences'
 if (Test-Path -LiteralPath $edgeBackupProfile) {
     try {
         $edgeSp = Get-Content -LiteralPath $edgeBackupProfile -Raw | ConvertFrom-Json
-        $unpackedExts = @()
+        $freshUnpacked = @()
         if ($edgeSp.extensions.settings.PSObject.Properties) {
             foreach ($prop in $edgeSp.extensions.settings.PSObject.Properties) {
                 $ext = $prop.Value
-                if ($ext.location -eq 4 -and $ext.path) {
-                    $unpackedExts += [pscustomobject]@{
+                # loc=4 = unpacked (Load unpacked); loc=8 = command-line loaded
+                # (--load-extension, e.g. right after a restore before the next
+                # plain relaunch drops it). Capture both.
+                if (($ext.location -eq 4 -or $ext.location -eq 8) -and $ext.path) {
+                    $freshUnpacked += [pscustomobject]@{
                         id   = $prop.Name
                         name = $ext.manifest.name
                         path = $ext.path
+                    }
+                }
+            }
+        }
+        $unpackedExts = @($freshUnpacked)
+        $localCrumbPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\unpacked-extensions.local.json'
+        if (Test-Path -LiteralPath $localCrumbPath) {
+            try {
+                $crumb = @(Get-Content -LiteralPath $localCrumbPath -Raw | ConvertFrom-Json | Where-Object { $_ })
+            } catch {
+                $crumb = @()
+            }
+            foreach ($c in $crumb) {
+                if ($unpackedExts.id -notcontains $c.id) {
+                    if ($c.path -and (Test-Path -LiteralPath $c.path)) {
+                        $unpackedExts += $c
+                    } else {
+                        Write-Host "  Dropping unpacked extension from backup (folder gone, not registered): $($c.name) ($($c.path))"
                     }
                 }
             }

@@ -471,57 +471,92 @@ function Restore-EdgeExtensions {
     # cross-machine profile too, and --load-extension re-registers them as loc=8
     # (command-line loaded) -- but loc=8 is SKIPPED by InstalledLoader on plain
     # relaunches (extension_registrar/installed_loader.cc), so command-line
-    # extensions only persist while the flag is passed. Kept as best-effort for
-    # dev-mode folders that need to exist on the target.
+    # extensions only persist while the flag is passed.
+    # 2nd-run-drop trap: after run1 the extensions live only as volatile loc=8,
+    # so a later backup finds no loc=4 and writes no unpacked list -- run2 then
+    # has nothing to restore. Fix: this machine remembers its unpacked
+    # extensions in a breadcrumb file OUTSIDE the Edge profile (survives profile
+    # wipes + Edge relaunches), and backup.ps1 re-captures from the same file.
+    # Each run restores the union of backup list + breadcrumb, and rewrites the
+    # breadcrumb with what it actually registered (manifest-guarded).
     # backup.ps1 copied the source folders to edge-profile\unpacked-extensions\
     # and wrote unpacked-extensions.json with their original source paths.
     $unpackedListPath = Join-Path $BackupRoot 'edge-profile\unpacked-extensions.json'
+    $localCrumbPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\unpacked-extensions.local.json'
+    $backupEntries = @()
     if (Test-Path -LiteralPath $unpackedListPath) {
         try {
-            $unpacked = Get-Content -LiteralPath $unpackedListPath -Raw | ConvertFrom-Json
+            $backupEntries = @(Get-Content -LiteralPath $unpackedListPath -Raw | ConvertFrom-Json | Where-Object { $_ })
         } catch {
-            $unpacked = $null
+            $backupEntries = @()
         }
-        if ($unpacked -and $unpacked.Count -gt 0) {
-            $unpackedSrc = Join-Path $BackupRoot 'edge-profile\unpacked-extensions'
-            $restoredPaths = @()
-            foreach ($ux in $unpacked) {
-                $backupPath = Join-Path $unpackedSrc $ux.relative_path
-                $orig = $ux.path
-                if (Test-Path -LiteralPath $backupPath) {
-                    # restore to the same path as the source machine if possible
-                    $target = $orig
-                    if ($target -and $target -notmatch '^C:\\Users\\Admin') {
-                        # different windows user root - just keep original path;
-                        # robocopy handles it if the dir exists, else skip
-                    }
-                    $dir = Split-Path -Parent $target
-                    try {
-                        New-Item -ItemType Directory -Force -Path $dir | Out-Null
-                        & robocopy $backupPath $target /E /COPYALL /R:1 /W:1 /NP /NDL /NFL | Out-Null
-                        if (Test-Path -LiteralPath (Join-Path $target 'manifest.json')) {
-                            $restoredPaths += $target
-                            Write-Host "  Restored unpacked extension $($ux.name) to $target"
-                        } else {
-                            Write-Warning "  Unpacked extension $($ux.name) restore produced no manifest at $target - skipped"
-                        }
-                    } catch {
-                        Write-Warning "  Could not restore unpacked extension $($ux.name): $($_.Exception.Message)"
-                    }
-                } else {
-                    Write-Warning "  Unpacked extension backup folder not found: $backupPath"
+    }
+    $crumbEntries = @()
+    if (Test-Path -LiteralPath $localCrumbPath) {
+        try {
+            $crumbEntries = @(Get-Content -LiteralPath $localCrumbPath -Raw | ConvertFrom-Json | Where-Object { $_ })
+        } catch {
+            $crumbEntries = @()
+        }
+    }
+    if ($backupEntries.Count -gt 0 -or $crumbEntries.Count -gt 0) {
+        $unpackedSrc = Join-Path $BackupRoot 'edge-profile\unpacked-extensions'
+        $restoredPaths = @()
+        $effective = @()
+        foreach ($ux in $backupEntries) {
+            $backupPath = Join-Path $unpackedSrc $ux.relative_path
+            $orig = $ux.path
+            if (Test-Path -LiteralPath $backupPath) {
+                # restore to the same path as the source machine if possible
+                $target = $orig
+                if ($target -and $target -notmatch '^C:\\Users\\Admin') {
+                    # different windows user root - just keep original path;
+                    # robocopy handles it if the dir exists, else skip
                 }
+                $dir = Split-Path -Parent $target
+                try {
+                    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                    & robocopy $backupPath $target /E /COPYALL /R:1 /W:1 /NP /NDL /NFL | Out-Null
+                    if (Test-Path -LiteralPath (Join-Path $target 'manifest.json')) {
+                        $restoredPaths += $target
+                        $effective += [pscustomobject]@{ id = $ux.id; name = $ux.name; path = $target }
+                        Write-Host "  Restored unpacked extension $($ux.name) to $target"
+                    } else {
+                        Write-Warning "  Unpacked extension $($ux.name) restore produced no manifest at $target - skipped"
+                    }
+                } catch {
+                    Write-Warning "  Could not restore unpacked extension $($ux.name): $($_.Exception.Message)"
+                }
+            } else {
+                Write-Warning "  Unpacked extension backup folder not found: $backupPath"
             }
-            if ($restoredPaths.Count -gt 0 -and (Test-Path -LiteralPath $edgeExe)) {
-                $loadArg = '--load-extension=' + ($restoredPaths -join ',')
-                Write-Host "  Launching Edge once with --load-extension to register unpacked extensions..."
-                $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
-                Start-Process -FilePath $edgeExe -ArgumentList '--no-first-run', $loadArg, 'about:blank' | Out-Null
-                Start-Sleep -Seconds 25
-                Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 2
-                Write-Host "  Registered $($restoredPaths.Count) unpacked extensions via --load-extension"
+        }
+        # Breadcrumb-only entries: folders already on disk from an earlier run
+        # (no copy needed) -- register if the manifest is still there.
+        foreach ($cx in $crumbEntries) {
+            if ($effective.id -contains $cx.id) { continue }
+            if ($cx.path -and (Test-Path -LiteralPath (Join-Path $cx.path 'manifest.json'))) {
+                $restoredPaths += $cx.path
+                $effective += [pscustomobject]@{ id = $cx.id; name = $cx.name; path = $cx.path }
+                Write-Host "  Re-registering unpacked extension $($cx.name) from local breadcrumb: $($cx.path)"
             }
+        }
+        if ($restoredPaths.Count -gt 0 -and (Test-Path -LiteralPath $edgeExe)) {
+            $loadArg = '--load-extension=' + ($restoredPaths -join ',')
+            Write-Host "  Launching Edge once with --load-extension to register unpacked extensions..."
+            $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
+            Start-Process -FilePath $edgeExe -ArgumentList '--no-first-run', $loadArg, 'about:blank' | Out-Null
+            Start-Sleep -Seconds 25
+            Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Write-Host "  Registered $($restoredPaths.Count) unpacked extensions via --load-extension"
+        }
+        if ($effective.Count -gt 0) {
+            $effective | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $localCrumbPath -Encoding UTF8
+            Write-Host "  Wrote local unpacked-extension breadcrumb for $($effective.Count) extensions"
+        } elseif (Test-Path -LiteralPath $localCrumbPath) {
+            Remove-Item -LiteralPath $localCrumbPath -Force -ErrorAction SilentlyContinue
+            Write-Host '  Cleared local unpacked-extension breadcrumb (none registered)'
         }
     }
 }
