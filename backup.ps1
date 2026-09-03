@@ -699,12 +699,14 @@ $agentSkills = Join-Path $env:USERPROFILE '.agents\skills'
 if (Test-Path -LiteralPath $agentSkills) {
     $dest = Join-Path $OutputDir '.agents\skills'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
-    # Use robocopy instead of Copy-Item to skip self-nested 'skills' subdirs
-    # (a botched skill install/sync copied the tree into itself 6+ levels deep,
-    # duplicating ~24 MB). /XD skills excludes any subdir named 'skills' inside
-    # the source, breaking the recursion.
+    # Skills are git repos (each folder has a .git + optional nested 'skills\'
+    # sparse-checkout subdir). Exclude .git (reproducible from remotes, ~1.1 GB
+    # of fetched history) but INCLUDE the nested 'skills\' dirs, which now hold
+    # real git-tracked skill content. The old recursion guard (/XD skills) is
+    # gone: the top-level skills\skills\skills chain it protected no longer
+    # exists, and it would now wrongly strip sparse-checkout content.
     Invoke-RobocopyLockedAware -RobocopyArgs @(
-        $agentSkills, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', 'skills'
+        $agentSkills, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', '.git'
     ) -Context '.agents\skills'
     Write-Host 'Copied .agents\skills'
 }

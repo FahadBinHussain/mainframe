@@ -602,9 +602,23 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 making the skill loader read stale deep copies. fixed by pruning the chain and adding
 a self-healing guard in `agent-rules-sync.ps1` (runs at every logon): if
 `~/.agents\skills\skills\skills` (depth >= 2) exists, the whole nested chain is a copy
-artifact and gets deleted, keeping only the top-level tree. `backup.ps1` already skips
-nested `skills` dirs via `/XD skills` when archiving `~/.agents\skills`. if nested
-`...\skills\skills\...` paths ever appear again, re-check the tree for nesting.
+artifact and gets deleted, keeping only the top-level tree.
+
+**2026-09-02 update: each skill is now a git repo with sparse-checkout.**
+All 53 sourced skills under `~/.agents/skills/` are shallow git clones of their upstream
+repos, with sparse-checkout set to track only the skill's path within the repo. This
+creates a legitimate nested `skills\<name>\` subdirectory inside many skill folders (from
+the sparse path like `skills/agent-browser`). `backup.ps1` was updated to exclude `.git`
+instead of `skills` when archiving `~/.agents\skills`:
+- `/XD .git` replaces the old `/XD skills` — the nested `skills\` dirs now hold real
+  git-tracked content and must be included.
+- `.git` is excluded (~1.1 GB of fetched history, reproducible from remotes).
+- `agent-rules-sync.ps1`'s guard is unaffected — it checks `~/.agents\skills\skills\skills`
+  (top-level depth >= 2), not the per-skill nested `skills\` dirs.
+- `restore.ps1` restores skills as plain folders (no `.git`). To recover git connectivity:
+  re-clone each skill's folder from its known remote URL (sparse-checkout the skill path).
+  the per-skill remote URLs are recorded in `git remote -v` inside each folder before
+  backup, and in the `skills-changelog.md` report.
 
 ## uptimerobot: status page + monitor helper
 
