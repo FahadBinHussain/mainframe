@@ -551,6 +551,110 @@ function Restore-EdgeExtensions {
             Start-Sleep -Seconds 2
             Write-Host "  Registered $($restoredPaths.Count) unpacked extensions via --load-extension"
         }
+        # convert the volatile loc=8 registrations into persistent loc=4 by patching
+        # Secure Preferences directly with valid protection MACs. Chromium MAC scheme
+        # (verified 53/53 + super_mac on Edge 152): HMAC-SHA256(key=empty seed,
+        # msg = device_id + path + canonical_json(value)) where device_id = machine
+        # account SID WITHOUT the RID, path = "extensions.settings.<id>", json =
+        # sorted keys + pruned empty dicts + < escapes \u003C uppercase hex.
+        # Edge 152 also stores _encrypted_hash entries (authoritative when present)
+        # which must be deleted for the rewritten value; super_mac covers the whole
+        # macs dict and must be recomputed. result: extensions survive PLAIN
+        # relaunches with no --load-extension flag at all.
+        if ($restoredPaths.Count -gt 0) {
+            try {
+                    $spPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data\Default\Secure Preferences'
+                    if (Test-Path -LiteralPath $spPath) {
+                        # machine account SID = user SID minus RID (verified equivalent:
+                        # LookupAccountNameW(computername) resolves the machine account
+                        # whose SID is the user SID without its RID on standalone machines)
+                        $devId = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -replace '-\d+$', '')
+                    $python = Get-Command python -ErrorAction SilentlyContinue
+                    if ($python) {
+                        $patchScript = Join-Path $env:TEMP 'edge-loc4-patch.py'
+                        @'
+import json, hmac, hashlib, sys
+
+SPECIAL = {"\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t",
+           "\\": "\\\\", '"': '\\"', "<": "\\u003C",
+           "\u2028": "\\u2028", "\u2029": "\\u2029"}
+
+def esc_str(s):
+    out = ['"']
+    for c in s:
+        if c in SPECIAL: out.append(SPECIAL[c])
+        elif ord(c) < 32: out.append("\\u%04X" % ord(c))
+        else: out.append(c)
+    out.append('"')
+    return "".join(out)
+
+def sort_prune(v):
+    if isinstance(v, dict):
+        out = {}
+        for k in sorted(v.keys()):
+            sub = sort_prune(v[k])
+            if not (isinstance(sub, (dict, list)) and len(sub) == 0):
+                out[k] = sub
+        return out
+    if isinstance(v, list):
+        return [sort_prune(i) for i in v if not (isinstance(sort_prune(i), (dict, list)) and len(sort_prune(i)) == 0)]
+    return v
+
+def write_json(v):
+    if v is None: return "null"
+    if v is True: return "true"
+    if v is False: return "false"
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float):
+        r = repr(v)
+        return r + ".0" if ("." not in r and "e" not in r and "E" not in r) else r
+    if isinstance(v, str): return esc_str(v)
+    if isinstance(v, dict):
+        return "{" + ",".join(esc_str(k) + ":" + write_json(val) for k, val in v.items()) + "}"
+    if isinstance(v, list):
+        return "[" + ",".join(write_json(x) for x in v) + "]"
+    raise TypeError(repr(type(v)))
+
+def mac(dev, path, value):
+    msg = dev.encode("utf-8") + path.encode("utf-8") + write_json(sort_prune(value)).encode("utf-8")
+    return hmac.new(b"", msg, hashlib.sha256).hexdigest().upper()
+
+sp_file, dev_id, ids_file = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(sp_file, encoding="utf-8"))
+ids = [l.strip() for l in open(ids_file, encoding="utf-8") if l.strip()]
+changed = 0
+for ext_id in ids:
+    e = d.get("extensions", {}).get("settings", {}).get(ext_id)
+    if not e: continue
+    e["location"] = 4
+    e["was_installed_by_default"] = False
+    e["was_installed_by_oem"] = False
+    d["protection"]["macs"]["extensions"]["settings"][ext_id] = mac(dev_id, "extensions.settings." + ext_id, e)
+    eh = d["protection"]["macs"].get("extensions.settings_encrypted_hash")
+    if eh and ext_id in eh: del eh[ext_id]
+    changed += 1
+d["protection"]["super_mac"] = mac(dev_id, "", d["protection"]["macs"])
+json.dump(d, open(sp_file, "w", encoding="utf-8"), indent=2)
+print(f"patched {changed} extensions to loc=4 with valid MACs")
+'@ | Set-Content -LiteralPath $patchScript -Encoding UTF8
+                        $idsFile = Join-Path $env:TEMP 'edge-loc4-ids.txt'
+                        # map restored paths back to their ids via the effective entries
+                        $idList = @($effective | ForEach-Object { $_.id }) -join "`n"
+                        Set-Content -LiteralPath $idsFile -Value $idList -Encoding UTF8
+                        & python $patchScript $spPath $devId $idsFile
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host '  Converted unpacked extensions to persistent loc=4 (MAC-patched Secure Preferences)'
+                        } else {
+                            Write-Warning "  loc=4 MAC patch failed (exit $LASTEXITCODE) - extensions stay volatile loc=8; --load-extension still needed on relaunch"
+                        }
+                    } else {
+                        Write-Warning '  python not available for loc=4 MAC patch - extensions stay volatile loc=8'
+                    }
+                }
+            } catch {
+                Write-Warning "  loc=4 MAC patch error: $($_.Exception.Message)"
+            }
+        }
         if ($effective.Count -gt 0) {
             $effective | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $localCrumbPath -Encoding UTF8
             Write-Host "  Wrote local unpacked-extension breadcrumb for $($effective.Count) extensions"

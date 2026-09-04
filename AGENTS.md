@@ -805,3 +805,42 @@ test-harness gotchas (the test failed once on these, not the product):
    nondeterministic; the breadcrumb union stays mandatory because loc=8 survival
    cannot be relied on either way.
 
+
+### unpacked extensions TRUE persistence - loc=4 MAC patch (fixed 2026-09-04, the real fix)
+
+the breadcrumb fix (above) only made restore+backup REMEMBER the unpacked list; the
+extensions were still volatile loc=8 (or skeletal prefs entries Edge never imported),
+so on a plain 2nd launch the user saw NO local extensions. that was the actual bug.
+
+**the real fix in restore.ps1** (after the --load-extension registration): rewrite
+`Secure Preferences` converting the 6 entries loc=8 -> loc=4 (true "Load unpacked",
+persistent by design) with VALID protection MACs so Edge accepts the edit:
+
+- MAC scheme (verified 53/53 + super_mac on Edge 152.0.4191.62, both machines):
+  `HMAC-SHA256(key = empty seed, msg = device_id + path + canonical_json(value))`
+  - seed: EMPTY on Edge (no GOOGLE_CHROME_BRANDING resource); chrome's is the
+    64-byte IDR_PREF_HASH_SEED_BIN blob
+  - device_id: machine account SID WITHOUT the RID
+    (`user SID -replace '-\d+$',''` == LookupAccountNameW(computername) on
+    standalone machines; NOT the full user SID, NOT hashed)
+  - path: `extensions.settings.<id>`; super_mac path: `""` over the whole
+    `protection.macs` dict
+  - canonical json: sorted keys (base::Value::Dict flat_map order), recursive
+    pruning of empty dict/list children, compact separators, `<` -> `\u003C`
+    (capital C), control chars `\u%04X` uppercase, no ascii-folding
+- Edge 152 gotcha: `protection.macs.extensions.settings_encrypted_hash.<id>`
+  (DPAPI/os-crypt v20 AES-GCM) is AUTHORITATIVE when present - the patched entry
+  must have its encrypted_hash DELETED or the fix silently won't apply
+- super_mac must be recomputed after any macs change
+- embedded python (stdlib only) in restore.ps1 does the patch; failures fall back
+  LOUD (warning, extensions stay volatile loc=8) - no silent degradation
+
+verified end-to-end on desktop (edge-2cycle-desktop-test-v2, S4U task):
+run1 loc=4 6/6 -> plain launch1 active (10 ext-procs) -> plain launch2 STILL active
++ prefs survive 6/6 -> plain launch3 still active. VERDICT PASS.
+
+test v2 lesson: the v1 test asserted prefs REGISTRATION (loc=8 entries), which
+passed while the user-facing bug was still live - "volatility premise holds
+(expect 0)" even CODIFIED the broken behavior. v2 asserts ext-procs + loc=4
+survival across 3 plain launches. always assert user-visible behavior.
+
