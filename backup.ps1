@@ -805,12 +805,18 @@ foreach ($ext in $sevenZipAssocExtensions) {
 & reg.exe export "HKCU\Software\Classes\7-Zip.archive" (Join-Path $OutputDir '7z-assoc-archive.reg') /y *> $null
 if ($LASTEXITCODE -eq 0) { Write-Host 'Exported 7z-assoc-archive.reg' }
 
-$backupZip = Join-Path $realOutputDir 'mainframe-backup.zip'
-if (Test-Path -LiteralPath $backupZip) {
-    Remove-Item -LiteralPath $backupZip -Force
+$coreZip = Join-Path $realOutputDir 'mainframe-core.zip'
+$persistZip = Join-Path $realOutputDir 'mainframe-persist.zip'
+foreach ($z in @($coreZip, $persistZip)) {
+    if (Test-Path -LiteralPath $z) { Remove-Item -LiteralPath $z -Force }
+}
+$legacyZip = Join-Path $realOutputDir 'mainframe-backup.zip'
+if (Test-Path -LiteralPath $legacyZip) {
+    Remove-Item -LiteralPath $legacyZip -Force
+    Write-Host 'Removed legacy single-zip mainframe-backup.zip (retired - split zips are the format now)'
 }
 $srcDir = $OutputDir
-Write-Host "Compressing $srcDir to $backupZip..."
+Write-Host "Compressing $srcDir to split zips (core + persist)..."
 $stagingDir = Join-Path $env:TEMP "mainframe-zip-stage-$(Get-Random)"
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
 Invoke-RobocopyLockedAware -RobocopyArgs @($srcDir, $stagingDir, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XJ', '/XF', '*.sock', 'dopus.dat', '*.pdb') -Context 'zip staging'
@@ -819,21 +825,29 @@ $sevenZip = Get-Command '7z' -ErrorAction SilentlyContinue
 if (-not $sevenZip) { $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue }
 if ($sevenZip) {
     Push-Location $stagingDir
-    & $sevenZip.Source a -tzip -mmt=on -mx=5 $backupZip '*' | Out-Null
+    & $sevenZip.Source a -tzip -mmt=on -mx=5 $coreZip '*' -x!persist | Out-Null
+    if ($LASTEXITCODE -gt 1) { Pop-Location; throw "7zip core compression failed with exit code $LASTEXITCODE" }
+    if (-not (Test-Path -LiteralPath 'persist')) { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips (was -SkipPersist used?)' }
+    & $sevenZip.Source a -tzip -mmt=on -mx=5 $persistZip 'persist' | Out-Null
     Pop-Location
-    if ($LASTEXITCODE -gt 1) { throw "7zip compression failed with exit code $LASTEXITCODE" }
+    if ($LASTEXITCODE -gt 1) { throw "7zip persist compression failed with exit code $LASTEXITCODE" }
 } else {
     Write-Warning '7zip not found, falling back to Compress-Archive (may fail on long paths)'
     Push-Location $stagingDir
-    Compress-Archive -Path '*' -DestinationPath $backupZip -Force
+    $coreItems = Get-ChildItem -Force | Where-Object { $_.Name -ne 'persist' } | Select-Object -ExpandProperty FullName
+    Compress-Archive -Path $coreItems -DestinationPath $coreZip -Force
+    if (Test-Path -LiteralPath 'persist') { Compress-Archive -Path 'persist' -DestinationPath $persistZip -Force }
+    else { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips' }
     Pop-Location
 }
 Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
-Write-Host "Wrote $backupZip"
+$coreMB = '{0:N0}' -f ((Get-Item -LiteralPath $coreZip).Length / 1MB)
+$persistMB = '{0:N0}' -f ((Get-Item -LiteralPath $persistZip).Length / 1MB)
+Write-Host "Wrote $coreZip ($coreMB MB) + $persistZip ($persistMB MB)"
 Remove-Item -LiteralPath $srcDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Warning 'Review private artifacts before sharing. They may contain tokens, databases, editor state, remote access identity, or other private data.'
 
 if ($Publish) {
-    & (Join-Path $PSScriptRoot 'publish-backup.ps1') -ZipPath $backupZip
+    & (Join-Path $PSScriptRoot 'publish-backup.ps1') -CoreZip $coreZip -PersistZip $persistZip
 }

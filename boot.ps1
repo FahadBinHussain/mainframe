@@ -73,30 +73,48 @@ if ($ghProfile) {
 }
 if (-not $ghToken) { Die "no github token in vault (searched 'github.com' items). add one: github-account.ps1 token-add" }
 
-# --- 4. download latest machine-state zip from private release store ---
-Step "downloading latest machine-state zip from $BackupRepo"
-$env:GH_TOKEN = $ghToken
-$release = gh release view --repo $BackupRepo --json tagName,assets 2>$null | ConvertFrom-Json
-if (-not $release) { Die "no releases in $BackupRepo. run backup.ps1 -Publish on the source machine first." }
-$asset = $release.assets | Where-Object name -like '*.zip' | Select-Object -First 1
-if (-not $asset) { Die "release $($release.tagName) has no zip asset" }
-$zipPath = Join-Path $env:TEMP $asset.name
-gh release download $release.tagName --repo $BackupRepo --pattern '*.zip' --output $zipPath
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zipPath)) { Die "release download failed (token may lack repo scope for private repo $BackupRepo)" }
-Write-Host ("downloaded {0:N0} MB ({1})" -f ((Get-Item $zipPath).Length/1MB), $release.tagName)
-
-# --- 5. extract + restore (mode choice) ---
+# --- 4. restore mode choice (before download - Q skips the persist zip) ---
 Step 'restore mode'
 Write-Host '[F]ull = everything (~30min: bulk apps, pnpm/uv, winget, tasks, patches)'
 Write-Host '[Q]uick = essentials only (~10min: edge profile, opencode, secrets)'
 $mode = 'full'
 $pick = Read-Host 'mode? [F]ull/[Q]uick (default F)'
 if ($pick -match '^(q|quick)$') { $mode = 'quick' }
-Write-Host "extracting backup + running $mode restore (walk away)"
+
+# --- 4b. download split machine-state zips from private release store ---
+# Q = core only (~230MB, edge profile + everything except persist)
+# F = core + persist (full machine state)
+Step "downloading machine-state zips from $BackupRepo"
+$env:GH_TOKEN = $ghToken
+$release = gh release view --repo $BackupRepo --json tagName,assets 2>$null | ConvertFrom-Json
+if (-not $release) { Die "no releases in $BackupRepo. run backup.ps1 -Publish on the source machine first." }
+$coreAsset = $release.assets | Where-Object name -like '*-core.zip' | Select-Object -First 1
+if (-not $coreAsset) { Die "release $($release.tagName) has no core asset (old single-zip format was retired - republish from the source machine)" }
+$wantPersist = $mode -eq 'full'
+if ($wantPersist) {
+    $persistAsset = $release.assets | Where-Object name -like '*-persist.zip' | Select-Object -First 1
+    if (-not $persistAsset) { Die "release $($release.tagName) has no persist asset needed for full restore" }
+}
+$corePath = Join-Path $env:TEMP $coreAsset.name
+gh release download $release.tagName --repo $BackupRepo --pattern '*-core.zip' --output $corePath
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $corePath)) { Die "core download failed (token may lack repo scope for private repo $BackupRepo)" }
+$persistPath = $null
+if ($wantPersist) {
+    $persistPath = Join-Path $env:TEMP $persistAsset.name
+    gh release download $release.tagName --repo $BackupRepo --pattern '*-persist.zip' --output $persistPath
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $persistPath)) { Die "persist download failed" }
+}
+
+# --- 5. extract + restore ---
+Write-Host "extracting $mode assets + running $mode restore (walk away)"
 $extract = Join-Path $env:TEMP 'mainframe-boot-extract'
 if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-7z x $zipPath "-o$extract" -y | Out-Null
-if ($LASTEXITCODE -gt 1) { Die "7z extract failed (is 7zip installed? scoop install 7zip)" }
+7z x $corePath "-o$extract" -y | Out-Null
+if ($LASTEXITCODE -gt 1) { Die "7z core extract failed (is 7zip installed? scoop install 7zip)" }
+if ($persistPath) {
+    7z x $persistPath "-o$extract" -y | Out-Null
+    if ($LASTEXITCODE -gt 1) { Die "7z persist extract failed" }
+}
 
 Step 'phase 1: repo restore (scoop, pnpm, uv, tasks, secrets)'
 & (Join-Path $MainframeDir 'restore.ps1') -Mode $mode -ExcludeSecrets -BackupRoot $extract

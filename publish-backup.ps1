@@ -1,16 +1,19 @@
-# publish-backup.ps1 - upload mainframe-backup.zip to private release store
-# usage: publish-backup.ps1 [-ZipPath <path>] [-Keep 10]
+# publish-backup.ps1 - upload split backup zips to private release store
+# usage: publish-backup.ps1 [-CoreZip <path>] [-PersistZip <path>] [-Keep 10]
 # auth chain: bitwarden session.key (from unlock.ps1) -> vault github token -> gh release upload
-# fails LOUD on: locked vault, missing token, bad scope, gh error. no fallbacks.
+# fails LOUD on: locked vault, missing token, bad scope, missing zips, gh error. no fallbacks.
 param(
-    [string]$ZipPath,
+    [string]$CoreZip,
+    [string]$PersistZip,
     [string]$Repo = 'FahadBinHussain/mainframe-production',
     [int]$Keep = 10
 )
 $ErrorActionPreference = 'Stop'
 
-if (-not $ZipPath) { $ZipPath = Join-Path $PSScriptRoot 'mainframe-backup.zip' }
-if (-not (Test-Path -LiteralPath $ZipPath)) { throw "backup zip not found: $ZipPath (run backup.ps1 first)" }
+if (-not $CoreZip) { $CoreZip = Join-Path $PSScriptRoot 'mainframe-core.zip' }
+if (-not $PersistZip) { $PersistZip = Join-Path $PSScriptRoot 'mainframe-persist.zip' }
+if (-not (Test-Path -LiteralPath $CoreZip)) { throw "core zip not found: $CoreZip (run backup.ps1 first)" }
+if (-not (Test-Path -LiteralPath $PersistZip)) { throw "persist zip not found: $PersistZip (was backup taken with -SkipPersist? both zips are required)" }
 
 # --- vault session (must be unlocked) ---
 $sessionKeyFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
@@ -39,13 +42,14 @@ $me = gh api user --jq .login 2>&1
 if ($LASTEXITCODE -ne 0) { throw "github token rejected: $me" }
 Write-Host "publishing as $me -> $Repo"
 
-# --- create release, upload zip (hostname-tagged so laptop+desktop can both publish) ---
+# --- create release, upload both zips (hostname-tagged so laptop+desktop can both publish) ---
 $hostname = $env:COMPUTERNAME
 $tag = '{0}-{1}' -f (Get-Date -Format 'yyyy-MM-dd-HHmm'), $hostname
-$size = '{0:N0} MB' -f ((Get-Item -LiteralPath $ZipPath).Length / 1MB)
-gh release create $tag $ZipPath --repo $Repo --title "machine state $hostname $tag" --notes "auto-published by backup.ps1 -Publish ($size)"
+$coreMB = '{0:N0}' -f ((Get-Item -LiteralPath $CoreZip).Length / 1MB)
+$persistMB = '{0:N0}' -f ((Get-Item -LiteralPath $PersistZip).Length / 1MB)
+gh release create $tag $CoreZip $PersistZip --repo $Repo --title "machine state $hostname $tag" --notes "auto-published by backup.ps1 -Publish (core $coreMB MB + persist $persistMB MB)"
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE) - token may lack repo scope or release perms" }
-Write-Host "published $tag ($size) -> $Repo"
+Write-Host "published $tag (core $coreMB MB + persist $persistMB MB) -> $Repo"
 
 # --- prune: keep newest $Keep per hostname ---
 $releases = gh release list --repo $Repo --limit 200 --json tagName 2>$null | ConvertFrom-Json

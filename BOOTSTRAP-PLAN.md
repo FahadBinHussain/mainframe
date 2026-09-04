@@ -141,10 +141,9 @@ today both modes download all 425MB compressed. split:
 - **mainframe-persist.zip** (~190MB compressed): persist/ only
 - quick downloads core only (~45% faster download + extract)
 - full downloads both, extracts into the same dir
-- old single-zip releases: boot.ps1 accepts them IF no core asset exists
-  (loud note "old single-zip format"). works until new-format releases land,
-  then the bridge stays as back-compat. (exception to no-fallback rule:
-  documented migration bridge, loudly labeled.)
+- **single-zip retired (2026-09-04):** no migration bridge - the only old-format
+  release was never booted from, and boot.ps1 dies loud when split assets are
+  missing. backup.ps1 deletes any stale `mainframe-backup.zip` with a note.
 
 changes:
 1. backup.ps1: build two zips from staging (core excludes persist\, persist zip
