@@ -779,3 +779,29 @@ rules from this:
 4. tailscaled.state (2 bytes) at %LOCALAPPDATA%\Tailscale is a red herring for
    adapter failures - it is NOT the login store for this scoop install; login
    survives reboots without it.
+
+### edge 2-cycle integration test - VERDICT PASS (desktop-main, 2026-09-04)
+
+ran the full 2-cycle test on the real desktop (real Edge 152, real backup zip 425MB,
+S4U scheduled task for elevation - see note below):
+- run1-register PASS 6/6 (restore registers loc=8 via --load-extension)
+- breadcrumb written PASS
+- backup-keeps-list PASS 6/6 (backup captures loc=4+loc=8 AND unions breadcrumb)
+- run2-register PASS 6/6 from the NEW backup (2nd-run drop is fixed)
+- verdict: all stages green, fix verified end-to-end
+
+test-harness gotchas (the test failed once on these, not the product):
+1. backup.ps1 contract: `-OutputDir X` produces `X\mainframe-backup.zip` (zipped
+   staging), NOT an extracted tree - extract it before reading
+   `edge-profile\unpacked-extensions.json` from it.
+2. schtasks quirk: a task action with a scoop SHIM path (pwsh shim) silently never
+   runs (Last Result 267011 = "has not yet run"). use the real exe
+   `scoop\apps\pwsh\current\pwsh.exe` + S4U principal
+   (`New-ScheduledTaskPrincipal -LogonType S4U -RunLevel Highest`) to run elevated
+   headless over ssh with no UAC. `Start-Process -Verb RunAs` over ssh just waits
+   on a UAC prompt nobody can click.
+3. observed Edge behavior: after a PLAIN relaunch all 6 loc=8 extensions SURVIVED
+   (volatility premise did not reproduce on Edge 152.0.4191.62) - loc=8 cleanup is
+   nondeterministic; the breadcrumb union stays mandatory because loc=8 survival
+   cannot be relied on either way.
+
