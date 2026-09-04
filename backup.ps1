@@ -6,7 +6,8 @@ param(
     [switch]$ExcludeSecrets,
     [string]$SecretsManifestPath,
     [switch]$SkipNativePersist,
-    [string[]]$ScheduledTasksToExport = @()
+    [string[]]$ScheduledTasksToExport = @(),
+    [switch]$Publish
 )
 
 $ErrorActionPreference = 'Stop'
@@ -832,3 +833,7 @@ Write-Host "Wrote $backupZip"
 Remove-Item -LiteralPath $srcDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Warning 'Review private artifacts before sharing. They may contain tokens, databases, editor state, remote access identity, or other private data.'
+
+if ($Publish) {
+    & (Join-Path $PSScriptRoot 'publish-backup.ps1') -ZipPath $backupZip
+}
