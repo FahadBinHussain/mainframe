@@ -85,15 +85,21 @@ gh release download $release.tagName --repo $BackupRepo --pattern '*.zip' --outp
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zipPath)) { Die "release download failed (token may lack repo scope for private repo $BackupRepo)" }
 Write-Host ("downloaded {0:N0} MB ({1})" -f ((Get-Item $zipPath).Length/1MB), $release.tagName)
 
-# --- 5. extract + full restore ---
-Step 'extracting backup + running full restore (15-30 min, walk away)'
+# --- 5. extract + restore (mode choice) ---
+Step 'restore mode'
+Write-Host '[F]ull = everything (~30min: bulk apps, pnpm/uv, winget, tasks, patches)'
+Write-Host '[Q]uick = essentials only (~10min: edge profile, opencode, secrets)'
+$mode = 'full'
+$pick = Read-Host 'mode? [F]ull/[Q]uick (default F)'
+if ($pick -match '^(q|quick)$') { $mode = 'quick' }
+Write-Host "extracting backup + running $mode restore (walk away)"
 $extract = Join-Path $env:TEMP 'mainframe-boot-extract'
 if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
 7z x $zipPath "-o$extract" -y | Out-Null
 if ($LASTEXITCODE -gt 1) { Die "7z extract failed (is 7zip installed? scoop install 7zip)" }
 
 Step 'phase 1: repo restore (scoop, pnpm, uv, tasks, secrets)'
-& (Join-Path $MainframeDir 'restore.ps1') -Mode full -ExcludeSecrets -BackupRoot $extract
+& (Join-Path $MainframeDir 'restore.ps1') -Mode $mode -ExcludeSecrets -BackupRoot $extract
 if ($LASTEXITCODE -ne 0) { Die "restore.ps1 phase 1 failed - scroll up for the exact error" }
 
 # --- 6. tailscale (vault authkey) ---
