@@ -19,10 +19,21 @@ Step 'checking elevation'
 $wid = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not ([Security.Principal.WindowsPrincipal]$wid).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host 'not admin - relaunching elevated (accept the UAC prompt)'
-    $args2 = if ($MyInvocation.Line -match '-') { $MyInvocation.Line } else { '' }
     Start-Process pwsh -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Command', "irm https://raw.githubusercontent.com/$Repo/main/boot.ps1 | iex"
     exit
 }
+
+# --- 0b. bootstrap tools via built-in winget (no usb, no manual installs) ---
+Step 'installing bootstrap tools (git, bitwarden cli, github cli, 7zip)'
+foreach ($pkg in @('Git.Git', 'Bitwarden.CLI', 'GitHub.cli', '7zip.7zip')) {
+    winget install -e --id $pkg --accept-source-agreements --accept-package-agreements --silent 2>$null
+    if ($LASTEXITCODE -ne 0) { Write-Host "$($pkg): already installed or winget hiccup (continuing)" }
+}
+$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+foreach ($cmd in @('git', 'bw', 'gh', '7z')) {
+    if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { Die "$cmd missing after winget step - install it manually and re-run" }
+}
+Write-Host 'all bootstrap tools present'
 
 # --- 1. clone mainframe (public, fast) ---
 Step "cloning $Repo"
