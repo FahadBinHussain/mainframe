@@ -753,3 +753,29 @@ Edge 151+ prunes unpacked developer-mode extensions (loc=4) from a cross-machine
 symptom: edge restore keeps local (unpacked) extensions on the 1st run, drops them on the 2nd. root cause chain: run1 re-registers them as volatile loc=8; a later backup finds no loc=4 (pruned cross-machine) and no loc=8 (dropped on plain relaunch) so it writes NO unpacked list (each backup rebuilds `mainframe-backup.zip` from a fresh temp dir, replacing the old one); run2 then has nothing to restore. backup's old loc=4-only scan + "only write when >0" gate + the stale "loc=8 persists" comment were the three contributors. related single-item trap fixed at the same time: `ConvertFrom-Json` returns a bare object (no `.Count`) for a 1-entry `unpacked-extensions.json`, and the old `if ($unpacked -and $unpacked.Count -gt 0)` gate skipped it — always wrap parsed lists in `@(... | Where-Object { $_ })`.
 - the breadcrumb: `%LOCALAPPDATA%\Microsoft\Edge\unpacked-extensions.local.json` (id, name, path), written by restore with what it actually registered (manifest-guarded), living OUTSIDE `User Data` so profile wipes don't kill it. restore registers backup-list UNION breadcrumb; backup unions fresh prefs (loc=4+loc=8) with the breadcrumb.
 - prune rule (backup only): a carried entry is dropped solely when its folder is gone from disk AND it is absent from fresh prefs (folder present = keep, covers the Edge-pruned case; Edge keeps prefs entries for merely-missing folders, so gone+gone = user-removed). to fully remove an unpacked extension, delete its source folder (and unload it in Edge); the next backup drops it and restore stops re-adding it.
+### wintun.sys deletion + PnP enum surgery = BSOD (incident 2026-09-04, laptop)
+
+what happened: while fixing "tailscale adapter won't start" (0x1F / 0xC00002F0 loop),
+an earlier cleanup pass had deleted `C:\Windows\System32\drivers\wintun.sys` while the
+wintun service entry stayed. restoring the file alone was NOT enough - tailscaled kept
+reopening the stale half-dead adapter node `SWD\WINTUN\{37217669-...}` from Enum.
+attempting registry deletion of that Enum key (reg delete as SYSTEM) while the PnP
+stack was mid-start on the device caused a hard bugcheck (Kernel-Power 41, no dump
+captured). the reboot completed the PnP cleanup deterministically and tailscale came
+back fully healthy (adapter OK, login intact, desktop ping 2ms) with zero re-auth.
+
+rules from this:
+1. NEVER delete Enum/PnP registry keys for a device whose driver is loaded or
+   starting - use `pnputil /remove-device` on a PHANTOM node only, and if that
+   doesn't stick, the answer is a reboot, not registry surgery.
+2. missing `.sys` file + still-present service = driver is half-uninstalled.
+   fix order: restore file -> `sc start` test -> if adapter node is stale,
+   reboot INSTEAD of Enum editing.
+3. tailscaled adapter failure signature: log2/log1 "Timed out waiting for device
+   query" + "Failed to setup adapter (0xC00002F0)" repeating in
+   C:\ProgramData\Tailscale\Logs\tailscale-service-*.txt = adapter-level, not
+   network-level. check System32\drivers\wintun.sys FIRST (size ~29592 bytes is
+   correct - it is tiny; don't mistake it for a broken zip copy).
+4. tailscaled.state (2 bytes) at %LOCALAPPDATA%\Tailscale is a red herring for
+   adapter failures - it is NOT the login store for this scoop install; login
+   survives reboots without it.
