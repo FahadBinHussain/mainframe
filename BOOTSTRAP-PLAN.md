@@ -123,3 +123,34 @@ is the single root of trust.
 2. keep last N backups in the release store? (plan: 3)
 3. repo name for the store: `rmusb-store` ok?
 4. custom short domain later, or raw github url is fine? (plan: raw first)
+
+## split plan (saves ~45% of quick-mode download)
+
+measured from the live 445MB zip (uncompressed ~940MB):
+
+| dir | uncompressed | needed by |
+|---|---|---|
+| edge-profile (extensions 142 + ext storage 149 + indexeddb 67 + ...) | 473 MB | quick + full |
+| persist (scoop app data) | 420 MB | full only |
+| .agents (skills) | 28 MB | both (kept in core, agents need them) |
+| everything else (secrets, tasks, regs, manifests) | ~20 MB | both |
+
+today both modes download all 425MB compressed. split:
+
+- **mainframe-core.zip** (~230MB compressed): everything EXCEPT persist/
+- **mainframe-persist.zip** (~190MB compressed): persist/ only
+- quick downloads core only (~45% faster download + extract)
+- full downloads both, extracts into the same dir
+- old single-zip releases: boot.ps1 accepts them IF no core asset exists
+  (loud note "old single-zip format"). works until new-format releases land,
+  then the bridge stays as back-compat. (exception to no-fallback rule:
+  documented migration bridge, loudly labeled.)
+
+changes:
+1. backup.ps1: build two zips from staging (core excludes persist\, persist zip
+   has persist\ at root). -Publish uploads both assets to the same release.
+2. publish-backup.ps1: upload both, keep-10 per hostname unchanged.
+3. boot.ps1: Q -> core asset only; F -> core + persist assets, sequential
+   extract into one dir; missing asset = loud die (except the old-format bridge).
+4. NOT splitting edge-profile: extension code + storage + indexeddb are one
+   unit ("my edge"). later micro-slims if needed (crx_cache 4MB, metrics 4MB).
