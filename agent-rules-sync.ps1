@@ -7,6 +7,7 @@
 #   5. ~/.kiro/skills symlink -> ~/.agents/skills    (Kiro skills folder, SYMLINK for unified location)
 #   6. ~/.minimax/skills symlink -> ~/.agents/skills (MiniMax Code skills folder, SYMLINK for unified location)
 #   7. ~/Documents/Cline/Rules/AGENTS.md           (Cline global rules, COPY)
+#   8. ~/.gemini/GEMINI.md + AGENTS.md             (Antigravity global rules, COPY - v1.20.3+)
 # Run at login via Task Scheduler (hidden). Stays alive as a file watcher.
 
 $source    = "$env:USERPROFILE\AGENTS.md"
@@ -21,6 +22,8 @@ $clineFile = "$clineRulesDir\AGENTS.md"
 $agentsSkillsDir = "$env:USERPROFILE\.agents\skills"
 $kiroSkillsDir = "$env:USERPROFILE\.kiro\skills"
 $minimaxSkillsDir = "$env:USERPROFILE\.minimax\skills"
+$geminiFile = "$env:USERPROFILE\.gemini\GEMINI.md"
+$geminiAgentsFile = "$env:USERPROFILE\.gemini\AGENTS.md"
 
 function Sync-Rule {
   if (!(Test-Path $source)) {
@@ -91,6 +94,15 @@ conn.close()
   }
   [System.IO.File]::WriteAllText($clineFile, $content, [System.Text.Encoding]::UTF8)
   Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Cline rules synced"
+
+  # 8. Antigravity global rules - COPY to ~/.gemini/GEMINI.md + AGENTS.md (v1.20.3+)
+  if (!(Test-Path (Split-Path $geminiFile -Parent))) {
+    New-Item -ItemType Directory -Path (Split-Path $geminiFile -Parent) -Force | Out-Null
+  }
+  [System.IO.File]::WriteAllText($geminiFile, $content, [System.Text.Encoding]::UTF8)
+  Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Antigravity GEMINI.md synced"
+  [System.IO.File]::WriteAllText($geminiAgentsFile, $content, [System.Text.Encoding]::UTF8)
+  Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Antigravity AGENTS.md synced"
 
   # 5. Kiro skills folder - SYMLINK from ~/.kiro/skills to ~/.agents/skills (unified skills location)
   if (!(Test-Path $agentsSkillsDir)) {
@@ -182,6 +194,8 @@ $syncAction = [scriptblock]::Create(@"
   `$minimaxSkillsDir = '$minimaxSkillsDir'
   `$clineRulesDir = '$clineRulesDir'
   `$clineFile = '$clineFile'
+  `$geminiFile = '$geminiFile'
+  `$geminiAgentsFile = '$geminiAgentsFile'
   `$lastContentFile = '$lastContentFile'
   
   if (!(Test-Path `$source)) { return }
@@ -326,6 +340,8 @@ conn.close()
     'Kiro steering' = `$kiroFile
     'Kilo Code'     = `$kilocodeFile
     'Cline'         = `$clineFile
+    'Antigravity G' = `$geminiFile
+    'Antigravity A' = `$geminiAgentsFile
   }
   foreach (`$name in `$checks.Keys) {
     `$path = `$checks[`$name]

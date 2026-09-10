@@ -662,6 +662,7 @@ helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile d
 - surface ALL blocked projects across accounts at once: `<repo>\vercel-usage-table.ps1` - its BLOCKED-reason section shows the blockCode + commit author per project.
 - fix: create a local deployment-alignment commit authored with the target Vercel account email before deploying: `git -c user.email="<target-vercel-email>" -c user.name="<name>" commit --allow-empty -m "deployment alignment"` (empty commit only when there is no real scoped change to commit).
 - then redeploy and verify the live URL/domain.
+- verified 2026-09-05 (vubon-virtuals/vubon-ecommerce on fahads-projects-c67183fe): the alignment commit alone does NOT clear the block - git-push-triggered deploys stayed BLOCKED even with identical author email/login as a previous READY deploy (Vercel resolves the push to the GitHub identity, which has no seat). what works: after the alignment commit, deploy via CLI from the local linked clone as the owning account (`vercel-account.ps1 run <owner-email> deploy --prod --yes`) - the deploy is attributed to the owner and aliases the custom domain automatically.
 - never pay for team-member seat upgrades or reconnect GitHub per account to work around this.
 
 ### vercel: alias/deployment URL hits "Log in to Vercel" wall (SSO protection)
