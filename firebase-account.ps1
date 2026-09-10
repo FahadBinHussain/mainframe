@@ -5,6 +5,8 @@ $currentFile = Join-Path $accountRoot 'current.json'
 $defaultConfigRoot = Join-Path $env:USERPROFILE '.config'
 $defaultConfigPath = Join-Path $defaultConfigRoot 'configstore\firebase-tools.json'
 
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+
 function Show-Usage {
     @'
 Firebase CLI account profile helper
@@ -36,6 +38,10 @@ Usage:
   .\firebase-account.ps1 path [email]
   .\firebase-account.ps1 env [email]
   .\firebase-account.ps1 logout [email]
+  .\firebase-account.ps1 vault-push [email]       # push local firebase-tools.json -> vault (on-demand)
+  .\firebase-account.ps1 vault-pull [email]       # pull vault -> local (on-demand, no daemon)
+  .\firebase-account.ps1 vault-status [email]
+  .\firebase-account.ps1 vault-status-all
 
 Examples:
   .\firebase-account.ps1 import-current
@@ -93,6 +99,80 @@ function Get-ProfileConfigPath {
     param([string]$ProfilePath)
 
     return Join-Path $ProfilePath 'configstore\firebase-tools.json'
+}
+
+# --- vault on-demand sync (no background, no RAM) ---
+# Firebase refresh_token (1//...) is long-lived; ya29 access_token is short-lived (1h) and
+# refreshed locally by the CLI. Vault stores the whole firebase-tools.json as base64
+# under header [firebase-tools.json] in item "firebase.google.com - <user>" (symmetry with
+# vercel.com / console.neon.tech vault items). Sync is on-demand only: `use`/`run` pull
+# if local missing/stale, `login`/`reauth`/`import-current` push after success, plus
+# explicit vault-push/vault-pull/vault-status commands. No daemon, no hourly job.
+function Get-FirebaseVaultItemName {
+    param([string]$Email)
+    $userPrefix = ($Email -split '@')[0]
+    return "firebase.google.com - $userPrefix"
+}
+
+function Read-FirebaseVaultBase64 {
+    param([string]$Email)
+    $normalized = Normalize-Email -Email $Email
+    return Read-VaultSecret -Email $normalized -NamePattern 'firebase.google.com*' -ValueRegex '[A-Za-z0-9+/=]{200,}'
+}
+
+function Write-FirebaseVaultBase64 {
+    param([string]$Email)
+    $normalized = Normalize-Email -Email $Email
+    $profilePath = Get-ProfilePath -Email $normalized
+    $configPath = Get-ProfileConfigPath -ProfilePath $profilePath
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        throw "No Firebase config to vault-push for $normalized (missing $configPath). Login first."
+    }
+    $raw = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
+    # validate JSON before storing
+    $null = $raw | ConvertFrom-Json
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($raw))
+    $itemName = Get-FirebaseVaultItemName -Email $normalized
+    $null = Write-VaultSecretToExisting -Email $normalized -NamePattern 'firebase.google.com*' -Header '[firebase-tools.json]' -Value $b64 -ItemName $itemName -Username $normalized -Uri 'https://console.firebase.google.com'
+    Write-Host "Firebase vault pushed: $normalized -> $itemName"
+}
+
+function Sync-FirebaseFromVault {
+    param([string]$Email)
+    $normalized = Normalize-Email -Email $Email
+    $b64 = Read-FirebaseVaultBase64 -Email $normalized
+    if ([string]::IsNullOrWhiteSpace($b64)) { return $false }
+    try {
+        $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64.Trim()))
+        $null = $json | ConvertFrom-Json
+        $profilePath = Get-ProfilePath -Email $normalized
+        $configPath = Get-ProfileConfigPath -ProfilePath $profilePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configPath) | Out-Null
+        Set-Content -LiteralPath $configPath -Value $json -Encoding UTF8
+        Write-ProfileMetadata -Email $normalized -ProfilePath $profilePath
+        Write-Host "Firebase vault pulled: $normalized"
+        return $true
+    } catch {
+        Write-Warning "Failed to restore Firebase vault for $normalized : $_"
+        return $false
+    }
+}
+
+function Get-FirebaseVaultStatus {
+    param([string]$Email)
+    $normalized = Normalize-Email -Email $Email
+    $b64 = $null
+    try { $b64 = Read-FirebaseVaultBase64 -Email $normalized } catch { $b64 = $null }
+    $hasVault = -not [string]::IsNullOrWhiteSpace($b64)
+    $profilePath = Get-ProfilePath -Email $normalized
+    $hasLocal = Test-Path -LiteralPath (Get-ProfileConfigPath -ProfilePath $profilePath)
+    return [pscustomobject]@{
+        Email = $normalized
+        HasVault = $hasVault
+        HasLocal = $hasLocal
+        VaultItem = if ($hasVault) { Get-FirebaseVaultItemName -Email $normalized } else { $null }
+        State = if ($hasVault -and $hasLocal) { 'synced' } elseif ($hasVault) { 'vault-only' } elseif ($hasLocal) { 'local-only' } else { 'missing' }
+    }
 }
 
 function Get-FirebaseCommand {
@@ -457,6 +537,7 @@ function Import-CurrentProfile {
     Write-ProfileMetadata -Email $targetEmail -ProfilePath $profilePath
     Set-ActiveEmail -Email $targetEmail
     Write-Host "Firebase profile imported and active: $targetEmail"
+    try { Write-FirebaseVaultBase64 -Email $targetEmail } catch { Write-Warning "Vault push failed (non-fatal): $_" }
 }
 
 function Login-Profile {
@@ -507,6 +588,7 @@ function Login-Profile {
     Write-ProfileMetadata -Email $finalEmail -ProfilePath $finalPath
     Set-ActiveEmail -Email $finalEmail
     Write-Host "Firebase profile ready and active: $finalEmail"
+    try { Write-FirebaseVaultBase64 -Email $finalEmail } catch { Write-Warning "Vault push failed (non-fatal): $_" }
 }
 
 function Get-ProfileStatus {
@@ -604,7 +686,11 @@ switch ($action.ToLowerInvariant()) {
         $email = Normalize-Email -Email $remaining[0]
         $profilePath = Get-ProfilePath -Email $email
         if (-not (Test-Path -LiteralPath $profilePath)) {
-            throw "Firebase profile does not exist yet: $email"
+            # on-demand restore from vault if local missing (no daemon)
+            try { $restored = Sync-FirebaseFromVault -Email $email } catch { $restored = $false }
+            if (-not $restored -or -not (Test-Path -LiteralPath $profilePath)) {
+                throw "Firebase profile does not exist yet: $email (no local profile and no vault entry to pull)"
+            }
         }
 
         Set-ActiveEmail -Email $email
@@ -772,6 +858,46 @@ switch ($action.ToLowerInvariant()) {
     'logout' {
         $email = Get-EmailOrActive -Email $(if ($remaining.Count -ge 1) { $remaining[0] } else { $null })
         Remove-Profile -Email $email
+    }
+
+    'vault-push' {
+        if ($remaining.Count -gt 1) { throw 'Usage: .\firebase-account.ps1 vault-push [email]' }
+        $email = Get-EmailOrActive -Email $(if ($remaining.Count -eq 1) { $remaining[0] } else { $null })
+        Write-FirebaseVaultBase64 -Email $email
+    }
+
+    'vault-pull' {
+        if ($remaining.Count -gt 1) { throw 'Usage: .\firebase-account.ps1 vault-pull [email]' }
+        $email = Get-EmailOrActive -Email $(if ($remaining.Count -eq 1) { $remaining[0] } else { $null })
+        if (-not (Sync-FirebaseFromVault -Email $email)) { throw "No vault entry found for $email (firebase.google.com*). Push first with vault-push." }
+        Set-ActiveEmail -Email $email
+    }
+
+    'vault-status' {
+        if ($remaining.Count -gt 1) { throw 'Usage: .\firebase-account.ps1 vault-status [email]' }
+        $email = Get-EmailOrActive -Email $(if ($remaining.Count -eq 1) { $remaining[0] } else { $null })
+        Get-FirebaseVaultStatus -Email $email | Format-List
+    }
+
+    'vault-status-all' {
+        if ($remaining.Count -ne 0) { throw 'Usage: .\firebase-account.ps1 vault-status-all' }
+        $profiles = @()
+        # local profiles
+        if (Test-Path -LiteralPath $accountRoot) {
+            $profiles += @(Get-ChildItem -LiteralPath $accountRoot -Directory -Force | Where-Object { $_.Name -match '^[^\s@]+@[^\s@]+\.[^\s@]+$' } | ForEach-Object { $_.Name })
+        }
+        # vault-only profiles (no local dir yet)
+        try {
+            $vaultItems = @(Get-VaultItems | Where-Object { $_.name -like 'firebase.google.com*' })
+            foreach ($it in $vaultItems) {
+                $em = $null
+                if ($it.login.username -match '^[^\s@]+@[^\s@]+\.[^\s@]+$') { $em = $it.login.username.ToLowerInvariant() }
+                if ($em -and $profiles -notcontains $em) { $profiles += $em }
+            }
+        } catch {}
+        $profiles = @($profiles | Sort-Object -Unique)
+        if ($profiles.Count -eq 0) { Write-Host 'No Firebase vault or local profiles found.'; return }
+        $profiles | ForEach-Object { Get-FirebaseVaultStatus -Email $_ } | Format-Table -AutoSize
     }
 
     default {
