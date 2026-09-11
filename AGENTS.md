@@ -635,6 +635,43 @@ helper: `<repo>\..\automata\uptimerobot.com\uptimerobot-account.ps1` (moved to a
 - create monitors under a PSP (public status page) so they aggregate on one page.
 - PSPs can be password protected (password set by user, not stored in the repo); the urlKey in the PSP record maps to the public status page URL.
 
+## firebase: account helper + vault on-demand
+
+helper: `<repo>\firebase-account.ps1` (contract PASS). profiles at
+`%APPDATA%\mainframe\accounts\firebase\<email>\` selected via `XDG_CONFIG_HOME`;
+the real CLI state is `configstore\firebase-tools.json` (the OAuth
+`access_token`/`refresh_token`, `expires_in 3599`, scopes
+`cloud-platform firebase cloudplatformprojects.readonly`). subcommands: `login`
+(reauth via `firebase login --no-localhost`), `use <email>`, `current`, `list`,
+`status`/`status-all`, `path`/`env`, `run -- <firebase args>`, `projects`, `apps`,
+`sdkconfig`, `whoami`, plus the vault trio `vault-push`/`vault-pull`/`vault-status`/
+`vault-status-all`.
+
+- **vault on-demand (2026-09-11, symmetry with vercel/neon)**: the `firebase-tools.json`
+  token is stored base64 under a `[firebase-tools.json]` header in the Bitwarden item
+  `firebase.google.com - <email>` via `vault-secret.psm1`. `login`/reauth/import-current
+  auto-write the vault; `use` auto-syncs from the vault when the local file is missing.
+  `vault-push`/`vault-pull`/`vault-status` are the manual edges; `vault-status-all`
+  reports synced/missing across profiles. helpers read vault only when the local
+  configstore is absent — never silently overwrite a live token.
+- **⚠️ the `firebase-tools` OAuth token CANNOT admin-write Identity Toolkit / Service
+  Usage / Realtime Database.** Any REST call to `identitytoolkit` (`v2/…/config`,
+  `…/identityPlatform:initializeAuth`), `serviceusage` (`services:batchEnable`,
+  `…:enable`), or `firebasedatabase` (`CreateDatabaseInstance`) with this bearer returns
+  `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` ("Expected OAuth 2 access token, login cookie…").
+  `firebase.googleapis.com` GET/PATCH likewise 401s. `gcloud auth login --cred-file`
+  rejects the authorized_user JSON ("Only external account or service account …"). **So
+  enabling Firebase Auth on a fresh project, publishing the OAuth consent screen, and
+  creating the Realtime Database instance must be done in the console — there is no CLI
+  /API path with mainframe firebase credentials.** Do not burn time on REST again.
+- **free-tier project quota** is the blocker on `projects:create` (`QuotaFailure`,
+  ACTIVE + DELETE_REQUESTED count toward it); wait the ~30-day purge or file a
+  Cloud Resource Manager quota bump. `DELETE_REQUESTED` projects still count until purge.
+- profiles keyed by account email only (mainframe contract); never save a
+  project/label/workspace fallback. new project = create under the account that has
+  quota, add the other account as Editor if needed (`SOLO_MUST_INVITE_OWNERS` blocks
+  inviting a second OWNER on a solo-owner project).
+
 ## huggingface: space secrets/variables (no CLI support)
 
 the `hf` CLI has no secrets/variables command; use the HF REST API with the mainframe profile token (read from `%APPDATA%\mainframe\accounts\hf\<email>\token`) and `Authorization: Bearer <token>`.
