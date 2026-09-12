@@ -1341,6 +1341,12 @@ switch ($action.ToLowerInvariant()) {
             $cmdArgs = @($remaining)
         }
 
+        # fix powershell splatting: @e11 without quotes is parsed as array splat, not a ref.
+        # auto-quote any bare @eNN refs so `exec click @e11` works without manual quoting.
+        $cmdArgs = @($cmdArgs | ForEach-Object {
+            if ($_ -match '^@e\d+$') { "'$_'" } else { $_ }
+        })
+
         $normalized = Normalize-Email -Email $email
         $profilePath = Get-ProfilePath -Email $normalized
         # the email-keyed dir IS the chromium user-data-dir (contains Default/ + sibling state files like Local State)
@@ -1348,16 +1354,34 @@ switch ($action.ToLowerInvariant()) {
 
         $agentBrowser = Resolve-AgentBrowserCommand
 
-        # sync-then-spawn: refresh the mainframe profile from the real Edge User Data dir
-        # so every agent-browser session starts with a clean throwaway copy.
+        # agent bash tool detection: opencode's bash hangs on direct `agent-browser open` (pipe never closes).
+        # use detached workflow for exec when called from an agent (OPENCODE* env or ServerRemoteHost).
+        $isAgentBash = ($env:OPENCODE -or $env:AGENT -or $env:OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS -or $env:OPENCODE_API_KEY -or $Host.Name -eq 'ServerRemoteHost' -or $env:CI)
+        # also auto-detect if a daemon is already running for this profile — VSS sync kills it (AGENTS.md).
+        $daemonRunning = $false
         try {
-            Sync-EdgeProfileToMainframe -Email $normalized
-        } catch {
-            Write-Warning "[edge-cdp-sync] sync failed, spawning against existing profile: $($_.Exception.Message)"
-        }
+            $abState = Join-Path $env:USERPROFILE '.agent-browser'
+            $pidFile = Join-Path $abState 'default.pid'
+            if (Test-Path -LiteralPath $pidFile) {
+                $pidVal = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim()
+                if ($pidVal -match '^\d+$' -and (Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue)) { $daemonRunning = $true }
+            }
+        } catch {}
 
-        # drop stale agent-browser daemon state + chromium lockfiles so the spawn doesn't "relaunch".
-        Clear-StaleAgentBrowserState -ProfilePath $chromeProfileDir -Email $normalized
+        if (-not $daemonRunning) {
+            # sync-then-spawn: refresh the mainframe profile from the real Edge User Data dir
+            # so every agent-browser session starts with a clean throwaway copy.
+            # skip when daemon already running — sync would /MIR-kill the live session (AGENTS.md).
+            try {
+                Sync-EdgeProfileToMainframe -Email $normalized
+            } catch {
+                Write-Warning "[edge-cdp-sync] sync failed, spawning against existing profile: $($_.Exception.Message)"
+            }
+            # drop stale agent-browser daemon state + chromium lockfiles so the spawn doesn't "relaunch".
+            Clear-StaleAgentBrowserState -ProfilePath $chromeProfileDir -Email $normalized
+        } else {
+            Write-Host "[edge-cdp-sync] daemon running — skipping VSS sync (would kill live session)" -ForegroundColor Yellow
+        }
 
         # globals (--profile, --executable-path) must come BEFORE the subcommand in cmdArgs;
         # agent-browser parses them as top-level options, not as subcommand flags.
@@ -1369,7 +1393,13 @@ switch ($action.ToLowerInvariant()) {
         $globals += @('--profile', $chromeProfileDir)
         $fullArgs = $globals + $cmdArgs
 
-        & $agentBrowser @fullArgs
+        if ($isAgentBash) {
+            # detached output — never call `& $agentBrowser` directly from an agent bash tool (hangs 120s).
+            $out = Invoke-AgentBrowserDetachedOutput -ProfileDir $chromeProfileDir -Command $fullArgs -WaitSeconds 40
+            Write-Host $out
+        } else {
+            & $agentBrowser @fullArgs
+        }
     }
 
     'cookies' {
