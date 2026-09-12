@@ -896,9 +896,14 @@ DisallowStartIfOnBatteries) -> `automata\mainframe\daily-backup-publish.ps1` ->
   prunes to the newest 10 for that host with `gh release delete --cleanup-tag`.
 - **idempotent**: skips if `C:\tmp\daily-backup-lastdate.txt` already holds today's date
   (task retriggers won't double-publish). throws loudly if the vault is locked (no `session.key`).
-- **what's zipped**: `%APPDATA%\mainframe\accounts\*` + scoop persist dirs (VSS + robocopy,
-  skips `Cache`/`logs`) + core config. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
+- **what's zipped**: scoop persist dirs (VSS + robocopy, skips `Cache`/`logs`) + core config + edge profile + skills. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
   or `C:\tmp` — cleaning those does not change what a backup captures.
+- **vault is never backed up** (decided 2026-09-12). the bitwarden vault lives server-side; we do not ship it:
+  - `backup.ps1` persist `$excludeDirs` includes `bitwarden-cli` → the encrypted `bw-data\data.json` cache is not captured on any run (daily or full).
+  - `tool-secrets.manifest.json` `mainframe tool auth profiles and tokens` item has `excludeDirs: ["bitwarden"]` → the full-run `secrets\` archive skips `accounts\bitwarden\` (`session.key` + profile).
+  - a restore therefore has no vault session; run `automata\bitwarden.com\unlock.ps1` to re-login (rebuilds `data.json` from the server) before anything needs a token.
+  - other `accounts\<tool>\` profile dirs still travel — since 2026-08-22 they hold only `profile.json`/`current.json` metadata + CLI state, not raw secrets (those are vault-native).
+
 
 **visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
 runs silent. it now hands visibility to an on-demand interactive task:

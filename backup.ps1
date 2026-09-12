@@ -352,7 +352,9 @@ if ($SkipPersist) {
         'vscode', 'rustup', 'python', 'windsurf',
         'bun', 'deno', 'uv', 'php', 'gcc', 'discord', 'mariadb', 'postgresql', 'lmstudio',
         'steam',
-        'obs-studio'
+        'obs-studio',
+        # vault is server-side; never ship the encrypted bw-data cache in a backup. re-login rebuilds it.
+        'bitwarden-cli'
     )
     $torBrowserCacheExcludes = @(
         'storage', 'shader-cache',
