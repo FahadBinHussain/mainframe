@@ -882,3 +882,36 @@ passed while the user-facing bug was still live - "volatility premise holds
 (expect 0)" even CODIFIED the broken behavior. v2 asserts ext-procs + loc=4
 survival across 3 plain launches. always assert user-visible behavior.
 
+## daily mainframe backup: release cap + visible run
+
+chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
+DisallowStartIfOnBatteries) -> `automata\mainframe\daily-backup-publish.ps1` ->
+`backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
+
+- **where it goes**: `publish-backup.ps1` uploads the `core` + `persist` zips to a
+  **private GitHub release** on `FahadBinHussain/mainframe-production`, tag
+  `yyyy-MM-dd-HHmm-<hostname>` (hostname-tagged so laptop + desktop can both publish
+  into the same repo). auth: vault `session.key` -> vault github token -> `gh release create`.
+- **capped, not infinite**: `-Keep 10` (default) per hostname. after each publish it
+  prunes to the newest 10 for that host with `gh release delete --cleanup-tag`.
+- **idempotent**: skips if `C:\tmp\daily-backup-lastdate.txt` already holds today's date
+  (task retriggers won't double-publish). throws loudly if the vault is locked (no `session.key`).
+- **what's zipped**: `%APPDATA%\mainframe\accounts\*` + scoop persist dirs (VSS + robocopy,
+  skips `Cache`/`logs`) + core config. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
+  or `C:\tmp` — cleaning those does not change what a backup captures.
+
+**visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
+runs silent. it now hands visibility to an on-demand interactive task:
+
+- `backup-notify.ps1` draws a borderless topmost banner bottom-right + plays a system sound,
+  auto-dismiss: blue `start`, green `done`, gray `skip`, red `MAINFRAME BACKUP FAILED` (stays ~45s).
+- scheduled task `MainframeBackupNotify` (LogonType **Interactive**, no trigger, Parallel) runs
+  `pwsh -File backup-notify.ps1` with **no args** — it reads one line `state|message` from
+  `C:\tmp\backup-notify.txt`, which the backup writes right before `Start-ScheduledTask`.
+  state goes via a file because `Start-ScheduledTask` can't pass arguments to the target.
+- `daily-backup-publish.ps1` calls `Notify start|done|skip|fail` at those points.
+- manual test: `.\backup-notify.ps1 -State done -Message "tag 2026-...-DESKTOP"`.
+- caveat: the banner only renders when a user is actually logged on and unlocked; on a locked
+  / headless run there is no desktop to draw on, so the only record is `C:\tmp\daily-backup.log`.
+
+
