@@ -437,6 +437,11 @@ this stops only the agent-browser-spawned Edge daemon, not the user's personal E
 - **commands return empty output**: the detached pwsh process may still be running. increase `Start-Sleep`, or check if the temp file exists yet with `Test-Path`.
 - **browser didn't launch**: check if a previous Edge session is still holding the profile dir. run `agent-browser close --all` first, clean stale locks, then retry.
 
+#### agent-browser exec hang + @e11 quoting fix (2026-09-12)
+- **opencode bash hang**: `agent-browser-account.ps1 exec` directly did `& $agentBrowser @fullArgs` in-process. opencode's bash tool waits for pipes to close, so `open`/`snapshot` poll forever (120s timeout). fix: `exec` now detects agent bash (`$env:OPENCODE`/`$env:AGENT`) and routes through `Invoke-AgentBrowserDetachedOutput` (`Start-Process pwsh -WindowStyle Hidden` + temp file poll, 40s). `exec get url` now returns in `0.7s` vs `120s`.
+- **VSS kill on exec**: `exec` previously always ran `Sync-EdgeProfileToMainframe` (VSS shadow + robocopy) which `/MIR`-killed any live daemon (the `AGENTS.md` 3-step workflow's already-running browser). fix: `exec` now checks `~/.agent-browser/default.pid` + `Get-Process` — if daemon running, skips VSS sync (`daemon running — skipping VSS sync`) and preserves the session.
+- **powershell splat `@e11`**: `click @e11` without quotes is parsed as array splat (`@e11` → variable `e11`), `exec` got `Missing arguments for: click`. fix: `exec` auto-quotes bare `@e\d+` refs (`"'$_'"` in `$cmdArgs` pipeline) so `exec click @e11` and `exec click "@e11"` both work. verified `account-contract.ps1` still `PASS`.
+
 ### which account to use
 check active first:
 ```
