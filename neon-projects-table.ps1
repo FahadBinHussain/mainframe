@@ -5,6 +5,7 @@
 # (compute_time_seconds = billable CU-sec; see neon-hours-table.ps1 for quota math).
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\neon'
 $apiBase = 'https://console.neon.tech/api/v2'
 
@@ -19,9 +20,11 @@ $accounts = Get-ChildItem $accountRoot -Directory |
 
 $rows = @()
 foreach ($email in $accounts) {
-    $apiKeyPath = Join-Path $accountRoot "$email\api-key.txt"
-    if (-not (Test-Path $apiKeyPath)) { continue }
-    $apiKey = (Get-Content $apiKeyPath -Raw).Trim()
+    # vault-native api key (no api-key.txt in profile dirs since 2026-08-22);
+    # a profile without a vault entry is simply skipped.
+    try {
+        $apiKey = Read-VaultSecret -Email $email -NamePattern 'console.neon.tech*' -ValueRegex 'napi_[A-Za-z0-9]+'
+    } catch { continue }
     if ([string]::IsNullOrWhiteSpace($apiKey)) { continue }
 
     $headers = @{ 'Authorization' = "Bearer $apiKey"; 'Accept' = 'application/json' }

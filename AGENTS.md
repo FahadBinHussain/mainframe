@@ -104,6 +104,18 @@ two helper scripts live next to the account helpers and iterate every mainframe 
 <repo>\neon-projects-table.ps1
 ```
 
+### ⚠️ gotcha: vault migration left the bulk scripts file-blind (fixed 2026-09-13)
+both `neon-hours-table.ps1` and `neon-projects-table.ps1` read api keys from
+`<profile>\api-key.txt`, but the 2026-08-22 vault migration deleted those files (keys now
+live in Bitwarden item `console.neon.tech - <user>` under `[api keys]`, regex `napi_`).
+result: the scripts skipped EVERY account and printed `No Neon projects found.` — looked
+like an outage, was a stale read path. fixed: both now `Import-Module vault-secret.psm1` and
+`Read-VaultSecret -Email <profile-email> -NamePattern 'console.neon.tech*' -ValueRegex
+'napi_[A-Za-z0-9]+'` per profile (same pattern as `vercel-usage-table.ps1`); profiles
+without a vault entry are skipped. when the table prints zero rows, check the read path is
+vault-native BEFORE assuming the accounts are empty. `render-services-table.ps1` still uses
+file-based keys and is fine only because render profiles still carry `api-key.txt`.
+
 ### quota and metering (read this — easy to get wrong)
 official source: https://neon.com/docs/introduction/plans  (Free: 100 CU-hours/project/month, 0.5 GB storage/project, 5 GB egress/month, resets each billing period).
 
