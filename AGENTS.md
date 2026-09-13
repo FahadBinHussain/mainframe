@@ -746,6 +746,33 @@ helper: `<repo>\supabase-account.ps1` (contract PASS). profiles at `%APPDATA%\ma
 - `run` restricts the host to `api.supabase.com` (path can be full URL or bare like `v1/projects`; bare paths get `/v1` prefixed).
 - profiles keyed by account email only — never store username/label/project-name fallbacks.
 
+## terabox: web-session cookie helper
+
+helper: `<repo>\terabox-account.ps1` (contract PASS). profiles at
+`%APPDATA%\mainframe\accounts\terabox\<email>\` holding `cookie.txt` (raw
+`*.terabox.com` browser Cookie-header value, must contain `ndus=`) — that's
+session state (like wrangler oauth state / the configstore pattern), the account
+PASSWORD lives only in the vault items `terabox.com` / `terabox.com[2]`
+(login.password).
+
+- auth model: terabox web API = cookies + `jsToken` scraped from the site homepage
+  per request + `app_id=250528&web=1&channel=dubox&clienttype=0&version=4`. start at
+  `https://dm.terabox.com`; an `errno -6` response with a `Url-Domain-Prefix` header
+  means retry against `https://<prefix>.terabox.com` (handled in `Invoke-TeraboxApi`,
+  max 4 hops, throws on loop).
+- quota/plan check: `GET /api/quota?disk_type=0` → `{total, used, extra.init_quota_type}`
+  (free promo accounts show `permanent_1024g_temp_0g`). every `import`/`login` runs this
+  BEFORE writing anything: an unverifiable cookie never creates a profile.
+- commands: `login <email>` (opens agent-browser at terabox.com, polls
+  `cookies get --json` for `ndus` for 5 min, then captures the whole terabox cookie
+  domain set), `import <email> [-Cookie ..|-CookieFile ..]` (hidden prompt if neither),
+  `use/current/list/status/status-all/quota/path/env/logout`, and
+  `run [email] <GET|POST> </api/path> [params-or-body]` (params = `a=1&b=2` raw on GET,
+  form body on POST; helper injects app_id/jsToken/channel + follows the -6 dance).
+- status-all is the "which terabox accounts do I have / how full" check.
+- gotcha: `$home` is a read-only built-in in PowerShell — naming a local variable that
+  throws "Cannot overwrite variable Home" at runtime; use `$homeResp`. (hit during dev)
+
 ## edge: cross-machine extension restore (forcelist + registry external loader)
 
 **the problem**: Edge 151+ validates store-extension install signatures against the machine ID (`install_signer.cc` `HashWithMachineId` via RLZ). a profile restored on a DIFFERENT pc fails that check, and Edge silently removes every `location=1` store extension from `Secure Preferences` on first launch (measured 53 enabled -> 24, same on every attempt). extension FILES on disk survive (`Default\Extensions` still has 29 dirs) but the settings entries are wiped, so the extensions are gone. file-level fixes that do NOT work (all verified on the desktop): stripping `install_signature`/`microsoft_install_signature` from `Preferences`, stripping per-extension `installation_signature` from `Secure Preferences`, wiping `extensions.settings` entirely, setting `location=4`, deleting `Local State`, deleting `_metadata/verified_contents.json`, `icacls /reset`. the stored signature can never verify on another machine because the RLZ machine id differs.
