@@ -752,8 +752,9 @@ helper: `<repo>\terabox-account.ps1` (contract PASS). profiles at
 `%APPDATA%\mainframe\accounts\terabox\<email>\` holding `cookie.txt` (raw
 `*.terabox.com` browser Cookie-header value, must contain `ndus=`) — that's
 session state (like wrangler oauth state / the configstore pattern), the account
-PASSWORD lives only in the vault items `terabox.com` / `terabox.com[2]`
-(login.password).
+PASSWORD lives only in the vault items `terabox.com - <user>` (consolidated
+2026-09-13: was `terabox.com` + stale dup `dubox.com` (old pw preserved in notes) +
+`terabox.com[2]`).
 
 - auth model: terabox web API = cookies + `jsToken` scraped from the site homepage
   per request + `app_id=250528&web=1&channel=dubox&clienttype=0&version=4`. start at
@@ -766,9 +767,28 @@ PASSWORD lives only in the vault items `terabox.com` / `terabox.com[2]`
 - commands: `login <email>` (opens agent-browser at terabox.com, polls
   `cookies get --json` for `ndus` for 5 min, then captures the whole terabox cookie
   domain set), `import <email> [-Cookie ..|-CookieFile ..]` (hidden prompt if neither),
-  `use/current/list/status/status-all/quota/path/env/logout`, and
+  `use/current/list/status/status-all/quota/path/env/logout`, `mkdir <email> </dir>`,
+  `delete <email> </path> [...]`, `upload <email> <file> [-RemoteDir /dir]`, and
   `run [email] <GET|POST> </api/path> [params-or-body]` (params = `a=1&b=2` raw on GET,
   form body on POST; helper injects app_id/jsToken/channel + follows the -6 dance).
+- **upload protocol** (ported from imgvault `uploaders.js` `TeraBoxUploader`, the proven
+  implementation — do NOT re-derive from the desktop app): `/api/precreate` on
+  `dm.terabox.com` with the params as an **x-www-form-urlencoded BODY** (query-string
+  params = silent `errno 1 stat server err`); `block_list` = JSON array of per-4MB-chunk
+  md5s + `local_mtime` + `file_limit_switch_v34=true`. `return_type=2` = rapid upload
+  (already on server) → skip to create. Then `GET
+  https://dm-data.terabox.com/rest/2.0/pcs/file?method=locateupload` → the real upload
+  host (e.g. `dm1-cdata.terabox.com`; guessing `c-jp`/the uploadid IP fails with
+  `user not exists`/timeout). Multipart `file=` POST `https://<host>/rest/2.0/pcs/superfile2
+  ?method=upload&path&uploadid&partseq&app_id&web=1&channel=dubox&clienttype=0` per 4MB
+  chunk (each returns its md5 — verify). Then `/api/create` (query `isdir=0&rtype=1`, form
+  body path/size/uploadid/target_path/block_list/local_mtime) → `fs_id`. `4000023` = stale
+  jsToken → resrape + retry once (NOT a captcha wall). verified 2026-09-13: 12 MB + 100 MB
+  round-trip, ~0.95 MB/s free-tier. AList's 3-cookie set (ndus+browserid+lang) is SUFFICIENT
+  for the whole flow incl. upload.
+- restore/download side: dlinks from `/api/filemetas?target=["<path>"]&dlink=1&origin=dlna`
+  (crack mode) are ~30KB/s CDN-throttled for big files with the session cookie (see imgvault
+  AGENTS tsl=30 vs 2000). fast lane = cookie-less redirect. prefer for occasional pulls.
 - status-all is the "which terabox accounts do I have / how full" check.
 - gotcha: `$home` is a read-only built-in in PowerShell — naming a local variable that
   throws "Cannot overwrite variable Home" at runtime; use `$homeResp`. (hit during dev)
