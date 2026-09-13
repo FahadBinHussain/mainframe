@@ -153,12 +153,21 @@ function Get-TeraboxQuota {
 }
 
 function Get-TeraboxJsToken {
-    param([string]$Cookie, [string]$Base)
-    $headers = @{ Cookie = $Cookie; Accept = 'text/html'; 'User-Agent' = $userAgent }
-    $r = Invoke-WebRequest -Uri "$Base/" -Headers $headers -UseBasicParsing -TimeoutSec 30
-    $m = [regex]::Match($r.Content, 'function%20fn%28a%29%7Bwindow.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29')
-    if (-not $m.Success) { throw "jsToken not found on $Base/" }
-    $m.Groups[1].Value
+    param([string]$Cookie, [string]$Base = 'https://www.terabox.com')
+    $pat = 'function%20fn%28a%29%7Bwindow\.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29'
+    foreach ($src in @(@{ u = 'https://www.terabox.com'; ck = $false }, @{ u = 'https://dm.terabox.com'; ck = $true })) {
+        for ($try = 1; $try -le 3; $try++) {
+            try {
+                $headers = @{ Accept = 'text/html,application/xhtml+xml'; 'User-Agent' = $userAgent }
+                if ($src.ck -and $Cookie) { $headers['Cookie'] = $Cookie }
+                $r = Invoke-WebRequest -Uri "$($src.u)/" -Headers $headers -UseBasicParsing -TimeoutSec 30
+                $m = [regex]::Match($r.Content, $pat)
+                if ($m.Success) { return $m.Groups[1].Value }
+            } catch {}
+            Start-Sleep -Milliseconds (400 * $try)
+        }
+    }
+    throw 'jsToken not found on www/dm homepages after 3x each (simple-verify gate) — open https://www.terabox.com once in the browser, then retry'
 }
 
 function Upload-TeraboxFile {
