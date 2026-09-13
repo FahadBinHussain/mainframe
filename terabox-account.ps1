@@ -152,6 +152,91 @@ function Get-TeraboxQuota {
     Invoke-TeraboxApi -Email $Email -Method 'GET' -Path '/api/quota' -Params 'disk_type=0' -CookieOverride $CookieOverride
 }
 
+function Get-TeraboxJsToken {
+    param([string]$Cookie, [string]$Base)
+    $headers = @{ Cookie = $Cookie; Accept = 'text/html'; 'User-Agent' = $userAgent }
+    $r = Invoke-WebRequest -Uri "$Base/" -Headers $headers -UseBasicParsing -TimeoutSec 30
+    $m = [regex]::Match($r.Content, 'function%20fn%28a%29%7Bwindow.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29')
+    if (-not $m.Success) { throw "jsToken not found on $Base/" }
+    $m.Groups[1].Value
+}
+
+function Upload-TeraboxFile {
+    param([string]$Email, [string]$LocalPath, [string]$RemoteDir = '/')
+    $cookie = Read-ProfileCookie -Email $Email
+    $item = Get-Item -LiteralPath $LocalPath
+    if (-not $item) { throw "no such file: $LocalPath" }
+    if ($item.Length -gt 4294967296) { throw "file >4GB: free-tier web cap (VIP 20GB). refusing: $($item.Name)" }
+    $api = 'https://dm.terabox.com'
+    $hdr = @{ Cookie = $cookie; Accept = 'application/json, text/plain, */*'; Referer = "$api/"; 'User-Agent' = $userAgent; 'X-Requested-With' = 'XMLHttpRequest' }
+    $js = Get-TeraboxJsToken -Cookie $cookie -Base 'https://www.terabox.com'
+    function New-TeraBlockMd5s([System.IO.FileInfo]$fi, [int]$chunkSize) {
+        $fs = [IO.File]::OpenRead($fi.FullName)
+        try {
+            $md5 = [Security.Cryptography.MD5]::Create()
+            $buf = New-Object byte[] $chunkSize
+            $blocks = @()
+            while ($fs.Position -lt $fi.Length) {
+                $n = $fs.Read($buf, 0, $chunkSize)
+                $blocks += , ([BitConverter]::ToString($md5.ComputeHash($buf, 0, $n)) -replace '-', '' ).ToLower()
+            }
+            return $blocks
+        } finally { $fs.Dispose() }
+    }
+    $chunkSize = 4MB
+    $md5s = New-TeraBlockMd5s -fi $item -chunkSize $chunkSize
+    $blockJson = ($md5s | ConvertTo-Json -Compress)
+    if ($md5s.Count -eq 1) { $blockJson = '["' + $md5s[0] + '"]' }
+    $remoteDir = $remoteDir.TrimEnd('/')
+    $cloudPath = "$remoteDir/$($item.Name)"
+    function Invoke-TeraApiPost([string]$Path, [string]$Query, [string]$Form, [AllowNull()][string]$Token) {
+        if (-not $Token) { $Token = $js }
+        $r = Invoke-WebRequest -Uri "$api$Path`?app_id=$appId&web=1&channel=dubox&clienttype=0&jsToken=$Token$Query" -Method Post -Headers ($hdr + @{ 'Content-Type' = 'application/x-www-form-urlencoded' }) -Body $Form -UseBasicParsing -TimeoutSec 60
+        $j = $r.Content | ConvertFrom-Json
+        if ($j.errno -eq 4000023) {
+            $Token = Get-TeraboxJsToken -Cookie $cookie -Base 'https://www.terabox.com'
+            $r = Invoke-WebRequest -Uri "$api$Path`?app_id=$appId&web=1&channel=dubox&clienttype=0&jsToken=$Token$Query" -Method Post -Headers ($hdr + @{ 'Content-Type' = 'application/x-www-form-urlencoded' }) -Body $Form -UseBasicParsing -TimeoutSec 60
+            $j = $r.Content | ConvertFrom-Json
+        }
+        return @{ Json = $j; Token = $Token }
+    }
+    $mtime = [DateTimeOffset]::FromUnixTimeSeconds([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()).ToUnixTimeSeconds()
+    $pre = Invoke-TeraApiPost -Path '/api/precreate' -Query '' -Form "path=$([Uri]::EscapeDataString($cloudPath))&autoinit=1&target_path=$([Uri]::EscapeDataString($remoteDir))&block_list=$([Uri]::EscapeDataString($blockJson))&local_mtime=$mtime&file_limit_switch_v34=true"
+    if ($pre.Json.errno -ne 0) { throw "precreate failed (errno $($pre.Json.errno)): $($pre.Json.errmsg)" }
+    if ($pre.Json.return_type -eq 2) {
+        Write-Host 'rapid upload (return_type=2): content already on server, skipping chunk transfer'
+        $cr = Invoke-TeraApiPost -Path '/api/create' -Query '&isdir=0&rtype=1' -Form "path=$([Uri]::EscapeDataString($cloudPath))&size=$($item.Length)&uploadid=$($pre.Json.uploadid)&target_path=$([Uri]::EscapeDataString($remoteDir))&block_list=$([Uri]::EscapeDataString($blockJson))&local_mtime=$mtime" -Token $pre.Token
+        if ($cr.Json.errno -ne 0) { throw "create failed after rapid-upload (errno $($cr.Json.errno)): $($cr.Json.errmsg)" }
+        return [pscustomobject]@{ Email = $Email; CloudPath = $cloudPath; SizeBytes = $item.Length; FsId = $cr.Json.fs_id; Rapid = $true }
+    }
+    $loc = (Invoke-WebRequest -Uri 'https://dm-data.terabox.com/rest/2.0/pcs/file?method=locateupload' -Headers $hdr -UseBasicParsing -TimeoutSec 30).Content | ConvertFrom-Json
+    if (-not $loc.host) { throw "locateupload returned no host: $($loc | ConvertTo-Json -Compress)" }
+    Write-Host "upload host: $($loc.host)"
+    $uploadid = $pre.Json.uploadid
+    $curl = (Get-Command curl.exe).Source
+    $fs = [IO.File]::OpenRead($item.FullName)
+    try {
+        $buf = New-Object byte[] $chunkSize
+        $seq = 0; $swUp = [Diagnostics.Stopwatch]::StartNew(); $realMd5s = @()
+        while ($fs.Position -lt $item.Length) {
+            $n = $fs.Read($buf, 0, $chunkSize)
+            $tmp = Join-Path $env:TEMP "tbchunk-$([Guid]::NewGuid().ToString('N')).bin"
+            [IO.File]::WriteAllBytes($tmp, $buf[0..($n - 1)])
+            $qp = "method=upload&path=$([Uri]::EscapeDataString($cloudPath))&uploadid=$([Uri]::EscapeDataString($uploadid))&partseq=$seq&app_id=$appId&web=1&channel=dubox&clienttype=0"
+            $out = & $curl -sS --connect-timeout 30 --max-time 300 -X POST -H "Cookie: $cookie" -H "User-Agent: $userAgent" -F "file=@$tmp;filename=$($item.Name)" "https://$($loc.host)/rest/2.0/pcs/superfile2?$qp" 2>&1
+            Remove-Item $tmp -Force -EA SilentlyContinue
+            $uj = (($out | ForEach-Object { [string]$_ }) -join '') | ConvertFrom-Json
+            if (-not $uj.md5) { throw "chunk $seq upload failed: $(($out | Out-String).Trim())" }
+            if ($uj.md5 -ne $md5s[$seq]) { throw "chunk $seq md5 mismatch: got $($uj.md5) expected $($md5s[$seq])" }
+            $realMd5s += $uj.md5
+            $seq++
+            if ($seq % 25 -eq 0 -or $fs.Position -ge $item.Length) { Write-Host ("  chunk {0}/{1} [{2:hh\:mm\:ss}]" -f $seq, $md5s.Count, $swUp.Elapsed) }
+        }
+    } finally { $fs.Dispose() }
+    $cr = Invoke-TeraApiPost -Path '/api/create' -Query '&isdir=0&rtype=1' -Form "path=$([Uri]::EscapeDataString($cloudPath))&size=$($item.Length)&uploadid=$($uploadid)&target_path=$([Uri]::EscapeDataString($remoteDir))&block_list=$([Uri]::EscapeDataString(($realMd5s | ConvertTo-Json -Compress)))&local_mtime=$mtime" -Token $pre.Token
+    if ($cr.Json.errno -ne 0) { throw "create failed (errno $($cr.Json.errno)): $($cr.Json.errmsg)" }
+    [pscustomobject]@{ Email = $Email; CloudPath = $cloudPath; SizeBytes = $item.Length; FsId = $cr.Json.fs_id; Rapid = $false }
+}
 function Save-CookieProfile {
     param([string]$Email, [string]$Cookie)
     $normalized = Normalize-Email -Email $Email
@@ -281,6 +366,36 @@ switch ($action.ToLowerInvariant()) {
             [pscustomobject]$row
         }
         $rows | Format-Table -AutoSize
+    }
+
+    'mkdir' {
+        if ($rest.Count -lt 2) { throw 'Usage: mkdir <email> </remote/dir>' }
+        $email = Normalize-Email -Email $rest[0]
+        $dir = $rest[1]
+        $cookie = Read-ProfileCookie -Email $email
+        $js = Get-TeraboxJsToken -Cookie $cookie -Base 'https://www.terabox.com'
+        $r = Invoke-WebRequest -Uri "https://dm.terabox.com/api/create?path=$([Uri]::EscapeDataString($dir))&size=0&isdir=1&name=$([Uri]::EscapeDataString((Split-Path $dir -Leaf)))&app_id=$appId&web=1&channel=dubox&clienttype=0&version=4&jsToken=$js" -Method Post -Headers @{ Cookie = $cookie; 'User-Agent' = $userAgent; Referer = 'https://dm.terabox.com/'; Origin = 'https://www.terabox.com'; 'Content-Type' = 'application/x-www-form-urlencoded' } -Body '' -UseBasicParsing -TimeoutSec 40 | ConvertFrom-Json
+        if ($r.errno -ne 0) { throw "mkdir failed: $($r | ConvertTo-Json -Compress)" }
+        Write-Host "dir: $($r.path)"
+    }
+
+    'upload' {
+        if ($rest.Count -lt 2) { throw 'Usage: upload <email> <local-file> [-RemoteDir /dir]' }
+        $email = Normalize-Email -Email $rest[0]
+        $file = $rest[1]
+        $rd = '/'
+        for ($i = 2; $i -lt $rest.Count; $i++) { if ($rest[$i] -eq '-RemoteDir') { $rd = $rest[++$i] } }
+        $r = Upload-TeraboxFile -Email $email -LocalPath $file -RemoteDir $rd
+        Write-Host "uploaded: $($r.CloudPath)  ($([math]::Round($r.SizeBytes/1MB,2)) MB, fs_id=$($r.FsId))"
+    }
+
+    'delete' {
+        if ($rest.Count -lt 2) { throw 'Usage: delete <email> </remote/path> [more paths...]' }
+        $email = Normalize-Email -Email $rest[0]
+        $paths = @($rest[1..($rest.Count - 1)])
+        $list = ($paths | ForEach-Object { '"' + $_ + '"' }) -join ','
+        $null = Invoke-TeraboxApi -Email $email -Method 'POST' -Path '/api/filemanager' -Params 'onnest=fail&opera=delete' -Body "async=0&filelist=$([Uri]::EscapeDataString("[$list]"))&ondup=newcopy"
+        Write-Host "deleted: $($paths -join ', ')"
     }
 
     'run' {
