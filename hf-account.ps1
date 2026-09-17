@@ -212,7 +212,7 @@ function Write-ProfileTokenValue {
     $profilePath = Get-ProfilePath -Profile $normalized
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
     $userPrefix = ($normalized -split '@')[0]
-    Write-VaultSecretToExisting -Email $normalized -NamePattern 'huggingface.co*' -Header 'User Access Tokens' -Value $Token.Trim() -ItemName "huggingface.co - $userPrefix" -Username $normalized -Uri 'https://huggingface.co/settings/tokens'
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'huggingface.co*' -Header 'User Access Tokens' -Value $Token.Trim() -ItemName 'huggingface.co' -Username $normalized -Uri 'https://huggingface.co/settings/tokens'
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
     Set-ActiveProfile -Profile $normalized
 }

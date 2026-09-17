@@ -110,8 +110,7 @@ function Get-ProfileConfigPath {
 # explicit vault-push/vault-pull/vault-status commands. No daemon, no hourly job.
 function Get-FirebaseVaultItemName {
     param([string]$Email)
-    $userPrefix = ($Email -split '@')[0]
-    return "firebase.google.com - $userPrefix"
+    return 'firebase.google.com'
 }
 
 function Read-FirebaseVaultBase64 {

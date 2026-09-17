@@ -155,7 +155,7 @@ function Write-ProfileToken {
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
     $plainToken = Convert-SecureStringToPlainText -SecureString $Token
     $userPrefix = ($normalized -split '@')[0]
-    Write-VaultSecretToExisting -Email $normalized -NamePattern 'console.cron-job.org' -Header '[api keys]' -Value $plainToken.Trim() -ItemName "console.cron-job.org - $userPrefix" -Username $normalized -Uri 'https://console.cron-job.org/settings/api'
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'console.cron-job.org' -Header '[api keys]' -Value $plainToken.Trim() -ItemName 'console.cron-job.org' -Username $normalized -Uri 'https://console.cron-job.org/settings/api'
     Set-ActiveProfile -Profile $normalized
 }
 

@@ -241,7 +241,7 @@ function Write-ProfileToken {
 
     $plainToken = Convert-SecureStringToPlainText -SecureString $Token
     $userPrefix = ($normalized -split '@')[0]
-    Write-VaultSecretToExisting -Email $normalized -NamePattern 'vercel.com*' -Header '[tokens]' -Value $plainToken.Trim() -ItemName "vercel.com - $userPrefix" -Username $normalized -Uri 'https://vercel.com/account/tokens'
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'vercel.com*' -Header '[tokens]' -Value $plainToken.Trim() -ItemName 'vercel.com' -Username $normalized -Uri 'https://vercel.com/account/tokens'
     Set-ActiveEmail -Email $normalized
 }
 
@@ -260,7 +260,7 @@ function Write-ProfileTokenText {
     Ensure-ProfileDirectory -ProfilePath $profilePath
 
     $userPrefix = ($normalized -split '@')[0]
-    Write-VaultSecretToExisting -Email $normalized -NamePattern 'vercel.com*' -Header '[tokens]' -Value $Token.Trim() -ItemName "vercel.com - $userPrefix" -Username $normalized -Uri 'https://vercel.com/account/tokens'
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'vercel.com*' -Header '[tokens]' -Value $Token.Trim() -ItemName 'vercel.com' -Username $normalized -Uri 'https://vercel.com/account/tokens'
     Set-ActiveEmail -Email $normalized
 }
 

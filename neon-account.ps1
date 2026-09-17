@@ -363,7 +363,7 @@ function Write-ProfileApiKeyValue {
     $profilePath = Get-ProfilePath -Email $detectedEmail
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
     $userPrefix = ($detectedEmail -split '@')[0]
-    Write-VaultSecretToExisting -Email $detectedEmail -NamePattern 'console.neon.tech*' -Header '[api keys]' -Value $ApiKey.Trim() -ItemName "console.neon.tech - $userPrefix" -Username $detectedEmail -Uri 'https://console.neon.tech/app/settings#password'
+    Write-VaultSecretToExisting -Email $detectedEmail -NamePattern 'console.neon.tech*' -Header '[api keys]' -Value $ApiKey.Trim() -ItemName 'console.neon.tech' -Username $detectedEmail -Uri 'https://console.neon.tech/app/settings#password'
     Write-ProfileMetadata -Email $detectedEmail -ProfilePath $profilePath -AuthType 'api-key' -Authority $authority
     Set-ActiveEmail -Email $detectedEmail
     $label = if ($authority.FullAuthority) { 'full-authority' } else { 'limited' }
