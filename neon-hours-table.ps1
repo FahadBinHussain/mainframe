@@ -86,10 +86,30 @@ foreach ($email in $accounts) {
         }
 
         if ($projects.Count -eq 0) {
+            # Even with 0 live projects, org consumption still holds this period's burned CU
+            # (deleted projects count until period reset). Query it instead of hardcoding 0.
+            $period = $null
+            try {
+                $c = Invoke-RestMethod -Uri "$apiBase/organizations/$($org.id)/consumption" -Headers $headers
+                if ($c.periods -and $c.periods.Count -gt 0) { $period = $c.periods[$c.periods.Count - 1] }
+            } catch {}
+            $ctSec = if ($period -and $period.compute_time) { [double]$period.compute_time } else { 0 }
+            $atSec = if ($period -and $period.active_time)  { [double]$period.active_time  } else { 0 }
+            $quotaReset = if ($period -and $period.period_end)  { $period.period_end  } else { '-' }
+            $quotaStart = if ($period -and $period.period_start) { $period.period_start } else { '-' }
+            $plan = if ($period -and $period.plan_details -and $period.plan_details.name) {
+                        "$($period.plan_details.name) v$($period.plan_details.version.major).$($period.plan_details.version.minor)"
+                    } else { $org.plan }
+            $cuUsed  = [math]::Round($ctSec / 3600, 2)
+            $cuLeft  = [math]::Round((($FREE_CU_SEC - $ctSec) / 3600), 2)
+            $pct     = if ($FREE_CU_SEC -gt 0) { [math]::Round(($ctSec / $FREE_CU_SEC) * 100, 1) } else { 0 }
+            $activeH = [math]::Round($atSec / 3600, 1)
             $results += [pscustomobject]@{
-                Account=$email; Project='(no projects)'; ProjectId=$org.id; OrgId=$org.id; Plan=$org.plan
-                CU_Hours_Used=0; CU_Hours_Left=$FREE_CU_HOURS; Pct=0
-                Projects_Count=0; Quota_Reset='-'; Status='NO PROJECTS'
+                Account=$email; Project='(no projects)'; ProjectId=$org.id; OrgId=$org.id; Plan=$plan
+                CU_Hours_Used=$cuUsed; CU_Hours_Left=$cuLeft; Pct=$pct
+                Active_Hours=$activeH; Storage_MB=0
+                Projects_Count=0; Quota_Reset=$quotaReset; Period_Start=$quotaStart
+                Status="NO PROJECTS (burned ${cuUsed}CU this period, resets $quotaReset)"
             }
             continue
         }
