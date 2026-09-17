@@ -139,8 +139,7 @@ function Write-ProfileToken {
     $profilePath = Get-ProfilePath -Profile $normalized
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
     $plainToken = Convert-SecureStringToPlainText -SecureString $Token
-    $userPrefix = ($normalized -split '@')[0]
-    Write-VaultSecretToExisting -Email $normalized -NamePattern 'supabase.com*' -Header 'Access Tokens' -Value $plainToken.Trim() -ItemName "supabase.com - $userPrefix" -Username $normalized -Uri 'https://supabase.com/dashboard/account/tokens'
+    Write-VaultSecretToExisting -Email $normalized -NamePattern 'supabase.com*' -Header 'Access Tokens' -Value $plainToken.Trim() -ItemName 'supabase.com' -Username $normalized -Uri 'https://supabase.com/dashboard/account/tokens'
     Set-ActiveProfile -Profile $normalized
 }
 
