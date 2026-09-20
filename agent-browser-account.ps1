@@ -799,11 +799,14 @@ function Invoke-AgentBrowser {
     # silently fall back to its bundled chrome — which is what was happening before.
     $args = [System.Collections.Generic.List[string]]::new()
 
-    $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
-    if (Test-Path -LiteralPath $edgePath) {
-        $args.Add('--executable-path')
-        $args.Add($edgePath)
+    # Keep agent-browser on the fixed Edge build while the system Edge launcher
+    # still resolves to 153.0.4234.32, which has the interaction-hang bug.
+    $edgePath = 'C:\Program Files (x86)\Microsoft\Edge\Application\153.0.4234.48\msedge.exe'
+    if (-not (Test-Path -LiteralPath $edgePath)) {
+        throw "Required fixed Edge executable not found: $edgePath"
     }
+    $args.Add('--executable-path')
+    $args.Add($edgePath)
 
     $args.Add('--profile')
     $args.Add($chromeProfileDir)
