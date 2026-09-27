@@ -44,7 +44,7 @@ if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 }
 # Accept both the current 'github.com - <login>' item and the legacy exact
 # 'github.com' item. Find-VaultItemByEmail still binds the item to this profile.
-$token = Read-VaultSecret -Email $email -NamePattern 'github.com*' -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
+$token = Read-VaultSecret -Email $email -NamePattern @('github.com', 'github.com - *') -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
 if (-not $token) { throw "no github token found in vault for $email (item like 'github.com*')" }
 $env:GH_TOKEN = $token
 

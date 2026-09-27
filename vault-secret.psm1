@@ -85,7 +85,7 @@ function Clear-VaultItemsCache {
 function Find-VaultItemByEmail {
     param(
         [string]$Email,
-        [string]$NamePattern = '*'
+        [string[]]$NamePattern = '*'
     )
 
     $normalizedEmail = $Email.Trim().ToLowerInvariant()
@@ -93,9 +93,10 @@ function Find-VaultItemByEmail {
 
     # primary: login.username matches the email exactly
     $item = $items | Where-Object {
-        $_.name -like $NamePattern -and
-        $_.login.username -and
-        ([string]$_.login.username).Trim().ToLowerInvariant() -eq $normalizedEmail
+        $vaultItem = $_
+        (@($NamePattern | Where-Object { $vaultItem.name -like $_ }).Count -gt 0) -and
+        $vaultItem.login.username -and
+        ([string]$vaultItem.login.username).Trim().ToLowerInvariant() -eq $normalizedEmail
     } | Select-Object -First 1
     if ($item) {
         return $item
@@ -103,9 +104,10 @@ function Find-VaultItemByEmail {
 
     # fallback: notes contain the email on its own line (github/uptimerobot convention)
     $item = $items | Where-Object {
-        $_.name -like $NamePattern -and
-        $_.notes -and
-        (@($_.notes -split "`r?`n") | Where-Object { $_.Trim().ToLowerInvariant() -eq $normalizedEmail })
+        $vaultItem = $_
+        (@($NamePattern | Where-Object { $vaultItem.name -like $_ }).Count -gt 0) -and
+        $vaultItem.notes -and
+        (@($vaultItem.notes -split "`r?`n") | Where-Object { $_.Trim().ToLowerInvariant() -eq $normalizedEmail })
     } | Select-Object -First 1
     if ($item) {
         return $item
@@ -134,7 +136,7 @@ function Get-SecretFromNotes {
 function Read-VaultSecret {
     param(
         [string]$Email,
-        [string]$NamePattern,
+        [string[]]$NamePattern,
         [string]$ValueRegex
     )
 
@@ -211,7 +213,7 @@ function New-VaultItem {
 function Write-VaultSecretToExisting {
     param(
         [string]$Email,
-        [string]$NamePattern,
+        [string[]]$NamePattern,
         [string]$Header,
         [string]$Value,
         [AllowNull()][string]$ItemName,

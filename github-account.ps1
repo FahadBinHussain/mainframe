@@ -227,7 +227,7 @@ function Write-ProfileTokenValue {
     $vaultName = if ($GitHubLogin) { "github.com - $GitHubLogin" } else { "github.com - $userPrefix" }
     # Read/update both current handle-suffixed items and the legacy exact
     # 'github.com' item so token-add remains compatible with existing vaults.
-    Write-VaultSecretToExisting -Email $normalized -NamePattern 'github.com*' -Header '[tokens]' -Value $Token.Trim() -ItemName $vaultName -Username $GitHubLogin -Uri 'https://github.com/settings/tokens'
+    Write-VaultSecretToExisting -Email $normalized -NamePattern @('github.com', 'github.com - *') -Header '[tokens]' -Value $Token.Trim() -ItemName $vaultName -Username $GitHubLogin -Uri 'https://github.com/settings/tokens'
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath -GitHubLogin $GitHubLogin
     Set-ActiveProfile -Profile $normalized
 }
@@ -236,7 +236,7 @@ function Read-ProfileToken {
     param([string]$Profile)
 
     $normalized = Normalize-ProfileName -Profile $Profile
-    return Read-VaultSecret -Email $normalized -NamePattern 'github.com*' -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
+    return Read-VaultSecret -Email $normalized -NamePattern @('github.com', 'github.com - *') -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
 }
 
 function Invoke-WithGitHubProfile {
