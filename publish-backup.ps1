@@ -28,12 +28,23 @@ if (-not $status -or $status.status -ne 'unlocked') {
 
 # --- github token from vault ---
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
-$ghProfiles = Get-ChildItem (Join-Path $env:APPDATA 'mainframe\accounts\github') -Directory -ErrorAction SilentlyContinue
-if (-not $ghProfiles) { throw "no github profile in %APPDATA%\mainframe\accounts\github - run github-account.ps1 token-add first" }
-$email = $ghProfiles[0].Name
-# token lives under the [tokens] header of the 'github.com - <login>' item
-# (same lookup github-account.ps1 uses)
-$token = Read-VaultSecret -Email $email -NamePattern 'github.com - *' -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
+$githubAccountRoot = Join-Path $env:APPDATA 'mainframe\accounts\github'
+$currentProfileFile = Join-Path $githubAccountRoot 'current.json'
+if (-not (Test-Path -LiteralPath $currentProfileFile)) {
+    throw "no active github profile at $currentProfileFile - run github-account.ps1 use <email> first"
+}
+try {
+    $currentProfile = Get-Content -LiteralPath $currentProfileFile -Raw | ConvertFrom-Json
+} catch {
+    throw "active github profile metadata is unreadable at $currentProfileFile - run github-account.ps1 use <email> first"
+}
+$email = ([string]$currentProfile.profile).Trim().ToLowerInvariant()
+if ($email -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+    throw "active github profile is missing a valid email in $currentProfileFile - run github-account.ps1 use <email> first"
+}
+# Accept both the current 'github.com - <login>' item and the legacy exact
+# 'github.com' item. Find-VaultItemByEmail still binds the item to this profile.
+$token = Read-VaultSecret -Email $email -NamePattern 'github.com*' -ValueRegex '(ghp_|github_pat_)[A-Za-z0-9_]+'
 if (-not $token) { throw "no github token found in vault for $email (item like 'github.com*')" }
 $env:GH_TOKEN = $token
 
