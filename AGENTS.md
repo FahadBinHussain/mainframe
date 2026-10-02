@@ -628,6 +628,8 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 
 ## agents.md sync (AgentsMdSync)
 
+**2026-10-02: the script moved to automata-private** (`automata-private\tools\agent-rules-sync\agent-rules-sync.ps1`, part of the mainframe -> automata merge) and the `AgentsMdSync` task was repointed there — edit it THERE, not here; this repo no longer has a copy. everything below still describes the behavior:
+
 `agent-rules-sync.ps1` is the logon task `AgentsMdSync`. it watches `~/AGENTS.md` and copies it into each tool's global rules path. grok's copy is a plain file at `~/.grok/rules/AGENTS.md` (no yaml header — grok loads every `*.md` in that directory as instructions and does not strip frontmatter). the running task holds the script in memory, so after editing the script restart `AgentsMdSync` or the new target stays dark until the next logon.
 
 ## skills dir nesting guard
