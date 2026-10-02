@@ -116,6 +116,15 @@ without a vault entry are skipped. when the table prints zero rows, check the re
 vault-native BEFORE assuming the accounts are empty. `render-services-table.ps1` still uses
 file-based keys and is fine only because render profiles still carry `api-key.txt`.
 
+### ⚠️ gotcha: `Read-VaultSecret` returns a plain String, not an object (2026-10-02)
+`$tok = Read-VaultSecret ...` gives you the secret itself (`System.String`). writing
+`$tok.Value` (a natural habit from other `Read-*` helpers) silently yields **empty**, so
+`git push "https://x-access-token:$tok.Value@github.com/..."` goes up with no credentials
+and GitHub answers `Invalid username or token. Password authentication is not supported`
+— which reads like "token expired" when it is actually "you sent nothing". interpolate
+`$tok` directly, and if a push ever says *Invalid username or token*, print
+`$tok.Length` first before hunting for a stale credential.
+
 ### quota and metering (read this — easy to get wrong)
 official source: https://neon.com/docs/introduction/plans  (Free: 100 CU-hours/project/month, 0.5 GB storage/project, 5 GB egress/month, resets each billing period).
 
@@ -617,6 +626,10 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
   stop the VPN client + service, do the work, then restore. the NCF is per-process and NOT
   influenced by service stop alone while the client runs.
 
+## agents.md sync (AgentsMdSync)
+
+`agent-rules-sync.ps1` is the logon task `AgentsMdSync`. it watches `~/AGENTS.md` and copies it into each tool's global rules path. grok's copy is a plain file at `~/.grok/rules/AGENTS.md` (no yaml header — grok loads every `*.md` in that directory as instructions and does not strip frontmatter). the running task holds the script in memory, so after editing the script restart `AgentsMdSync` or the new target stays dark until the next logon.
+
 ## skills dir nesting guard
 
 `~/.agents/skills` was once copied into itself multiple levels deep
@@ -952,6 +965,15 @@ passed while the user-facing bug was still live - "volatility premise holds
 survival across 3 plain launches. always assert user-visible behavior.
 
 ## daily mainframe backup: release cap + visible run
+
+### backup publish vault lookup gotcha (fixed 2026-09-27)
+
+`publish-backup.ps1` must read the active GitHub profile from
+`%APPDATA%\mainframe\accounts\github\current.json` and pass that email to the
+vault helper. It must search `github.com*`, not only `github.com - *`: both the
+handle-suffixed item and the legacy exact item named `github.com` are valid. The
+shared GitHub account helper uses the same pattern. Never select the first
+profile directory or print token/notes contents while diagnosing this path.
 
 chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
 DisallowStartIfOnBatteries) -> `automata\mainframe\daily-backup-publish.ps1` ->
