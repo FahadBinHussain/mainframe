@@ -978,6 +978,26 @@ handle-suffixed item and the legacy exact item named `github.com` are valid. The
 shared GitHub account helper uses the same pattern. Never select the first
 profile directory or print token/notes contents while diagnosing this path.
 
+### prune deleted the release it had just uploaded (fixed 2026-10-03)
+
+`gh release list` returns **newest-first**, but the prune did
+`$mine | Select-Object -First ($mine.Count - $Keep)` as if the head were the oldest —
+so every run deleted the release it had just created. the giveaway: the repo sat at
+**exactly** `$Keep` (10) releases forever, all tagged `<= 2026-09-21`, while
+`daily-backup.log` showed a successful publish every single day. a count pinned at
+exactly `$Keep` is the signature (create -> prune eats it -> back to `$Keep`), and
+`done: ... holds 10` printed anyway, so nothing looked broken. **12 days of backups
+(2026-09-22..2026-10-03) were uploaded and immediately destroyed**; the local zips are
+overwritten daily, so those snapshots are gone for good.
+
+fix: `Sort-Object tagName` before the slice (tags are `yyyy-MM-dd-HHmm-<host>`, so
+lexicographic == chronological), plus a post-prune assertion that the new tag still
+exists — if it doesn't the script throws instead of printing `done`.
+
+diagnostic to reuse: release count == `$Keep` exactly AND the newest tag stops moving
+while the log keeps saying DONE = prune is eating the new releases.
+
+
 chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
 DisallowStartIfOnBatteries) -> `automata\mainframe\daily-backup-publish.ps1` ->
 `backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.

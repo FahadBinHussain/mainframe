@@ -63,8 +63,14 @@ if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE) 
 Write-Host "published $tag (core $coreMB MB + persist $persistMB MB) -> $Repo"
 
 # --- prune: keep newest $Keep per hostname ---
+# gh release list returns NEWEST-FIRST. tags are yyyy-MM-dd-HHmm-<host>, so sorting
+# ascending by tagName gives chronological order; slicing First(count-Keep) then
+# removes the OLDEST. (bug 2026-10-03: without the sort the slice took the head of a
+# newest-first list, i.e. the release just created -- every daily publish from
+# 2026-09-22 to 2026-10-03 was uploaded and immediately deleted, and the count stayed
+# pinned at exactly $Keep so nothing looked wrong.)
 $releases = gh release list --repo $Repo --limit 200 --json tagName 2>$null | ConvertFrom-Json
-$mine = @($releases | Where-Object { $_.tagName -like "*-$hostname" })
+$mine = @($releases | Where-Object { $_.tagName -like "*-$hostname" } | Sort-Object tagName)
 if ($mine.Count -gt $Keep) {
     $old = $mine | Select-Object -First ($mine.Count - $Keep)
     foreach ($r in $old) {
@@ -72,4 +78,10 @@ if ($mine.Count -gt $Keep) {
         Write-Host "pruned old release $($r.tagName)"
     }
 }
+# fail LOUD if the prune ate the release we just uploaded
+$after = gh release list --repo $Repo --limit 200 --json tagName 2>$null | ConvertFrom-Json
+if (-not ($after | Where-Object { $_.tagName -eq $tag })) {
+    throw "prune deleted the just-created release $tag - prune is still sorting wrong"
+}
+Write-Host "verified: $tag survived prune"
 Write-Host "done: $Repo now holds $([Math]::Min($mine.Count, $Keep)) releases for $hostname"
