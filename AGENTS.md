@@ -997,6 +997,36 @@ exists — if it doesn't the script throws instead of printing `done`.
 diagnostic to reuse: release count == `$Keep` exactly AND the newest tag stops moving
 while the log keeps saying DONE = prune is eating the new releases.
 
+### site-packages is not shipped; pip-freeze.txt is the manifest (2026-10-03)
+
+`persist\python312\Lib\site-packages` was **428 MB of the 491 MB persist zip** and held
+**no user data**: across all 173 `dist-info` dirs there were **0 `direct_url.json`** (no
+editable/local/git installs — every package is PyPI-reproducible), the only `.pth` files
+are pip's own (`distutils-precedence.pth`, `pywin32.pth`), no `sitecustomize` /
+`usercustomize`, and the 9.7 MB of data-ish files are package-shipped test fixtures
+(`pywt/tests`, `scipy/tests`, auditok demo wavs). `VapourSynth 79` looks hand-placed but
+is a normal pip package.
+
+- **backup** (`backup.ps1`, `python312` robocopy branch): copies `python312` with
+  `/XD site-packages`; `Scripts` (87 files, 13.9 MB, incl. `pip.exe`) stays because the
+  restore pip step needs it.
+- **backup** (pip export): writes `pip-freeze.txt` at the zip root = one
+  `--extra-index-url https://download.pytorch.org/whl/cpu` line (torch/torchvision are
+  `+cpu` builds, PyPI alone can't satisfy them) + `pip list --format=freeze` for every
+  package, versions pinned. throws if the freeze comes back empty — an empty manifest
+  with no shipped bytes = 150+ packages silently missing after a restore.
+- **restore** (`restore.ps1`): `pip install -r <backup>\pip-freeze.txt` in ONE call and
+  **throws** on a missing file, zero package lines, or non-zero pip exit. no skip loop.
+- **`pip-allowed.json` is deleted.** it listed **1 package while 157 were installed**, and
+  the backup's `pip-packages.json` recorded that same 1 — the only reason old restores
+  worked was that the site-packages bytes shipped alongside. if pip restore ever looks
+  thin, check `pip-freeze.txt` first, not an allowlist.
+- **measured 2026-10-03**: persist 505 → **63 MB**, core 257 → 234 MB (Edge-profile churn,
+  unrelated), total **762 → 297 MB/day** (`site-packages` entries in the new zip: 0).
+
+**diagnostic to reuse**: `pip list --format=freeze` count vs the number of package lines
+in `pip-freeze.txt` — they must match; a mismatch means the export filter broke.
+
 chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
 DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
 `backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
@@ -1009,7 +1039,7 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   prunes to the newest 10 for that host with `gh release delete --cleanup-tag`.
 - **idempotent**: skips if `C:\tmp\daily-backup-lastdate.txt` already holds today's date
   (task retriggers won't double-publish). throws loudly if the vault is locked (no `session.key`).
-- **what's zipped**: scoop persist dirs (VSS + robocopy, skips `Cache`/`logs`) + core config + edge profile + skills. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
+- **what's zipped**: scoop persist dirs (VSS + robocopy, skips `Cache`/`logs`) + core config + edge profile + skills. `persist\python312\Lib\site-packages` is **NOT** shipped (see below) — everything else in `python312` (incl. `Scripts`, which carries `pip.exe`) is. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
   or `C:\tmp` — cleaning those does not change what a backup captures.
 - **vault is never backed up** (decided 2026-09-12). the bitwarden vault lives server-side; we do not ship it:
   - `backup.ps1` persist `$excludeDirs` includes `bitwarden-cli` → the encrypted `bw-data\data.json` cache is not captured on any run (daily or full).
