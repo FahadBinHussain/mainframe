@@ -997,9 +997,8 @@ exists — if it doesn't the script throws instead of printing `done`.
 diagnostic to reuse: release count == `$Keep` exactly AND the newest tag stops moving
 while the log keeps saying DONE = prune is eating the new releases.
 
-
 chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
-DisallowStartIfOnBatteries) -> `automata\mainframe\daily-backup-publish.ps1` ->
+DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
 `backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
 
 - **where it goes**: `publish-backup.ps1` uploads the `core` + `persist` zips to a
