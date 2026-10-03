@@ -1,10 +1,13 @@
 # vault-secret.ps1 - shared Bitwarden vault read/write for mainframe account helpers
 #
 # Vault-native secrets: each helper stores per-profile secrets in the Bitwarden
-# vault as a LOGIN item named by the platform (e.g. "console.neon.tech - <user>"),
-# with the secret value in the item's notes under a platform-specific header
-# (e.g. "[api keys]`n<value>"). This module finds the item by the profile email
-# and extracts/updates the value. No secrets are stored in the mainframe profile dir.
+# vault as a LOGIN item named by the bare platform domain (e.g. "console.neon.tech";
+# github alone uses "github.com - <handle>"). Two accounts on one domain are told
+# apart by login.username/URI, never by a name suffix (the old "[2]" and " - <user>"
+# suffixes were removed 2026-10). The secret value sits in the item's notes under
+# a platform-specific header (e.g. "[api keys]`n<value>"). This module finds the
+# item by the profile email and extracts/updates the value. No secrets are stored
+# in the mainframe profile dir.
 #
 # Session: read from %APPDATA%\mainframe\accounts\bitwarden\session.key (written
 # by automata\bitwarden.com\unlock.ps1) or $env:BW_SESSION. If the vault is locked,
