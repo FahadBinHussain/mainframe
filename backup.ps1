@@ -544,7 +544,7 @@ if (Test-Path -LiteralPath $edgeUserData) {
         New-Item -ItemType Directory -Force -Path $edgeDest | Out-Null
         Invoke-RobocopyLockedAware -RobocopyArgs @(
             $edgeUserDataShadow, $edgeDest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XJ',
-            '/XD', 'Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache', 'GraphiteDawnCache', 'blob_storage', 'Crashpad', 'component_crx_cache', 'ProvenanceData', 'ProvenanceDataTensors', 'Subresource Filter', 'BrowserMetrics', 'Safe Browsing', 'Shared Dictionary', 'File System', 'logs', '*.blob', 'Edge Entity Extraction', 'Edge Shopping', 'Edge Wallet', 'EdgeCoupons', 'EdgeLanguageDetectionModel', 'Edge Sidebar', 'EdgeTravel', 'EdgeCDSScheduler', 'EdgePushNotificationClient', 'EdgeDrop', 'EdgeCollections', 'EdgeTrackingPrevention', 'EdgeFavoritesBackup', 'WidevineCdm', 'image_cache', 'Speech Recognition', 'RecoveryImproved', 'hyphen-data', 'ZxcvbnData', 'OneAuth', 'Edge Signal Triggers', 'https_photos.google.com_0.indexeddb.leveldb', 'https_www.messenger.com_0.indexeddb.leveldb', 'https_www.facebook.com_0.indexeddb.leveldb', 'https_www.reddit.com_0.indexeddb.leveldb', 'https_dbc-*_0.indexeddb.leveldb', 'https_accounts.cloud.databricks.com_0.indexeddb.leveldb', 'https_docs.google.com_0.indexeddb.leveldb', 'https_drive.google.com_0.indexeddb.leveldb',
+            '/XD', 'Extensions', 'Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache', 'GraphiteDawnCache', 'blob_storage', 'Crashpad', 'component_crx_cache', 'ProvenanceData', 'ProvenanceDataTensors', 'Subresource Filter', 'BrowserMetrics', 'Safe Browsing', 'Shared Dictionary', 'File System', 'logs', '*.blob', 'Edge Entity Extraction', 'Edge Shopping', 'Edge Wallet', 'EdgeCoupons', 'EdgeLanguageDetectionModel', 'Edge Sidebar', 'EdgeTravel', 'EdgeCDSScheduler', 'EdgePushNotificationClient', 'EdgeDrop', 'EdgeCollections', 'EdgeTrackingPrevention', 'EdgeFavoritesBackup', 'WidevineCdm', 'image_cache', 'Speech Recognition', 'RecoveryImproved', 'hyphen-data', 'ZxcvbnData', 'OneAuth', 'Edge Signal Triggers', 'https_photos.google.com_0.indexeddb.leveldb', 'https_www.messenger.com_0.indexeddb.leveldb', 'https_www.facebook.com_0.indexeddb.leveldb', 'https_www.reddit.com_0.indexeddb.leveldb', 'https_dbc-*_0.indexeddb.leveldb', 'https_accounts.cloud.databricks.com_0.indexeddb.leveldb', 'https_docs.google.com_0.indexeddb.leveldb', 'https_drive.google.com_0.indexeddb.leveldb',
             '/XF', 'History', 'load_statistics.db', '*.db-journal', '*.db-wal', '*.db-shm', '*.js.map', '*.wasm', 'typescript.js', '*.quant.ort'
         ) -Context 'Edge profile (VSS)'
         Write-Host "  Copied Edge browser profile via VSS"
@@ -560,7 +560,7 @@ if (Test-Path -LiteralPath $edgeUserData) {
         New-Item -ItemType Directory -Force -Path $edgeDest | Out-Null
         Invoke-RobocopyLockedAware -RobocopyArgs @(
             $edgeUserData, $edgeDest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XJ',
-            '/XD', 'Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache', 'GraphiteDawnCache', 'blob_storage', 'Crashpad', 'component_crx_cache', 'ProvenanceData', 'ProvenanceDataTensors', 'Subresource Filter', 'BrowserMetrics', 'Safe Browsing', 'Shared Dictionary', 'File System', 'logs', '*.blob', 'Edge Entity Extraction', 'Edge Shopping', 'Edge Wallet', 'EdgeCoupons', 'EdgeLanguageDetectionModel', 'Edge Sidebar', 'EdgeTravel', 'EdgeCDSScheduler', 'EdgePushNotificationClient', 'EdgeDrop', 'EdgeCollections', 'EdgeTrackingPrevention', 'EdgeFavoritesBackup', 'WidevineCdm', 'image_cache', 'Speech Recognition', 'RecoveryImproved', 'hyphen-data', 'ZxcvbnData', 'OneAuth', 'Edge Signal Triggers', 'https_photos.google.com_0.indexeddb.leveldb', 'https_www.messenger.com_0.indexeddb.leveldb', 'https_www.facebook.com_0.indexeddb.leveldb', 'https_www.reddit.com_0.indexeddb.leveldb', 'https_dbc-*_0.indexeddb.leveldb', 'https_accounts.cloud.databricks.com_0.indexeddb.leveldb', 'https_docs.google.com_0.indexeddb.leveldb', 'https_drive.google.com_0.indexeddb.leveldb',
+            '/XD', 'Extensions', 'Cache', 'Code Cache', 'GPUCache', 'Service Worker', 'DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache', 'GraphiteDawnCache', 'blob_storage', 'Crashpad', 'component_crx_cache', 'ProvenanceData', 'ProvenanceDataTensors', 'Subresource Filter', 'BrowserMetrics', 'Safe Browsing', 'Shared Dictionary', 'File System', 'logs', '*.blob', 'Edge Entity Extraction', 'Edge Shopping', 'Edge Wallet', 'EdgeCoupons', 'EdgeLanguageDetectionModel', 'Edge Sidebar', 'EdgeTravel', 'EdgeCDSScheduler', 'EdgePushNotificationClient', 'EdgeDrop', 'EdgeCollections', 'EdgeTrackingPrevention', 'EdgeFavoritesBackup', 'WidevineCdm', 'image_cache', 'Speech Recognition', 'RecoveryImproved', 'hyphen-data', 'ZxcvbnData', 'OneAuth', 'Edge Signal Triggers', 'https_photos.google.com_0.indexeddb.leveldb', 'https_www.messenger.com_0.indexeddb.leveldb', 'https_www.facebook.com_0.indexeddb.leveldb', 'https_www.reddit.com_0.indexeddb.leveldb', 'https_dbc-*_0.indexeddb.leveldb', 'https_accounts.cloud.databricks.com_0.indexeddb.leveldb', 'https_docs.google.com_0.indexeddb.leveldb', 'https_drive.google.com_0.indexeddb.leveldb',
             '/XF', 'History', 'load_statistics.db', '*.db-journal', '*.db-wal', '*.db-shm', '*.js.map', '*.wasm', 'typescript.js', '*.quant.ort'
         ) -Context 'Edge profile (fallback)'
         Write-Host "  Copied Edge browser profile (fallback)"
@@ -570,6 +570,16 @@ if (Test-Path -LiteralPath $edgeUserData) {
 } else {
     Write-Warning "Edge User Data not found: $edgeUserData"
 }
+
+# NOTE (cut B, 2026-10-04): Default\Extensions store packages are NOT copied
+# (/XD 'Extensions' on both robocopy paths) — they are install packages, not
+# user data, and Edge re-fetches them via the forcelist/registry-loader
+# reinstall below (restore.ps1 Restore-EdgeExtensions). Extension settings DO
+# live elsewhere and stay in the backup: Local Extension Settings, Extension
+# State/Rules/Scripts, Secure Preferences (enabled/disabled state). Unpacked
+# dev-mode extensions are copied separately from their source folders
+# (edge-profile\unpacked-extensions, below) — they cannot redownload, so they
+# are never touched by this exclusion.
 
 # Extract the store-installed extension list from the backed-up profile so a
 # restore on a DIFFERENT pc can force-reinstall them from the store. Edge 151+
@@ -822,32 +832,38 @@ $srcDir = $OutputDir
 Write-Host "Compressing $srcDir to split zips (core + persist)..."
 $stagingDir = Join-Path $env:TEMP "mainframe-zip-stage-$(Get-Random)"
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
-Invoke-RobocopyLockedAware -RobocopyArgs @($srcDir, $stagingDir, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XJ', '/XF', '*.sock', 'dopus.dat', '*.pdb') -Context 'zip staging'
-# 7zip with -tzip produces a standard .zip; handles long paths (>260 chars) that Compress-Archive cannot
-$sevenZip = Get-Command '7z' -ErrorAction SilentlyContinue
-if (-not $sevenZip) { $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue }
-if ($sevenZip) {
-    Push-Location $stagingDir
-    # -mx=9: max DEFLATE effort (was 5). measured A/B on identical content 2026-10-03:
-    # 276.5 MB (mx=5) vs 273.7 MB (mx=9) = +1.0% only - the payload is mostly already
-    # compressed binaries + leveldb, so zip can't do much. kept because it costs nothing;
-    # a real cut needs a different container (7z solid), not a higher -mx.
-    & $sevenZip.Source a -tzip -mmt=on -mx=9 $coreZip '*' -x!persist | Out-Null
-    if ($LASTEXITCODE -gt 1) { Pop-Location; throw "7zip core compression failed with exit code $LASTEXITCODE" }
-    if (-not (Test-Path -LiteralPath 'persist')) { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips (was -SkipPersist used?)' }
-    & $sevenZip.Source a -tzip -mmt=on -mx=9 $persistZip 'persist' | Out-Null
-    Pop-Location
-    if ($LASTEXITCODE -gt 1) { throw "7zip persist compression failed with exit code $LASTEXITCODE" }
-} else {
-    Write-Warning '7zip not found, falling back to Compress-Archive (may fail on long paths)'
-    Push-Location $stagingDir
-    $coreItems = Get-ChildItem -Force | Where-Object { $_.Name -ne 'persist' } | Select-Object -ExpandProperty FullName
-    Compress-Archive -Path $coreItems -DestinationPath $coreZip -Force
-    if (Test-Path -LiteralPath 'persist') { Compress-Archive -Path 'persist' -DestinationPath $persistZip -Force }
-    else { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips' }
-    Pop-Location
+try {
+    Invoke-RobocopyLockedAware -RobocopyArgs @($srcDir, $stagingDir, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XJ', '/XF', '*.sock', 'dopus.dat', '*.pdb') -Context 'zip staging'
+    # 7zip with -tzip produces a standard .zip; handles long paths (>260 chars) that Compress-Archive cannot
+    $sevenZip = Get-Command '7z' -ErrorAction SilentlyContinue
+    if (-not $sevenZip) { $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue }
+    if ($sevenZip) {
+        Push-Location $stagingDir
+        # -mx=9: max DEFLATE effort (was 5). measured A/B on identical content 2026-10-03:
+        # 276.5 MB (mx=5) vs 273.7 MB (mx=9) = +1.0% only - the payload is mostly already
+        # compressed binaries + leveldb, so zip can't do much. kept because it costs nothing;
+        # a real cut needs a different container (7z solid), not a higher -mx.
+        & $sevenZip.Source a -tzip -mmt=on -mx=9 $coreZip '*' -x!persist | Out-Null
+        if ($LASTEXITCODE -gt 1) { Pop-Location; throw "7zip core compression failed with exit code $LASTEXITCODE" }
+        if (-not (Test-Path -LiteralPath 'persist')) { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips (was -SkipPersist used?)' }
+        & $sevenZip.Source a -tzip -mmt=on -mx=9 $persistZip 'persist' | Out-Null
+        Pop-Location
+        if ($LASTEXITCODE -gt 1) { throw "7zip persist compression failed with exit code $LASTEXITCODE" }
+    } else {
+        Write-Warning '7zip not found, falling back to Compress-Archive (may fail on long paths)'
+        Push-Location $stagingDir
+        $coreItems = Get-ChildItem -Force | Where-Object { $_.Name -ne 'persist' } | Select-Object -ExpandProperty FullName
+        Compress-Archive -Path $coreItems -DestinationPath $coreZip -Force
+        if (Test-Path -LiteralPath 'persist') { Compress-Archive -Path 'persist' -DestinationPath $persistZip -Force }
+        else { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips' }
+        Pop-Location
+    }
+} finally {
+    # runs on success AND on every throw above. a failed run used to leave the whole
+    # staging tree in TEMP - including the secrets\ archive when -ExcludeSecrets was
+    # NOT passed (observed 2026-10-04: a disk-full 7z failure left 1 GB behind).
+    Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 $coreMB = '{0:N0}' -f ((Get-Item -LiteralPath $coreZip).Length / 1MB)
 $persistMB = '{0:N0}' -f ((Get-Item -LiteralPath $persistZip).Length / 1MB)
 Write-Host "Wrote $coreZip ($coreMB MB) + $persistZip ($persistMB MB)"
