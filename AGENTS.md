@@ -709,6 +709,34 @@ the real CLI state is `configstore\firebase-tools.json` (the OAuth
   quota, add the other account as Editor if needed (`SOLO_MUST_INVITE_OWNERS` blocks
   inviting a second OWNER on a solo-owner project).
 
+## huggingface: profile token layout (hf-account.ps1)
+
+each `hf` profile dir (`%APPDATA%\mainframe\accounts\hf\<email>\`) can hold several token
+artifacts — know which is which before diagnosing `status-all`:
+
+- **vault item `huggingface.co`** (login.username = `<email>`, token in notes under the
+  `User Access Tokens` header) — the source of truth; `Read-ProfileToken` reads ONLY this.
+- **`token.txt`** — portable copy written by `token-add` / `import-current` (the write was
+  added 2026-10-04 — before that the README promised it but the vault migration never wrote
+  it). read directly by `hf-spaces-table.ps1` and carried in the encrypted tool-secrets
+  backup.
+- **`token`** — huggingface_hub's own file (`HF_TOKEN_PATH`), created when `hf auth login`
+  runs inside a profile. `State=missing-token` in `status-all` means NEITHER `token.txt`
+  nor `token` exists; `TokenStatus` reflects the vault.
+- **`stored_tokens`** — hf's sidecar (`HF_STORED_TOKENS_PATH`): token-name line, then
+  `hf_token = hf_...`.
+
+**diagnostic trap**: grepping `hf_[A-Za-z0-9]+` in a `stored_tokens` file matches the
+`hf_token` FIELD KEY first, not the value — probing that "token" against whoami returns a
+bogus 401 and makes healthy profiles look dead. capture the text after `=`.
+
+**fixed 2026-10-04**: `status-all` showed 4/5 profiles `missing-token` plus one account the
+helper could not resolve. two causes: `token.txt` was never written (see above), and one
+vault item's `login.username` was a bare handle instead of the profile email, so
+`Find-VaultItemByEmail` never matched it — the token itself was valid all along. after the
+fix every profile has vault username = `<email>`, a `token.txt` matching the vault token,
+and a green `whoami`.
+
 ## huggingface: space secrets/variables (no CLI support)
 
 the `hf` CLI has no secrets/variables command; use the HF REST API with the mainframe profile token (read from `%APPDATA%\mainframe\accounts\hf\<email>\token`) and `Authorization: Bearer <token>`.

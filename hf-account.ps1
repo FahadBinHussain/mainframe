@@ -213,6 +213,10 @@ function Write-ProfileTokenValue {
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
     $userPrefix = ($normalized -split '@')[0]
     Write-VaultSecretToExisting -Email $normalized -NamePattern 'huggingface.co*' -Header 'User Access Tokens' -Value $Token.Trim() -ItemName 'huggingface.co' -Username $normalized -Uri 'https://huggingface.co/settings/tokens'
+    # portable copy per README: token.txt lives in the profile so the encrypted
+    # tool-secrets backup carries it, and direct readers (hf-spaces-table.ps1)
+    # keep working. the vault stays the source of truth for Read-ProfileToken.
+    [System.IO.File]::WriteAllText((Get-PortableTokenPath -ProfilePath $profilePath), $Token.Trim())
     Write-ProfileMetadata -Profile $normalized -ProfilePath $profilePath
     Set-ActiveProfile -Profile $normalized
 }
