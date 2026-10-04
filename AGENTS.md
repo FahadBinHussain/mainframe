@@ -1027,6 +1027,20 @@ is a normal pip package.
 **diagnostic to reuse**: `pip list --format=freeze` count vs the number of package lines
 in `pip-freeze.txt` — they must match; a mismatch means the export filter broke.
 
+### compression level + why daily size jumps around (measured 2026-10-03)
+
+- **`-mx=9` (was `-mx=5`)** on both 7z calls. controlled A/B on identical content:
+  276.5 MB (mx=5) vs 273.7 MB (mx=9) = **+1.0%, 2.8 MB** — not the 3-8% you'd hope for,
+  because the payload is mostly already-compressed binaries (`.dll/.exe/.pyd`) and
+  leveldb. kept since it costs nothing, but **do not expect `-mx` to cut size here**;
+  the only real remaining compression lever is a different container (`-t7z -ms=on`
+  solid), which changes the restore/unzip path.
+- **core size swings ~40 MB between runs with zero code changes** — uBlock Origin's
+  filter-list cache (`Default\Local Extension Settings\odfafepnkmbhccpbejgmiehpchacaeak`)
+  re-downloads and rewrites its leveldb: 66.8 MB one run, 100.4 MB the next. that is
+  userdata churn, not a backup regression; judge the backup by `persist` and by the
+  zip entries, not by a single core reading.
+
 chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
 DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
 `backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
