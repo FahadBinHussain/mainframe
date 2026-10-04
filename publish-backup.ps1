@@ -1,12 +1,12 @@
 # publish-backup.ps1 - upload split backup zips to private release store
-# usage: publish-backup.ps1 [-CoreZip <path>] [-PersistZip <path>] [-Keep 10]
+# usage: publish-backup.ps1 [-CoreZip <path>] [-PersistZip <path>] [-Keep 5]
 # auth chain: bitwarden session.key (from unlock.ps1) -> vault github token -> gh release upload
 # fails LOUD on: locked vault, missing token, bad scope, missing zips, gh error. no fallbacks.
 param(
     [string]$CoreZip,
     [string]$PersistZip,
     [string]$Repo = 'FahadBinHussain/mainframe-production',
-    [int]$Keep = 10
+    [int]$Keep = 5
 )
 $ErrorActionPreference = 'Stop'
 

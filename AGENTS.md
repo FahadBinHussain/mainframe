@@ -1049,8 +1049,9 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   **private GitHub release** on `FahadBinHussain/mainframe-production`, tag
   `yyyy-MM-dd-HHmm-<hostname>` (hostname-tagged so laptop + desktop can both publish
   into the same repo). auth: vault `session.key` -> vault github token -> `gh release create`.
-- **capped, not infinite**: `-Keep 10` (default) per hostname. after each publish it
-  prunes to the newest 10 for that host with `gh release delete --cleanup-tag`.
+- **capped, not infinite**: `-Keep 5` (default, cut from 10 on 2026-10-04 — GitHub
+  does not quota release assets, so this is repo housekeeping only) per hostname. after
+  each publish it prunes to the newest 5 for that host with `gh release delete --cleanup-tag`.
 - **idempotent**: skips if `C:\tmp\daily-backup-lastdate.txt` already holds today's date
   (task retriggers won't double-publish). throws loudly if the vault is locked (no `session.key`).
 - **what's zipped**: scoop persist dirs (VSS + robocopy, skips `Cache`/`logs`) + core config + edge profile + skills. `persist\python312\Lib\site-packages` is **NOT** shipped (see below) — everything else in `python312` (incl. `Scripts`, which carries `pip.exe`) is. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
