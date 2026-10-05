@@ -126,15 +126,21 @@ foreach ($email in $accounts) {
             $consumptionErr = $_.Exception.Message
         }
 
-        # Peak storage across projects (peak_data_storage is bytes-current-period from consumption endpoint;
-        # fall back to summing per-project synthetic_storage_size if absent).
-        $peakDataStorageBytes = if ($period -and $period.peak_data_storage) { [double]$period.peak_data_storage } else { 0 }
-        if ($peakDataStorageBytes -eq 0 -and $projects.Count -gt 0) {
-            foreach ($p in $projects) {
-                try {
-                    $d = (Invoke-RestMethod -Uri "$apiBase/projects/$($p.id)" -Headers $headers).project
-                    if ($d.synthetic_storage_size) { $peakDataStorageBytes += [double]$d.synthetic_storage_size }
-                } catch { }
+        # Storage bytes from the org consumption endpoint, matching lumen-agent resolveNeonStorage:
+        # v3.1 metering reports peak_data_storage / data_storage; v3.2 zeroes those and reports
+        # root_branch_logical_size + root_branch_history_size + child_branch_change_size in v3_metrics.
+        $peakDataStorageBytes = 0.0
+        if ($period) {
+            if ($period.peak_data_storage) {
+                $peakDataStorageBytes = [double]$period.peak_data_storage
+            } elseif ($period.data_storage) {
+                $peakDataStorageBytes = [double]$period.data_storage
+            } elseif ($period.v3_metrics) {
+                foreach ($m in $period.v3_metrics) {
+                    if ($m.name -in @('root_branch_logical_size', 'root_branch_history_size', 'child_branch_change_size') -and $m.usage) {
+                        $peakDataStorageBytes += [double]$m.usage
+                    }
+                }
             }
         }
 
