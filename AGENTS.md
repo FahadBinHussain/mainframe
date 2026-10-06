@@ -279,6 +279,13 @@ to get concrete numeric usage on Hobby (CPU-h, GB-h, invocations) — open the V
 
 **fix for the broken CLI (2026-10-06):** `pnpm add -g vercel` reinstalls it in ~20s (62.2.0, shim at `%USERPROFILE%\.pnpm-global\bin\vercel.ps1`, package under `scoop\apps\pnpm\current\global\v11`). verify by artifact + `vercel --version`, not exit code: a stale shim prints `Cannot find module '.../node_modules/vercel/dist/vc.js'` and exits 1. needed whenever `vercel-account.ps1 run ... <cmd>` is used (deploy, `git connect`, `inspect`) — `vercel-usage-table.ps1` never needs it.
 
+**pnpm global install gotchas (2026-10-06, cost an hour):** the global project (`scoop\apps\pnpm\current\global\v11`) is a single package.json/workspace, so:
+- `pnpm add -g <one-pkg>` **replaces the whole dependency set** — every other global CLI's files disappear while its shims stay in `%USERPROFILE%\.pnpm-global\bin`, leaving dead shims that print `Cannot find module '.../global/v11/<hash>/node_modules/<pkg>/...'`.
+- `pnpm add -g <pkg> --force` is worse: it relinks into a fresh `global\v11\<hash>` staging dir and rewrites shims to paths that then get purged — at that point *all* global CLIs break at once (this is what killed `agent-browser` mid-session while it was needed for browser work).
+- therefore always install/repair the **full set in one command**: `pnpm add -g agent-browser vercel firebase-tools ntn omniroute pinggy`, then verify each with `--version` (`agent-browser`/`vercel`/`vc`/`firebase`/`ntn`/`omniroute`/`pinggy`). `blindspot` (points into `Downloads\blindspot\tools\relay`) and `gws` live elsewhere and are unaffected. never use `--force` here.
+- `pinggy` only works after its native addon install script is allowed: `allowBuilds: '@pinggy/pinggy': true` must be in `scoop\persist\pnpm\global\v11\pnpm-workspace.yaml` (pnpm blocks install scripts by default; `@mimo-ai/cli` is the only other allowlisted package), then `pnpm remove -g pinggy` + `pnpm add -g pinggy` so `node-pre-gyp install` downloads `lib/addon.node` from GitHub releases.
+- sanity check after any pnpm global command: `pnpm ls -g --depth 0` must list every package you expect — if it shows fewer, the others were just wiped.
+
 **2026-09-01 vault migration:** tokens are no longer stored in `token.txt` files in the profile dir. the script now imports `vault-secret.psm1` and calls `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'` per profile. profiles without a vault entry (e.g. the `daffodilresourcehub-8188@vercel` stub) are skipped silently.
 
 rest api flow:
