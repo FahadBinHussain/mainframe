@@ -7,7 +7,10 @@
 param(
     [ValidateSet('start', 'done', 'fail', 'skip')] [string]$State,
     [string]$Message,
-    [string]$StateFile = 'C:\tmp\backup-notify.txt'
+    [string]$StateFile = 'C:\tmp\backup-notify.txt',
+    # banner title prefix - keeps the default text byte-identical to the original
+    # backup wording, other callers pass their own (e.g. "DIIT recrawl")
+    [string]$Prefix = 'Mainframe backup'
 )
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -21,10 +24,10 @@ if (-not $State -and (Test-Path -LiteralPath $StateFile)) {
 if (-not $State) { exit 0 }
 
 $cfg = switch ($State) {
-    'start' { @{ Title = 'Mainframe backup';        Text = $(if ($Message) { $Message } else { 'running now...' }); Back = [System.Drawing.Color]::FromArgb(31, 68, 110); Fore = [System.Drawing.Color]::White; Sound = [System.Media.SystemSounds]::Asterisk;    Hold = 6000 } }
-    'done'  { @{ Title = 'Mainframe backup done';   Text = $(if ($Message) { $Message } else { 'published' });      Back = [System.Drawing.Color]::FromArgb(22, 101, 52);  Fore = [System.Drawing.Color]::White; Sound = [System.Media.SystemSounds]::Exclamation; Hold = 12000 } }
-    'skip'  { @{ Title = 'Mainframe backup';        Text = 'already ran today - skipped';                          Back = [System.Drawing.Color]::FromArgb(72, 72, 72);   Fore = [System.Drawing.Color]::White; Sound = $null;                              Hold = 6000 } }
-    'fail'  { @{ Title = 'MAINFRAME BACKUP FAILED'; Text = $(if ($Message) { $Message } else { 'check C:\tmp\daily-backup.log' }); Back = [System.Drawing.Color]::FromArgb(150, 16, 16); Fore = [System.Drawing.Color]::White; Sound = [System.Media.SystemSounds]::Hand; Hold = 45000 } }
+    'start' { @{ Title = $Prefix; Text = $(if ($Message) { $Message } else { 'running now...' }); Back = [System.Drawing.Color]::FromArgb(31, 68, 110); Fore = [System.Drawing.Color]::White; Sound = [System.Media.SystemSounds]::Asterisk;    Hold = 6000 } }
+    'done'  { @{ Title = "$Prefix done"; Text = $(if ($Message) { $Message } else { 'published' });      Back = [System.Drawing.Color]::FromArgb(22, 101, 52);  Fore = [System.Drawing.Color]::White; Sound = [System.Media.SystemSounds]::Exclamation; Hold = 12000 } }
+    'skip'  { @{ Title = $Prefix; Text = 'already ran today - skipped';                          Back = [System.Drawing.Color]::FromArgb(72, 72, 72);   Fore = [System.Drawing.Color]::White; Sound = $null;                              Hold = 6000 } }
+    'fail'  { @{ Title = "$($Prefix.ToUpperInvariant()) FAILED"; Text = $(if ($Message) { $Message } else { 'check C:\tmp\daily-backup.log' }); Back = [System.Drawing.Color]::FromArgb(150, 16, 16); Fore = [System.Drawing.Color]::White; Sound = [System.Media.SystemSounds]::Hand; Hold = 45000 } }
 }
 
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea

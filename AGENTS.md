@@ -113,8 +113,8 @@ like an outage, was a stale read path. fixed: both now `Import-Module vault-secr
 `Read-VaultSecret -Email <profile-email> -NamePattern 'console.neon.tech*' -ValueRegex
 'napi_[A-Za-z0-9]+'` per profile (same pattern as `vercel-usage-table.ps1`); profiles
 without a vault entry are skipped. when the table prints zero rows, check the read path is
-vault-native BEFORE assuming the accounts are empty. `render-services-table.ps1` still uses
-file-based keys and is fine only because render profiles still carry `api-key.txt`.
+vault-native BEFORE assuming the accounts are empty. `render-services-table.ps1` was also
+updated (2026-10-05) to read via `Read-VaultSecret -NamePattern '*render.com*' -ValueRegex 'rnd_[A-Za-z0-9]+'`.
 
 ### ⚠️ gotcha: `Read-VaultSecret` returns a plain String, not an object (2026-10-02)
 `$tok = Read-VaultSecret ...` gives you the secret itself (`System.String`). writing
@@ -1104,6 +1104,14 @@ runs silent. it now hands visibility to an on-demand interactive task:
   state goes via a file because `Start-ScheduledTask` can't pass arguments to the target.
 - `daily-backup-publish.ps1` calls `Notify start|done|skip|fail` at those points.
 - manual test: `.\backup-notify.ps1 -State done -Message "tag 2026-...-DESKTOP"`.
+- **`-Prefix` (added 2026-10-06)** retitles the banner for a non-backup caller;
+  the default `'Mainframe backup'` keeps every title byte-identical to before
+  (`done` → `<Prefix> done`, `fail` → `<PREFIX> FAILED`). Other jobs pair it
+  with their own state file so they never borrow the backup's wording — e.g.
+  the `DiitChatbotRecrawlNotify` task runs
+  `-StateFile C:\tmp\diit-recrawl-notify.txt -Prefix 'DIIT recrawl'`, which
+  renders `DIIT RECRAWL FAILED`. The state file stays `state|message`; only
+  the title differs.
 - caveat: the banner only renders when a user is actually logged on and unlocked; on a locked
   / headless run there is no desktop to draw on, so the only record is `C:\tmp\daily-backup.log`.
 
