@@ -277,6 +277,8 @@ to get concrete numeric usage on Hobby (CPU-h, GB-h, invocations) — open the V
 ### how the script queries vercel (no vercel CLI dependency)
 `vercel-usage-table.ps1` calls the REST API directly (no vercel CLI). the vercel CLI can be broken on windows under pnpm — same shim issue as neonctl — only a stale `/bin/sh` shim remains pointing at a non-existent `vc.js`. the script does NOT depend on the CLI.
 
+**fix for the broken CLI (2026-10-06):** `pnpm add -g vercel` reinstalls it in ~20s (62.2.0, shim at `%USERPROFILE%\.pnpm-global\bin\vercel.ps1`, package under `scoop\apps\pnpm\current\global\v11`). verify by artifact + `vercel --version`, not exit code: a stale shim prints `Cannot find module '.../node_modules/vercel/dist/vc.js'` and exits 1. needed whenever `vercel-account.ps1 run ... <cmd>` is used (deploy, `git connect`, `inspect`) — `vercel-usage-table.ps1` never needs it.
+
 **2026-09-01 vault migration:** tokens are no longer stored in `token.txt` files in the profile dir. the script now imports `vault-secret.psm1` and calls `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'` per profile. profiles without a vault entry (e.g. the `daffodilresourcehub-8188@vercel` stub) are skipped silently.
 
 rest api flow:
