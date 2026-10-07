@@ -1096,13 +1096,14 @@ chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
 DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
 `backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
 
-- **where it goes**: `publish-backup.ps1` uploads THREE zips to a **private GitHub release**
+- **where it goes**: `publish-backup.ps1` uploads TWO zips to a **private GitHub release**
   on `FahadBinHussain/mainframe-production`, tag
   `yyyy-MM-dd-HHmm-<hostname>` (hostname-tagged so laptop + desktop can both publish
-  into the same repo): `mainframe-core.zip` + `mainframe-persist.zip` + `mainframe-secrets.zip`
-  (the AES-256-encrypted secrets archive — see "secrets asset" below). auth: vault
-  `session.key` -> vault github token -> `gh release create`. it re-reads the asset list after
-  upload and throws if any of the three is missing.
+  into the same repo): `mainframe-quick.zip` (everything quick mode needs, with the
+  AES-256-encrypted secrets archive tucked INSIDE it as the entry `mainframe-secrets.zip`)
+  + `mainframe-persist.zip`. auth: vault `session.key` -> vault github token ->
+  `gh release create`. it lists quick's entries and throws unless the encrypted blob is in
+  there exactly once, then re-reads the release asset list and throws if either zip is missing.
 - **capped, not infinite**: `-Keep 5` (default, cut from 10 on 2026-10-04 — GitHub
   does not quota release assets, so this is repo housekeeping only) per hostname. after
   each publish it prunes to the newest 5 for that host with `gh release delete --cleanup-tag`.
@@ -1117,7 +1118,7 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   - other `accounts\<tool>\` profile dirs still travel — since 2026-08-22 they hold only `profile.json`/`current.json` metadata + CLI state, not raw secrets (those are vault-native).
 
 
-### secrets asset: the third release asset (added 2026-10-07)
+### secrets ship inside quick (2-asset release, reshaped 2026-10-07)
 
 the one-liner goal ("run `irm da.gd/f85Bj | iex` on any pc, quick or full, get the whole
 machine back") was NOT met by core+persist: the daily chain passes `-ExcludeSecrets`, so
@@ -1127,18 +1128,25 @@ providers/models config, and every account helper pointing at empty profiles —
 quick prompt literally promised "edge profile, opencode, **secrets**". it claimed work it
 did not do.
 
-every release now carries THREE assets, and boot dies loudly when one is missing:
+every release now carries TWO assets, and boot dies loudly when one is missing:
 
 | asset | contents | built by |
 |---|---|---|
-| `mainframe-core.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt` | `backup.ps1` |
+| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt` + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
 | `mainframe-persist.zip` | scoop persist dirs | `backup.ps1` |
-| `mainframe-secrets.zip` | AES-256 encrypted `tool-secrets.zip` (the `tool-secrets.manifest.json` paths) | `backup.ps1 -Publish` -> `backup-secrets.ps1` -> `publish-backup.ps1` |
+
+the encrypted blob rides INSIDE quick on purpose: quick mode = 1 download, full mode = 2,
+and neither mode can end up on a box with no `.ssh`/opencode/account profiles. an earlier
+same-day shape shipped it as a third asset — `mainframe-quick.zip` + `mainframe-persist.zip`
++ `mainframe-secrets.zip` — which worked but forced every restore to make a third request.
 
 chain: `backup.ps1 -Publish` runs `backup-secrets.ps1` FIRST (so the 09:00 task and a manual
-publish both ship it), then `publish-backup.ps1` encrypts and uploads all three. `-ExcludeSecrets`
-keeps its meaning: it stops PLAINTEXT secrets being embedded in core/persist — it no longer
-means "this release cannot be restored".
+publish both build `tool-secrets.zip`), zips core staging into `mainframe-quick.zip`, then
+`publish-backup.ps1` encrypts the archive, appends it into quick as `mainframe-secrets.zip`
+(`7z a` adds one entry without recompressing the other ~220 MB), asserts by **listing the
+entries** that the blob landed exactly once, and uploads quick + persist. `-ExcludeSecrets`
+keeps its meaning: it stops PLAINTEXT secrets being embedded in quick/persist — the
+encrypted copy is what ships either way.
 
 - **password lives in the vault only**: Bitwarden item `mainframe-production`, notes header
   `[secrets archive password]` + one `[A-Za-z0-9]{40}` line. both sides run the byte-identical
@@ -1147,10 +1155,13 @@ means "this release cannot be restored".
   keep them in sync or boot cannot decrypt. item name = the repo it protects (bare identifier,
   no suffix, same naming rule as the domain-named items).
 - **encryption**: `7z a -tzip -mem=AES256 -p<pw>` run from inside the mainframe dir so the
-  stored entry name is exactly `tool-secrets.zip`; boot runs `7z x <asset> -o<extract> -p<pw>`
-  and `restore.ps1` finds `$BackupRoot\tool-secrets.zip` where it always looked (no restore.ps1
-  path change needed). plaintext never touches github: private repo AND encrypted bytes.
-- a release published before 2026-10-07 has no `*-secrets.zip`; boot refuses it with the fix
+  stored entry name is exactly `mainframe-secrets.zip` at quick's root; boot extracts quick,
+  asserts `$extract\mainframe-secrets.zip` exists, runs
+  `7z x <blob> -o<extract> -p<pw>` and `restore.ps1` finds `$BackupRoot\tool-secrets.zip`
+  where it always looked (no restore.ps1 path change needed). plaintext never touches github:
+  private repo AND encrypted bytes.
+- a release published before 2026-10-07 carries `mainframe-core.zip` and (that day only) a
+  separate `*-secrets.zip`; boot refuses either layout with the fix
   (`.\backup.ps1 -Publish` on the source machine) rather than silently producing a partial box.
 
 #### gotchas fixed while wiring this up (read before touching this chain)

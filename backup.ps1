@@ -818,9 +818,9 @@ foreach ($ext in $sevenZipAssocExtensions) {
 & reg.exe export "HKCU\Software\Classes\7-Zip.archive" (Join-Path $OutputDir '7z-assoc-archive.reg') /y *> $null
 if ($LASTEXITCODE -eq 0) { Write-Host 'Exported 7z-assoc-archive.reg' }
 
-$coreZip = Join-Path $realOutputDir 'mainframe-core.zip'
+$quickZip = Join-Path $realOutputDir 'mainframe-quick.zip'
 $persistZip = Join-Path $realOutputDir 'mainframe-persist.zip'
-foreach ($z in @($coreZip, $persistZip)) {
+foreach ($z in @($quickZip, $persistZip)) {
     if (Test-Path -LiteralPath $z) { Remove-Item -LiteralPath $z -Force }
 }
 $legacyZip = Join-Path $realOutputDir 'mainframe-backup.zip'
@@ -829,7 +829,7 @@ if (Test-Path -LiteralPath $legacyZip) {
     Write-Host 'Removed legacy single-zip mainframe-backup.zip (retired - split zips are the format now)'
 }
 $srcDir = $OutputDir
-Write-Host "Compressing $srcDir to split zips (core + persist)..."
+Write-Host "Compressing $srcDir to split zips (quick + persist)..."
 $stagingDir = Join-Path $env:TEMP "mainframe-zip-stage-$(Get-Random)"
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
 try {
@@ -843,8 +843,8 @@ try {
         # 276.5 MB (mx=5) vs 273.7 MB (mx=9) = +1.0% only - the payload is mostly already
         # compressed binaries + leveldb, so zip can't do much. kept because it costs nothing;
         # a real cut needs a different container (7z solid), not a higher -mx.
-        & $sevenZip.Source a -tzip -mmt=on -mx=9 $coreZip '*' -x!persist | Out-Null
-        if ($LASTEXITCODE -gt 1) { Pop-Location; throw "7zip core compression failed with exit code $LASTEXITCODE" }
+        & $sevenZip.Source a -tzip -mmt=on -mx=9 $quickZip '*' -x!persist | Out-Null
+        if ($LASTEXITCODE -gt 1) { Pop-Location; throw "7zip quick compression failed with exit code $LASTEXITCODE" }
         if (-not (Test-Path -LiteralPath 'persist')) { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips (was -SkipPersist used?)' }
         & $sevenZip.Source a -tzip -mmt=on -mx=9 $persistZip 'persist' | Out-Null
         Pop-Location
@@ -852,8 +852,8 @@ try {
     } else {
         Write-Warning '7zip not found, falling back to Compress-Archive (may fail on long paths)'
         Push-Location $stagingDir
-        $coreItems = Get-ChildItem -Force | Where-Object { $_.Name -ne 'persist' } | Select-Object -ExpandProperty FullName
-        Compress-Archive -Path $coreItems -DestinationPath $coreZip -Force
+        $quickItems = Get-ChildItem -Force | Where-Object { $_.Name -ne 'persist' } | Select-Object -ExpandProperty FullName
+        Compress-Archive -Path $quickItems -DestinationPath $quickZip -Force
         if (Test-Path -LiteralPath 'persist') { Compress-Archive -Path 'persist' -DestinationPath $persistZip -Force }
         else { Pop-Location; throw 'persist\ dir missing from backup staging - cannot build split zips' }
         Pop-Location
@@ -864,18 +864,18 @@ try {
     # NOT passed (observed 2026-10-04: a disk-full 7z failure left 1 GB behind).
     Remove-Item -LiteralPath $stagingDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-$coreMB = '{0:N0}' -f ((Get-Item -LiteralPath $coreZip).Length / 1MB)
+$quickMB = '{0:N0}' -f ((Get-Item -LiteralPath $quickZip).Length / 1MB)
 $persistMB = '{0:N0}' -f ((Get-Item -LiteralPath $persistZip).Length / 1MB)
-Write-Host "Wrote $coreZip ($coreMB MB) + $persistZip ($persistMB MB)"
+Write-Host "Wrote $quickZip ($quickMB MB) + $persistZip ($persistMB MB)"
 Remove-Item -LiteralPath $srcDir -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Warning 'Review private artifacts before sharing. They may contain tokens, databases, editor state, remote access identity, or other private data.'
 
 if ($Publish) {
-    # a release without the secrets archive is NOT a restorable machine: boot.ps1
-    # downloads it as the third asset and dies when it is missing. -ExcludeSecrets
-    # (above) keeps plaintext secrets OUT of core/persist; this rebuilds them fresh
-    # so publish-backup.ps1 can encrypt them with the vault password and upload them.
+    # a release without the secrets archive is NOT a restorable machine: publish-backup.ps1
+    # encrypts this archive and tucks it INTO mainframe-quick.zip, then dies unless the entry
+    # is really there; boot.ps1 dies unless it finds the entry after extracting. -ExcludeSecrets
+    # (above) keeps plaintext secrets OUT of quick/persist - the encrypted copy is what ships.
     & (Join-Path $PSScriptRoot 'backup-secrets.ps1')
-    & (Join-Path $PSScriptRoot 'publish-backup.ps1') -CoreZip $coreZip -PersistZip $persistZip
+    & (Join-Path $PSScriptRoot 'publish-backup.ps1') -QuickZip $quickZip -PersistZip $persistZip
 }

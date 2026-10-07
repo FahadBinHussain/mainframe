@@ -137,19 +137,19 @@ measured from the live 445MB zip (uncompressed ~940MB):
 
 today both modes download all 425MB compressed. split:
 
-- **mainframe-core.zip** (~230MB compressed): everything EXCEPT persist/
+- **mainframe-quick.zip** (~230MB compressed): everything EXCEPT persist/ (+ the encrypted secrets blob since 2026-10-07)
 - **mainframe-persist.zip** (~190MB compressed): persist/ only
-- quick downloads core only (~45% faster download + extract)
+- quick downloads quick only (~45% faster download + extract)
 - full downloads both, extracts into the same dir
 - **single-zip retired (2026-09-04):** no migration bridge - the only old-format
   release was never booted from, and boot.ps1 dies loud when split assets are
   missing. backup.ps1 deletes any stale `mainframe-backup.zip` with a note.
 
 changes:
-1. backup.ps1: build two zips from staging (core excludes persist\, persist zip
+1. backup.ps1: build two zips from staging (quick excludes persist\, persist zip
    has persist\ at root). -Publish uploads both assets to the same release.
 2. publish-backup.ps1: upload both, keep-10 per hostname unchanged.
-3. boot.ps1: Q -> core asset only; F -> core + persist assets, sequential
+3. boot.ps1: Q -> quick asset only; F -> quick + persist assets, sequential
    extract into one dir; missing asset = loud die (except the old-format bridge).
 4. NOT splitting edge-profile: extension code + storage + indexeddb are one
    unit ("my edge"). later micro-slims if needed (crx_cache 4MB, metrics 4MB).

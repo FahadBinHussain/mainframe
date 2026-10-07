@@ -1,9 +1,9 @@
 # boot.ps1 - mainframe cloud bootstrap. run on ANY fresh windows pc:
 #   irm https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/boot.ps1 | iex
 # asks for the bitwarden master password ONCE; everything else flows from the vault:
-#   vault github token     -> private mainframe-production release (core + persist zips)
-#   vault secrets password -> decrypts the third release asset (secrets archive), so
-#                             .ssh, opencode config and account profiles come back too
+#   vault github token     -> private mainframe-production release (quick + persist zips)
+#   vault secrets password -> decrypts mainframe-secrets.zip, the encrypted entry inside
+#                             quick, so .ssh, opencode config and account profiles come back too
 #   vault tool tokens      -> all *-account.ps1 helpers after restore
 # no secrets live in this file. it is public by design - review before running.
 #Requires -Version 7
@@ -100,55 +100,53 @@ $mode = 'full'
 $pick = Read-Host 'mode? [F]ull/[Q]uick (default F)'
 if ($pick -match '^(q|quick)$') { $mode = 'quick' }
 
-# --- 4b. download split machine-state zips from private release store ---
-# Q = core only (~230MB, edge profile + everything except persist)
-# F = core + persist (full machine state)
+# --- 4b. download machine-state zips from private release store ---
+# Q = quick only (~225MB: edge profile + config + skills + encrypted secrets)
+# F = quick + persist (persist = scoop app data, the only full-mode-only piece)
+# the encrypted secrets archive rides INSIDE quick, so both modes get secrets in one download.
 Step "downloading machine-state zips from $BackupRepo"
 $env:GH_TOKEN = $ghToken
 $release = gh release view --repo $BackupRepo --json tagName,assets 2>$null | ConvertFrom-Json
 if (-not $release) { Die "no releases in $BackupRepo. run backup.ps1 -Publish on the source machine first." }
-$coreAsset = $release.assets | Where-Object name -like '*-core.zip' | Select-Object -First 1
-if (-not $coreAsset) { Die "release $($release.tagName) has no core asset (old single-zip format was retired - republish from the source machine)" }
+$quickAsset = $release.assets | Where-Object name -like '*-quick.zip' | Select-Object -First 1
+if (-not $quickAsset) { Die "release $($release.tagName) has no mainframe-quick.zip asset (the core/persist/secrets 3-asset layout was retired - republish from the source machine: .\backup.ps1 -Publish)" }
 $wantPersist = $mode -eq 'full'
 if ($wantPersist) {
     $persistAsset = $release.assets | Where-Object name -like '*-persist.zip' | Select-Object -First 1
     if (-not $persistAsset) { Die "release $($release.tagName) has no persist asset needed for full restore" }
 }
-$corePath = Join-Path $env:TEMP $coreAsset.name
-gh release download $release.tagName --repo $BackupRepo --pattern '*-core.zip' --output $corePath
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $corePath)) { Die "core download failed (token may lack repo scope for private repo $BackupRepo)" }
+$quickPath = Join-Path $env:TEMP $quickAsset.name
+gh release download $release.tagName --repo $BackupRepo --pattern '*-quick.zip' --output $quickPath
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $quickPath)) { Die "quick download failed (token may lack repo scope for private repo $BackupRepo)" }
 $persistPath = $null
 if ($wantPersist) {
     $persistPath = Join-Path $env:TEMP $persistAsset.name
     gh release download $release.tagName --repo $BackupRepo --pattern '*-persist.zip' --output $persistPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $persistPath)) { Die "persist download failed" }
 }
-# third asset: the encrypted secrets archive. a machine restored without it loses
-# .ssh keys, opencode config and the mainframe account profiles - refuse instead.
-$secretsAsset = $release.assets | Where-Object name -like '*-secrets.zip' | Select-Object -First 1
-if (-not $secretsAsset) {
-    Die "release $($release.tagName) has no *-secrets.zip asset - restoring it would give you a partial machine. publish from the source machine first: .\backup.ps1 -Publish"
-}
-$secretsPath = Join-Path $env:TEMP $secretsAsset.name
-gh release download $release.tagName --repo $BackupRepo --pattern '*-secrets.zip' --output $secretsPath
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $secretsPath)) { Die "secrets download failed" }
 
 # --- 5. extract + restore ---
 Write-Host "extracting $mode assets + running $mode restore (walk away)"
 $extract = Join-Path $env:TEMP 'mainframe-boot-extract'
 if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
-7z x $corePath "-o$extract" -y | Out-Null
-if ($LASTEXITCODE -gt 1) { Die "7z core extract failed (is 7zip installed? scoop install 7zip)" }
+7z x $quickPath "-o$extract" -y | Out-Null
+if ($LASTEXITCODE -gt 1) { Die "7z quick extract failed (is 7zip installed? scoop install 7zip)" }
 if ($persistPath) {
     7z x $persistPath "-o$extract" -y | Out-Null
     if ($LASTEXITCODE -gt 1) { Die "7z persist extract failed" }
 }
-# decrypt the secrets archive into the restore root - restore.ps1 looks for
+# the encrypted secrets archive travels INSIDE quick. a machine restored without it loses
+# .ssh keys, opencode config and the mainframe account profiles - refuse instead.
+$encBlob = Join-Path $extract 'mainframe-secrets.zip'
+if (-not (Test-Path $encBlob)) {
+    Die "$($quickAsset.name) carries no mainframe-secrets.zip entry - restoring it would give you a partial machine. republish from the source machine: .\backup.ps1 -Publish"
+}
+# decrypt it into the restore root - restore.ps1 looks for
 # $BackupRoot\tool-secrets.zip and restores it with restore-secrets.ps1.
-7z x $secretsPath "-o$extract" "-p$secretsPassword" -y | Out-Null
+7z x $encBlob "-o$extract" "-p$secretsPassword" -y | Out-Null
 if ($LASTEXITCODE -gt 1) { Die "secrets decrypt failed (exit $LASTEXITCODE) - wrong password in vault item 'mainframe-production'?" }
 if (-not (Test-Path (Join-Path $extract 'tool-secrets.zip'))) {
-    Die "decrypted $secretsAsset but tool-secrets.zip is not at the restore root - the archive layout changed"
+    Die "decrypted $encBlob but tool-secrets.zip is not at the restore root - the archive layout changed"
 }
 Write-Host "secrets archive decrypted -> $extract\tool-secrets.zip"
 

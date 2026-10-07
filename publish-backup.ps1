@@ -1,13 +1,15 @@
-# publish-backup.ps1 - upload split backup zips + encrypted secrets to private release store
-# usage: publish-backup.ps1 [-CoreZip <path>] [-PersistZip <path>] [-SecretsZip <path>] [-Keep 5]
+# publish-backup.ps1 - upload the two release assets (quick + persist) to the private release store
+# usage: publish-backup.ps1 [-QuickZip <path>] [-PersistZip <path>] [-SecretsZip <path>] [-Keep 5]
 # auth chain: bitwarden session.key (from unlock.ps1) -> vault github token -> gh release upload
 # the secrets archive is AES-256 encrypted with the password held in the vault item
-# 'mainframe-production' (notes header '[secrets archive password]') BEFORE it is uploaded;
-# boot.ps1 reads the same item to decrypt it on the target machine.
+# 'mainframe-production' (notes header '[secrets archive password]') and APPENDED into
+# mainframe-quick.zip as the entry mainframe-secrets.zip - quick carries it so BOTH restore
+# modes get secrets from one download (until 2026-10-07 it was a third release asset).
+# boot.ps1 reads the same vault item to decrypt it on the target machine.
 # fails LOUD on: locked vault, missing token, bad scope, missing zips, missing password,
-# missing asset after upload, gh error. no fallbacks.
+# blob missing/duplicated inside quick, missing asset after upload, gh error. no fallbacks.
 param(
-    [string]$CoreZip,
+    [string]$QuickZip,
     [string]$PersistZip,
     [string]$SecretsZip,
     [string]$Repo = 'FahadBinHussain/mainframe-production',
@@ -15,10 +17,10 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-if (-not $CoreZip) { $CoreZip = Join-Path $PSScriptRoot 'mainframe-core.zip' }
+if (-not $QuickZip) { $QuickZip = Join-Path $PSScriptRoot 'mainframe-quick.zip' }
 if (-not $PersistZip) { $PersistZip = Join-Path $PSScriptRoot 'mainframe-persist.zip' }
 if (-not $SecretsZip) { $SecretsZip = Join-Path $PSScriptRoot 'tool-secrets.zip' }
-if (-not (Test-Path -LiteralPath $CoreZip)) { throw "core zip not found: $CoreZip (run backup.ps1 first)" }
+if (-not (Test-Path -LiteralPath $QuickZip)) { throw "quick zip not found: $QuickZip (run backup.ps1 first)" }
 if (-not (Test-Path -LiteralPath $PersistZip)) { throw "persist zip not found: $PersistZip (was backup taken with -SkipPersist? both zips are required)" }
 if (-not (Test-Path -LiteralPath $SecretsZip)) { throw "secrets archive not found: $SecretsZip (run .\backup-secrets.ps1 first - backup.ps1 -Publish does that for you)" }
 
@@ -90,23 +92,43 @@ try {
 if ($zexit -ge 2) { throw "7z failed with exit code $zexit while encrypting $SecretsZip`n$(@($zout) -join "`n")" }
 $secretsMB = '{0:N1}' -f ((Get-Item -LiteralPath $encZip).Length / 1MB)
 
-# --- create release, upload all three zips (hostname-tagged so laptop+desktop can both publish) ---
+# --- tuck the encrypted archive INTO quick: one download serves both restore modes ---
+# 7z 'a' on an existing zip adds/updates the one entry without recompressing the other
+# ~220 MB, and quick is rebuilt by every backup.ps1 run, so this lands once per build.
+Push-Location (Split-Path -Parent $encZip)
+try {
+    $aout = & $sevenZip a -tzip -bso0 -bsp0 -y $QuickZip (Split-Path -Leaf $encZip) 2>&1
+    $aexit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($aexit -ge 2) { throw "7z failed with exit code $aexit while appending secrets into $QuickZip`n$(@($aout) -join "`n")" }
+# verify by LISTING the entries, not by trusting the exit code: a missing blob means boot
+# dies on the target machine, a duplicated one means it decrypts the wrong bytes.
+$entryLines = @(& $sevenZip l -ba $QuickZip 2>$null)
+$blobEntries = @($entryLines | Where-Object { $_ -match '(^|\s)mainframe-secrets\.zip\s*$' })
+if ($blobEntries.Count -ne 1) {
+    throw "expected exactly 1 mainframe-secrets.zip entry inside $QuickZip, found $($blobEntries.Count) - this release would be unrestorable"
+}
+Write-Host "quick carries the encrypted secrets archive ($secretsMB MB)"
+
+# --- create release, upload quick + persist (hostname-tagged so laptop+desktop can both publish) ---
 $hostname = $env:COMPUTERNAME
 $tag = '{0}-{1}' -f (Get-Date -Format 'yyyy-MM-dd-HHmm'), $hostname
-$coreMB = '{0:N0}' -f ((Get-Item -LiteralPath $CoreZip).Length / 1MB)
+$quickMB = '{0:N0}' -f ((Get-Item -LiteralPath $QuickZip).Length / 1MB)
 $persistMB = '{0:N0}' -f ((Get-Item -LiteralPath $PersistZip).Length / 1MB)
-gh release create $tag $CoreZip $PersistZip $encZip --repo $Repo --title "machine state $hostname $tag" --notes "auto-published by backup.ps1 -Publish (core $coreMB MB + persist $persistMB MB + secrets $secretsMB MB, encrypted)"
+gh release create $tag $QuickZip $PersistZip --repo $Repo --title "machine state $hostname $tag" --notes "auto-published by backup.ps1 -Publish (quick $quickMB MB incl. secrets $secretsMB MB encrypted + persist $persistMB MB)"
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE) - token may lack repo scope or release perms" }
 
 # verify the upload instead of trusting the exit code: a partial upload leaves a release
-# that boot.ps1 can only discover as "no secrets asset" on the target machine.
+# that boot.ps1 can only discover as "no quick asset" on the target machine.
 $uploaded = @((gh release view $tag --repo $Repo --json assets 2>$null | ConvertFrom-Json).assets | ForEach-Object { $_.name })
-$expectedAssets = @((Split-Path -Leaf $CoreZip), (Split-Path -Leaf $PersistZip), (Split-Path -Leaf $encZip))
+$expectedAssets = @((Split-Path -Leaf $QuickZip), (Split-Path -Leaf $PersistZip))
 $missingAssets = @($expectedAssets | Where-Object { $want = $_; -not ($uploaded | Where-Object { $_ -eq $want }) })
 if ($missingAssets.Count -gt 0) {
     throw "release $tag uploaded incompletely - missing asset(s): $($missingAssets -join ', ')"
 }
-Write-Host "published $tag (core $coreMB MB + persist $persistMB MB + secrets $secretsMB MB encrypted) -> $Repo"
+Write-Host "published $tag (quick $quickMB MB incl. secrets $secretsMB MB encrypted + persist $persistMB MB) -> $Repo"
 
 # --- prune: keep newest $Keep per hostname ---
 # gh release list returns NEWEST-FIRST. tags are yyyy-MM-dd-HHmm-<host>, so sorting
