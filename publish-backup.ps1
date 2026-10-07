@@ -27,12 +27,12 @@ if (-not (Test-Path -LiteralPath $SecretsZip)) { throw "secrets archive not foun
 # --- vault session (must be unlocked) ---
 $sessionKeyFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
 if (-not (Test-Path -LiteralPath $sessionKeyFile)) {
-    throw "vault is locked: no session.key found. run automata\bitwarden.com\unlock.ps1 first, then retry."
+    throw "vault is locked: no session.key found. run automata-private\bitwarden.com\unlock.ps1 first, then retry."
 }
 $env:BW_SESSION = (Get-Content -LiteralPath $sessionKeyFile -Raw).Trim()
 $status = & bw status --raw 2>$null | ConvertFrom-Json
 if (-not $status -or $status.status -ne 'unlocked') {
-    throw "vault still locked after session.key (status=$($status.status)) - refresh it via automata\bitwarden.com\unlock.ps1"
+    throw "vault still locked after session.key (status=$($status.status)) - refresh it via automata-private\bitwarden.com\unlock.ps1"
 }
 
 # --- github token from vault ---

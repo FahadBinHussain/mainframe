@@ -7,8 +7,8 @@ param(
     [string]$SecretsManifestPath,
     [switch]$SkipNativePersist,
     [hashtable]$CloneRepos = @{
-        mainframe = 'https://github.com/<owner>/mainframe.git'
-        automata  = 'https://github.com/<owner>/automata.git'
+        'mainframe'         = 'https://github.com/FahadBinHussain/mainframe.git'
+        'automata-private'  = 'https://github.com/FahadBinHussain/automata-private.git'
     },
     [string]$DownloadsRoot = "$env:USERPROFILE\Downloads"
 )
@@ -1073,13 +1073,13 @@ if (-not (Test-Path -LiteralPath $mainframeDest)) {
     Invoke-Native git -C $mainframeDest pull --ff-only
 }
 
-$automataRepo = $CloneRepos['automata']
-$automataDest = Join-Path $DownloadsRoot 'automata'
+$automataRepo = $CloneRepos['automata-private']
+$automataDest = Join-Path $DownloadsRoot 'automata-private'
 if (-not (Test-Path -LiteralPath $automataDest)) {
     Write-Host "Cloning $automataRepo to $automataDest"
     Invoke-Native git clone $automataRepo $automataDest
 } else {
-    Write-Host "Automata repo already exists at $automataDest, pulling latest"
+    Write-Host "automata-private repo already exists at $automataDest, pulling latest"
     Invoke-Native git -C $automataDest pull --ff-only
 }
 
@@ -1306,24 +1306,24 @@ if (-not $wingetCmd) {
 # - opencode v1 fork ONLY: bash pipe hang fix #44601. we run opencode2 now (see the
 #   guard below) - that patcher builds v1, so applying it to a v2 install would
 #   overwrite v2 with a binary that cannot read the restored config.
-# All patchers live in automata; skip quietly if absent (backup may not include automata).
+# All patchers live in automata-private; skip quietly if absent (backup may not include automata-private).
 Update-Step 'Re-applying local binary patches (alist, ditto, opencode v1 fork)'
-$automata = Join-Path $env:USERPROFILE 'Downloads\automata'
-$alistPatcher = Join-Path $automata 'github.com\AlistGo\alist\alist-terabox-patcher.ps1'
+$automataPrivate = Join-Path $env:USERPROFILE 'Downloads\automata-private'
+$alistPatcher = Join-Path $automataPrivate 'github.com\AlistGo\alist\alist-terabox-patcher.ps1'
 if (Test-Path -LiteralPath $alistPatcher) {
     Write-Host 'Re-applying AList terabox patch...'
     & pwsh -NoProfile -File $alistPatcher -NoRestart 2>&1 | Write-Host
 } else {
     Write-Warning "alist patcher not found: $alistPatcher"
 }
-$dittoPatcher = Join-Path $automata 'github.com\sabrogden\Ditto\ditto-fork-build.ps1'
+$dittoPatcher = Join-Path $automataPrivate 'github.com\sabrogden\Ditto\ditto-fork-build.ps1'
 if (Test-Path -LiteralPath $dittoPatcher) {
     Write-Host 'Re-building Ditto from fork (starred-clips PRs)...'
     & pwsh -NoProfile -File $dittoPatcher 2>&1 | Write-Host
 } else {
     Write-Warning "ditto patcher not found: $dittoPatcher"
 }
-$opencodePatcher = Join-Path $automata 'github.com\anomalyco\opencode\opencode-patcher.ps1'
+$opencodePatcher = Join-Path $automataPrivate 'github.com\anomalyco\opencode\opencode-patcher.ps1'
 $v1Installed = Test-Path -LiteralPath (Join-Path $ScoopRoot 'apps\opencode\current')
 $v2Installed = Test-Path -LiteralPath (Join-Path $ScoopRoot 'apps\opencode2\current')
 if (-not (Test-Path -LiteralPath $opencodePatcher)) {

@@ -10,7 +10,7 @@
 # in the mainframe profile dir.
 #
 # Session: read from %APPDATA%\mainframe\accounts\bitwarden\session.key (written
-# by automata\bitwarden.com\unlock.ps1) or $env:BW_SESSION. If the vault is locked,
+# by automata-private\bitwarden.com\unlock.ps1) or $env:BW_SESSION. If the vault is locked,
 # calls fail with a clear message asking the user to unlock first.
 #
 # Performance: Get-VaultItems caches bw list items per session so the vault is
@@ -66,7 +66,7 @@ function Clear-VaultSessionCache {
 
 function Get-VaultItems {
     if (-not (Test-VaultSession)) {
-        throw 'Bitwarden vault is locked or no session found. Run automata\bitwarden.com\unlock.ps1 first, or set $env:BW_SESSION.'
+        throw 'Bitwarden vault is locked or no session found. Run automata-private\bitwarden.com\unlock.ps1 first, or set $env:BW_SESSION.'
     }
 
     $session = Get-VaultSession
@@ -158,7 +158,7 @@ function Update-VaultItemNotes {
     )
 
     if (-not (Test-VaultSession)) {
-        throw 'Bitwarden vault is locked. Run automata\bitwarden.com\unlock.ps1 first.'
+        throw 'Bitwarden vault is locked. Run automata-private\bitwarden.com\unlock.ps1 first.'
     }
 
     $item = bw get item $ItemId --session $env:BW_SESSION 2>$null | ConvertFrom-Json
@@ -186,7 +186,7 @@ function New-VaultItem {
     )
 
     if (-not (Test-VaultSession)) {
-        throw 'Bitwarden vault is locked. Run automata\bitwarden.com\unlock.ps1 first.'
+        throw 'Bitwarden vault is locked. Run automata-private\bitwarden.com\unlock.ps1 first.'
     }
 
     $login = @{ username = $Username; password = $null }

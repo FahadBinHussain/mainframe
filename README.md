@@ -23,7 +23,7 @@ It can also restore native Windows apps that should not be Scoop-owned. These ar
 - `restore.ps1` restores Scoop, persisted settings, buckets, apps, native app exceptions, and encrypted secrets from `mainframe-backup.zip`
 - `backup-secrets.ps1` creates standalone `tool-secrets.zip` from the paths in `tool-secrets.manifest.json` (used by `restore-secrets.ps1`)
 - `restore-secrets.ps1` restores `tool-secrets.zip` and backs up overwritten targets first
-- `vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
+- `vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata-private\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
 - `account-contract.ps1` checks that every `*-account.ps1` helper keeps the shared mainframe account command contract
 - `scoop-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`, and `winget-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot. pip has no allowlist: backup writes every installed package pinned to `pip-freeze.txt` (plus the pytorch `+cpu` extra index) and restore runs `pip install -r` on it — `Lib\site-packages` itself is not shipped anymore (it held no user data, 0 editable installs)
 - `vercel-account.ps1` manages separate token-only Vercel CLI profiles by email
@@ -33,15 +33,15 @@ It can also restore native Windows apps that should not be Scoop-owned. These ar
 - `firebase-account.ps1` manages separate Firebase CLI profiles by email using profile-local `XDG_CONFIG_HOME`
 - `render-account.ps1` manages separate Render CLI profiles by account email using Render's official `RENDER_CLI_CONFIG_PATH` setting
 - `cronjob-account.ps1` manages separate cron-job.org API key profiles by account email for creating, updating, disabling, and inspecting scheduled HTTP jobs
-- `cloudflare-account.ps1` manages separate Cloudflare profiles by detected account email, using either API tokens or isolated Wrangler browser auth for Wrangler commands, API calls, zone/DNS inspection, and private state exports (moved to `C:\Users\Admin\Downloads\automata\cloudflare.com\cloudflare-account.ps1` in 2026-08-17)
+- `cloudflare-account.ps1` manages separate Cloudflare profiles by detected account email, using either API tokens or isolated Wrangler browser auth for Wrangler commands, API calls, zone/DNS inspection, and private state exports (moved to `C:\Users\Admin\Downloads\automata-private\cloudflare.com\cloudflare-account.ps1` in 2026-08-17)
 - `github-account.ps1` manages separate GitHub CLI/API token profiles by detected account email for `gh` commands and API calls
 - `notion-account.ps1` manages separate Notion API token profiles by account email for API calls, optional `ntn` CLI commands, and page/block inspection
-- `microsoft-account.ps1` manages separate Microsoft Graph OAuth profiles by detected account email for delegated Microsoft automation across mail, calendar, contacts, files, tasks, and notes (moved to `C:\Users\Admin\Downloads\automata\outlook.com\microsoft-account.ps1` in 2026-08-17)
-- `outlook-account.ps1` is a compatibility wrapper around `microsoft-account.ps1` for mail-focused workflows (moved to `C:\Users\Admin\Downloads\automata\outlook.com\outlook-account.ps1` in 2026-08-17)
+- `microsoft-account.ps1` manages separate Microsoft Graph OAuth profiles by detected account email for delegated Microsoft automation across mail, calendar, contacts, files, tasks, and notes (moved to `C:\Users\Admin\Downloads\automata-private\outlook.com\microsoft-account.ps1` in 2026-08-17)
+- `outlook-account.ps1` is a compatibility wrapper around `microsoft-account.ps1` for mail-focused workflows (moved to `C:\Users\Admin\Downloads\automata-private\outlook.com\outlook-account.ps1` in 2026-08-17)
 - `hf-account.ps1` manages separate Hugging Face CLI profiles by detected account email using `HF_HOME` and profile-local token paths
-- `devvit-account.ps1` manages separate Reddit Devvit CLI profiles by account email, swapping Devvit's official `%USERPROFILE%\.devvit\token` file into per-profile mainframe storage (moved to `C:\Users\Admin\Downloads\automata\reddit.com\devvit-account.ps1` in 2026-08-17)
-- `reddit-account.ps1` manages separate Reddit API OAuth profiles by account email for posting as your own Reddit account (moved to `C:\Users\Admin\Downloads\automata\reddit.com\reddit-account.ps1` in 2026-08-17)
-- `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed (tracked here; requires reddit-account.ps1 from `C:\Users\Admin\Downloads\automata\reddit.com\`)
+- `devvit-account.ps1` manages separate Reddit Devvit CLI profiles by account email, swapping Devvit's official `%USERPROFILE%\.devvit\token` file into per-profile mainframe storage (moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\devvit-account.ps1` in 2026-08-17)
+- `reddit-account.ps1` manages separate Reddit API OAuth profiles by account email for posting as your own Reddit account (moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps1` in 2026-08-17)
+- `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed (tracked here; requires reddit-account.ps1 from `C:\Users\Admin\Downloads\automata-private\reddit.com\`)
 - `scoopfile.json` is the exported package snapshot
 - `native-apps.json` describes non-Scoop apps that should be installed normally, plus settings-only entries with `SkipInstall`
 - `tool-secrets.manifest.json` is the editable list of auth/config/skill paths to carry across machines
@@ -258,7 +258,7 @@ When Notion exposes the owner's email from `/users/me`, `token-add` and `import-
 
 Create and use Microsoft Graph profiles:
 
-Moved to `C:\Users\Admin\Downloads\automata\outlook.com\microsoft-account.ps1` in 2026-08-17. See that repo's README for usage.
+Moved to `C:\Users\Admin\Downloads\automata-private\outlook.com\microsoft-account.ps1` in 2026-08-17. See that repo's README for usage.
 
 Create and use Hugging Face profiles:
 
@@ -284,11 +284,11 @@ Hugging Face profiles use profile-local `HF_HOME`, `HF_TOKEN_PATH`, and `HF_STOR
 
 Create and use Reddit Devvit profiles:
 
-Moved to `C:\Users\Admin\Downloads\automata\reddit.com\devvit-account.ps1` in 2026-08-17. See that repo's README for usage.
+Moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\devvit-account.ps1` in 2026-08-17. See that repo's README for usage.
 
 Create and use Reddit API OAuth profiles:
 
-Moved to `C:\Users\Admin\Downloads\automata\reddit.com\reddit-account.ps1` and `reddit-post.ps1` in 2026-08-17. See that repo's README for usage.
+Moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps1` and `reddit-post.ps1` in 2026-08-17. See that repo's README for usage.
 
 Create and use Google Cloud CLI profiles:
 

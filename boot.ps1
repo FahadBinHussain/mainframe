@@ -170,5 +170,5 @@ Write-Host @"
   what to check:
   - edge extensions: cws-only ones may need ONE enable click each (edge://extensions)
   - vault helpers:  <repo>\*-account.ps1 status-all
-  - vpn:            <repo>\..\automata\protonvpn.com\proton-gui.ps1
+  - vpn:            <repo>\..\automata-private\protonvpn.com\proton-gui.ps1
 "@ -ForegroundColor Green

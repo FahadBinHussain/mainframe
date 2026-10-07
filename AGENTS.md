@@ -14,7 +14,7 @@ conventions used below:
 every `*-account.ps1` helper implements the same contract (`login`, `use`, `current`, `list`, `status`, `status-all`, `path`, `env`, `run`) plus tool-specific subcommands. `account-contract.ps1` validates the contract across all helpers — run it after adding or editing a helper.
 
 - profiles are keyed by account email only; if email cannot be detected after auth, fail or ask — never save a username/label/workspace fallback.
-- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `publish-backup.ps1` and `github-account.ps1` match that pattern.
+- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata-private\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `publish-backup.ps1` and `github-account.ps1` match that pattern.
 - **github: a bare-handle `login.username` makes a valid token look missing (2026-10-06)**: `Find-VaultItemByEmail` matches `login.username == profile email` first, then falls back to a notes line equal to the email. a `github.com - <handle>` item with `login.username = <handle>` satisfies neither, so `Read-ProfileToken` returns null — `status-all` prints `HasToken=False / TokenStatus=missing` and `run <email> gh ...` fails with *"populate the GH_TOKEN environment variable"* (exit 4) — while the `ghp_` in the notes is perfectly valid. **diagnose first**: read the item and probe the token directly (`Authorization: Bearer <token>` against `api.github.com/user`, check `x-oauth-scopes`) before believing it expired. **fix**: set `login.username` to the profile email. bw 2026.5.0 has no `bw item edit` command and no `--username` flag — use `bw edit item <id> <base64-of-full-item-json>` (get the item, mutate `login.username`, re-encode; posting the whole item back is the only safe form). same class of bug as the huggingface trap below.
 - **vault cache (2026-09-01)**: `vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles.
 - before using a service, check the active account first (`status-all`/`current`); if the task targets a specific project/repo/space, verify which account owns it and switch before proceeding.
@@ -633,7 +633,7 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
   auth prompts/hangs. always set `$env:TAILSCALE_SSH_KEY_NAME = '<fleet key name>'` in the
   same command before calling `tailscale-account.ps1 ssh ...`, and wrap the ssh in
   `Start-Job` + `Wait-Job -Timeout` so the shell tool returns even if ssh stalls.
-- **reusable remote script runner**: `automata\tailscale.com\remote-run.ps1` wraps the
+- **reusable remote script runner**: `automata-private\tailscale.com\remote-run.ps1` wraps the
   scp + ssh + Start-Job/Wait-Job pattern for running a local script on a remote tailnet
   peer from an agent shell. usage: `remote-run.ps1 C:\path\script.ps1 [-Timeout 120]`.
   defaults to the home desktop (`REMOTE_HOST`/`REMOTE_USER`/`TAILSCALE_SSH_KEY_NAME` in
@@ -649,7 +649,7 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 
 ## agents.md sync (AgentsMdSync)
 
-**2026-10-02: the script moved to automata-private** (`automata-private\tools\agent-rules-sync\agent-rules-sync.ps1`, part of the mainframe -> automata merge) and the `AgentsMdSync` task was repointed there — edit it THERE, not here; this repo no longer has a copy. everything below still describes the behavior:
+**2026-10-02: the script moved to automata-private** (`automata-private\tools\agent-rules-sync\agent-rules-sync.ps1`, part of the mainframe -> automata-private merge) and the `AgentsMdSync` task was repointed there — edit it THERE, not here; this repo no longer has a copy. everything below still describes the behavior:
 
 `agent-rules-sync.ps1` is the logon task `AgentsMdSync`. it watches `~/AGENTS.md` and copies it into each tool's global rules path. grok's copy is a plain file at `~/.grok/rules/AGENTS.md` (no yaml header — grok loads every `*.md` in that directory as instructions and does not strip frontmatter). the running task holds the script in memory, so after editing the script restart `AgentsMdSync` or the new target stays dark until the next logon.
 
@@ -680,7 +680,7 @@ instead of `skills` when archiving `~/.agents\skills`:
 
 ## uptimerobot: status page + monitor helper
 
-helper: `<repo>\..\automata\uptimerobot.com\uptimerobot-account.ps1` (moved to automata, contract PASS). profiles at `%APPDATA%\mainframe\accounts\uptimerobot\<email>\` (api-key.txt).
+helper: `<repo>\..\automata-private\uptimerobot.com\uptimerobot-account.ps1` (moved to automata-private, contract PASS). profiles at `%APPDATA%\mainframe\accounts\uptimerobot\<email>\` (api-key.txt).
 
 ### v3 is the ONLY API that works for writes
 - v2 `/v2/newMonitor` returns HTTP 403 `access_denied: You are not allowed to use some settings with your current plan` on current accounts (all fields, even minimal). do NOT debug v2 - it is broken.
@@ -1114,7 +1114,7 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
 - **vault is never backed up** (decided 2026-09-12). the bitwarden vault lives server-side; we do not ship it:
   - `backup.ps1` persist `$excludeDirs` includes `bitwarden-cli` → the encrypted `bw-data\data.json` cache is not captured on any run (daily or full).
   - `tool-secrets.manifest.json` `mainframe tool auth profiles and tokens` item has `excludeDirs: ["bitwarden"]` → the full-run `secrets\` archive skips `accounts\bitwarden\` (`session.key` + profile).
-  - a restore therefore has no vault session; run `automata\bitwarden.com\unlock.ps1` to re-login (rebuilds `data.json` from the server) before anything needs a token.
+  - a restore therefore has no vault session; run `automata-private\bitwarden.com\unlock.ps1` to re-login (rebuilds `data.json` from the server) before anything needs a token.
   - other `accounts\<tool>\` profile dirs still travel — since 2026-08-22 they hold only `profile.json`/`current.json` metadata + CLI state, not raw secrets (those are vault-native).
 
 
@@ -1193,6 +1193,15 @@ encrypted copy is what ships either way.
    `restore-secrets.ps1` now takes the same two filters as the embedded branch and restore passes
    them; a filter matching nothing prints `No secret items match this filter ...` instead of
    silently doing nothing.
+6. **restore's clone step pointed at placeholders and the outdated public repo (2026-10-07).**
+   `-CloneRepos` defaults were `https://github.com/<owner>/mainframe.git` +
+   `https://github.com/<owner>/automata.git`: nothing ever substitutes `<owner>` (boot passes
+   only `-Mode`/`-BackupRoot`, so the defaults are what actually run), and the checkout on disk
+   is `Downloads\automata-private` — the public `automata` repo is outdated and `Downloads\automata`
+   does not exist. quick mode returns BEFORE the clone step, which is why the download/decrypt
+   boot simulations never exercised it — only a full-mode restore does. fixed: real owner in both
+   clone URLs, key/dest/patcher root renamed to `automata-private`, and every doc/error-message
+   path renamed with them (verified: `automata(?![A-Za-z\-])` returns 0 hits repo-wide).
 
 **visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
 runs silent. it now hands visibility to an on-demand interactive task:

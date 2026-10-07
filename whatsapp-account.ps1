@@ -162,8 +162,8 @@ function List-Profiles {
 # Remove this section once wa-js / baileys are fully retired.
 
 <#
-$BridgeScript = Join-Path (Split-Path -Parent $PSScriptRoot) "automata\whatsapp.com\wa-js-bridge.mjs"
-$BaileysBridgeScript = Join-Path (Split-Path -Parent $PSScriptRoot) "automata\whatsapp.com\baileys-bridge.mjs"
+$BridgeScript = Join-Path (Split-Path -Parent $PSScriptRoot) "automata-private\whatsapp.com\wa-js-bridge.mjs"
+$BaileysBridgeScript = Join-Path (Split-Path -Parent $PSScriptRoot) "automata-private\whatsapp.com\baileys-bridge.mjs"
 
 function Write-Metadata { param($Phone,$Port,$OwnerEmail) ... }
 function Write-BaileysMetadata { param($Phone,$OwnerEmail) ... }
