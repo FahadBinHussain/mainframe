@@ -220,6 +220,17 @@ endpoints that do NOT exist: `/api/v2/orgs`, `/api/v2/users/me/orgs`, `/api/v2/u
 ### gotcha: native stderr aborts restore under Windows PowerShell 5.1
 `restore.ps1` sets `$ErrorActionPreference='Stop'`. In PS 5.1, ANY native command stderr line becomes an error record, and under 'Stop' that terminates the whole restore. Commands like `uv tool install` ("already installed"), `reg.exe import` ("The operation completed successfully."), and `git` (divergence hints) all write to stderr and silently killed the restore at those points. The fix is `Invoke-Native` helper (line 134): it runs the command with `$ErrorActionPreference='Continue'` temporarily and `2>&1 | Out-Host` so stderr lines are displayed but don't terminate. Wrap every new native-command call in `Invoke-Native` or the savedEap pattern, NOT bare `& cmd`. Checked call sites as of 2026-08-23: git, reg, go, winget, uv, pip are wrapped; robocopy and scoop/pnpm were empirically safe (their stderr didn't trip). If a future restore step aborts mid-way, check for a bare `& <native>` call and wrap it.
 
+### gotcha: mainframe had drifted back to opencode v1 (fixed 2026-10-07)
+three places still said `opencode` (v1) after we moved to **opencode2** (v2), and none of them error - they just quietly do the wrong thing:
+
+1. `scoop-allowed.json` listed `opencode`, not `opencode2`. `backup.ps1` filters the scoop export to the allowlist (`$allowed -contains $_.Name`) and only prints `Filtered to N allowed apps`, so with v2 installed and v1 listed, **the agent was being dropped from every backup** with no warning at all.
+2. `restore.ps1` `Install-OpencodePinned` defaulted to `$opencodeSpec = 'opencode'`, matched the scoopfile entry named `opencode`, and its `catch` **fell back silently to `install opencode`** - so a restore installed v1.18.34, which cannot read a v2 config. the fallback is gone: it now throws with the spec that failed (no second method pretending to be the first).
+3. `tool-secrets.manifest.json` had no entry for `{UserProfile}\.config\opencode`, which is where v2 keeps `plugins\`, `skills\`, `cli.json`, `opencode.jsonc`, `package.json`. restore would come back with v1 and none of the v2 settings.
+
+also: `restore.ps1` re-applies a local fork patcher (`github.com\anomalyco\opencode\opencode-patcher.ps1`) that rebuilds the **v1** fork for bash pipe hang #44601. running it against a v2 install overwrites v2 with a v1 fork build, so it now checks `scoop\apps\opencode2\current` and skips with a loud warning instead.
+
+v1 and v2 are mutually exclusive (scoop's own notes: uninstall `opencode` before installing `opencode2`), so the allowlist must name exactly one of them. when the agent major version changes again, these four are the places to touch: allowlist, pinned install spec + scoopfile lookup, secrets manifest path, fork patcher guard.
+
 ### gotcha: neonctl is currently broken on windows under pnpm
 `neon-account.ps1 run`/`projects-json` still invoke `neonctl` via `& $neon.Source ...`. if neonctl was installed through `pnpm add -g neonctl`, only a `/bin/sh` shell shim is left at `scoop\apps\pnpm\current\bin\neonctl` with no matching `neonctl.cmd`/`neonctl.ps1`, pointing at a `global/.../node_modules/neonctl/dist/cli.js` that may not exist. under pwsh on windows these shims can't run, so the scripts silently fail. sanity-check: if a script reports 0 projects for every account, the neonctl call almost certainly failed.
 
