@@ -368,7 +368,7 @@ Extract `mainframe-backup.zip` on the new machine, then double-click `restore.cm
 .\restore.ps1
 ```
 
-The zip is self-contained: it includes `restore.cmd`, `restore.ps1`, `restore-secrets.ps1`, all backup data, and embedded secrets. No other files are needed.
+The zip is self-contained: it includes `restore.cmd`, `restore.ps1`, `restore-secrets.ps1`, and all backup data. Secrets travel beside it as `secrets/` (a plain `backup.ps1` run) or as a standalone `tool-secrets.zip` — `restore.ps1` restores whichever is present and warns loudly when neither is. For the remote one-liner (`irm https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/boot.ps1 | iex`), secrets arrive as the encrypted third release asset and are decrypted with the password held in Bitwarden item `mainframe-production`.
 
 Run restore from an Administrator PowerShell if `native-apps.json` is present, because service-style native apps need elevation.
 

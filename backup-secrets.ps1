@@ -13,6 +13,11 @@ param(
         # agent-browser state vault (~/.agent-browser/sessions) is separate. Excluding
         # avoids bloating the secrets archive with regenerable junk.
         'agent-browser',
+        # browser-use is the same thing: an orphan copy of an agent-browser profile
+        # (its mainframe-profile.json still says tool=agent-browser, no helper manages
+        # it, nothing in the repo references it) - 1.68 GB that made staging need more
+        # space than the disk had free, so 7z died with "not enough space on the disk".
+        'browser-use',
         'EdgeLLMOnDeviceModel',
         'EdgeLLMRuntime',
         'EdgeLanguageDetectionModel',
@@ -176,10 +181,14 @@ try {
     }
     if ($sevenZip) {
         # -bt shows bad-file diagnostics; -xr!$Recycle.Bin style exclusions not needed here.
-        & $sevenZip a -tzip -mx5 -bso0 -bsp0 -bse2 -y $ArchivePath (Join-Path $tempRoot '*') | Out-Null
+        # capture 2>&1 so the FAILURE REASON survives: with `| Out-Null` a fatal 7z run
+        # printed only "exit code 2" and no cause, which is useless for debugging.
+        # (no -bse2 either: it routes stderr into stdout, which is disabled by -bso0.)
+        $zout = & $sevenZip a -tzip -mx5 -bso0 -bsp0 -y $ArchivePath (Join-Path $tempRoot '*') 2>&1
+        $zexit = $LASTEXITCODE
         # 7z exit codes: 0 = OK, 1 = warnings (locked files skipped, acceptable here), >=2 = fatal.
-        if ($LASTEXITCODE -ge 2) {
-            throw "7z failed with exit code $LASTEXITCODE while writing $ArchivePath"
+        if ($zexit -ge 2) {
+            throw "7z failed with exit code $zexit while writing $ArchivePath`n$(@($zout) -join "`n")"
         }
     } else {
         Add-Type -AssemblyName System.IO.Compression.FileSystem

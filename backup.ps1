@@ -872,5 +872,10 @@ Remove-Item -LiteralPath $srcDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Warning 'Review private artifacts before sharing. They may contain tokens, databases, editor state, remote access identity, or other private data.'
 
 if ($Publish) {
+    # a release without the secrets archive is NOT a restorable machine: boot.ps1
+    # downloads it as the third asset and dies when it is missing. -ExcludeSecrets
+    # (above) keeps plaintext secrets OUT of core/persist; this rebuilds them fresh
+    # so publish-backup.ps1 can encrypt them with the vault password and upload them.
+    & (Join-Path $PSScriptRoot 'backup-secrets.ps1')
     & (Join-Path $PSScriptRoot 'publish-backup.ps1') -CoreZip $coreZip -PersistZip $persistZip
 }

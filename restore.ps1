@@ -307,10 +307,12 @@ function Restore-ToolSecretsArchive {
         if (-not (Test-Path -LiteralPath $script)) {
             throw "Missing restore-secrets.ps1 next to restore.ps1: $script"
         }
-        & $script -ManifestPath $SecretsManifestPath -ArchivePath $standaloneZip
-        if ($LASTEXITCODE -ne 0) {
-            throw "restore-secrets.ps1 failed with exit code $LASTEXITCODE"
-        }
+        # no $LASTEXITCODE check here: restore-secrets.ps1 runs no native commands, so
+        # that variable still holds whatever robocopy/git in THIS script left behind
+        # (robocopy exits 1 for "files copied OK") and the check failed the restore
+        # spuriously. it throws on real failures and $ErrorActionPreference is Stop,
+        # so the exception is the contract.
+        & $script -ManifestPath $SecretsManifestPath -ArchivePath $standaloneZip -ItemNames $ItemNames -SkipNames $SkipNames
         return
     }
 
@@ -1340,4 +1342,10 @@ if (-not (Test-Path -LiteralPath $opencodePatcher)) {
 
 Write-Progress -Activity 'Restoring mainframe' -Completed
 Write-Host 'Bootstrap complete. Restart PowerShell or log out/in if shell integration is not visible yet.'
+
+# failures throw (ErrorActionPreference=Stop) and propagate to the caller. this
+# explicit exit keeps caller checks like boot.ps1's "$LASTEXITCODE -ne 0" honest:
+# without it that variable still holds the last NATIVE command's code, and robocopy
+# exits 1 for "files copied OK" - so a successful restore reported itself as failed.
+exit 0
 

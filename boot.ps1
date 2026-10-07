@@ -1,8 +1,10 @@
 # boot.ps1 - mainframe cloud bootstrap. run on ANY fresh windows pc:
 #   irm https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/boot.ps1 | iex
 # asks for the bitwarden master password ONCE; everything else flows from the vault:
-#   vault github token -> private mainframe-production release zip (machine state)
-#   vault tool tokens  -> all *-account.ps1 helpers after restore
+#   vault github token     -> private mainframe-production release (core + persist zips)
+#   vault secrets password -> decrypts the third release asset (secrets archive), so
+#                             .ssh, opencode config and account profiles come back too
+#   vault tool tokens      -> all *-account.ps1 helpers after restore
 # no secrets live in this file. it is public by design - review before running.
 #Requires -Version 7
 $ErrorActionPreference = 'Stop'
@@ -62,16 +64,33 @@ if ($bwStatus.status -ne 'unlocked') {
 }
 
 # --- 3. github token from vault (for the private zip) ---
-Step 'fetching github token from vault'
-$ghProfile = Get-ChildItem (Join-Path $env:APPDATA 'mainframe\accounts\github') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-$ghToken = $null
-if ($ghProfile) {
-    $items = & bw list items --search 'github.com' --raw 2>$null | ConvertFrom-Json
-    foreach ($it in $items) {
-        if ($it.notes -match '(gh[pousr]_[A-Za-z0-9_]{30,})') { $ghToken = $Matches[1]; break }
-    }
+# take the vault item for the REPO OWNER, not the first token found: the vault holds
+# tokens for six github accounts and the first one alphabetically (algojectt) cannot
+# see this private repo, so gh answered "release not found" on a machine that had
+# done nothing wrong. also no dependency on %APPDATA%\mainframe\accounts\github:
+# on a FRESH pc that profile dir only exists AFTER the secrets archive arrives, so
+# reading it here (the old code did) guaranteed failure exactly where boot is first used.
+$repoOwner = ($BackupRepo -split '/')[0]
+Step "fetching github token for $repoOwner from vault"
+$ghItems = @(& bw list items --search 'github.com' --raw 2>$null | ConvertFrom-Json)
+$ownerItem = $ghItems | Where-Object { $_.name -eq "github.com - $repoOwner" } | Select-Object -First 1
+if (-not $ownerItem) {
+    $found = (@($ghItems) | ForEach-Object { $_.name }) -join ', '
+    Die "vault has no item named 'github.com - $repoOwner' - that is the token which can read $BackupRepo. github items in vault: $found. fix: github-account.ps1 token-add"
 }
-if (-not $ghToken) { Die "no github token in vault (searched 'github.com' items). add one: github-account.ps1 token-add" }
+$ghToken = $null
+if ($ownerItem.notes -match '(gh[pousr]_[A-Za-z0-9_]{30,})') { $ghToken = $Matches[1] }
+if (-not $ghToken) { Die "vault item 'github.com - $repoOwner' has no github token in its notes. fix: github-account.ps1 token-add" }
+
+# --- 3b. secrets archive password (same search + regex publish-backup.ps1 uses) ---
+Step 'fetching secrets archive password from vault'
+$secretsItems = @(& bw list items --search 'mainframe-production' --raw 2>$null | ConvertFrom-Json)
+$secretsItem = $secretsItems | Where-Object { $_.name -eq 'mainframe-production' } | Select-Object -First 1
+if (-not $secretsItem) { Die "no vault item named 'mainframe-production' - it holds the '[secrets archive password]' notes header the release is encrypted with" }
+if ($secretsItem.notes -notmatch '(?m)^\[secrets archive password\]\s*\r?\n\s*(\S+)') {
+    Die "vault item 'mainframe-production' has no '[secrets archive password]' notes header"
+}
+$secretsPassword = $Matches[1]
 
 # --- 4. restore mode choice (before download - Q skips the persist zip) ---
 Step 'restore mode'
@@ -104,6 +123,15 @@ if ($wantPersist) {
     gh release download $release.tagName --repo $BackupRepo --pattern '*-persist.zip' --output $persistPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $persistPath)) { Die "persist download failed" }
 }
+# third asset: the encrypted secrets archive. a machine restored without it loses
+# .ssh keys, opencode config and the mainframe account profiles - refuse instead.
+$secretsAsset = $release.assets | Where-Object name -like '*-secrets.zip' | Select-Object -First 1
+if (-not $secretsAsset) {
+    Die "release $($release.tagName) has no *-secrets.zip asset - restoring it would give you a partial machine. publish from the source machine first: .\backup.ps1 -Publish"
+}
+$secretsPath = Join-Path $env:TEMP $secretsAsset.name
+gh release download $release.tagName --repo $BackupRepo --pattern '*-secrets.zip' --output $secretsPath
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $secretsPath)) { Die "secrets download failed" }
 
 # --- 5. extract + restore ---
 Write-Host "extracting $mode assets + running $mode restore (walk away)"
@@ -115,10 +143,22 @@ if ($persistPath) {
     7z x $persistPath "-o$extract" -y | Out-Null
     if ($LASTEXITCODE -gt 1) { Die "7z persist extract failed" }
 }
+# decrypt the secrets archive into the restore root - restore.ps1 looks for
+# $BackupRoot\tool-secrets.zip and restores it with restore-secrets.ps1.
+7z x $secretsPath "-o$extract" "-p$secretsPassword" -y | Out-Null
+if ($LASTEXITCODE -gt 1) { Die "secrets decrypt failed (exit $LASTEXITCODE) - wrong password in vault item 'mainframe-production'?" }
+if (-not (Test-Path (Join-Path $extract 'tool-secrets.zip'))) {
+    Die "decrypted $secretsAsset but tool-secrets.zip is not at the restore root - the archive layout changed"
+}
+Write-Host "secrets archive decrypted -> $extract\tool-secrets.zip"
 
 Step 'phase 1: repo restore (scoop, pnpm, uv, tasks, secrets)'
-& (Join-Path $MainframeDir 'restore.ps1') -Mode $mode -ExcludeSecrets -BackupRoot $extract
-if ($LASTEXITCODE -ne 0) { Die "restore.ps1 phase 1 failed - scroll up for the exact error" }
+try {
+    & (Join-Path $MainframeDir 'restore.ps1') -Mode $mode -BackupRoot $extract
+    if ($LASTEXITCODE -ne 0) { Die "restore.ps1 phase 1 failed (exit $LASTEXITCODE) - scroll up for the exact error" }
+} catch {
+    Die "restore.ps1 phase 1 failed: $($_.Exception.Message)"
+}
 
 # --- 6. tailscale (vault authkey) ---
 Step 'provisioning tailscale'

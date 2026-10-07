@@ -1,6 +1,11 @@
 param(
     [string]$ManifestPath = (Join-Path $PSScriptRoot 'tool-secrets.manifest.json'),
     [string]$ArchivePath = (Join-Path $PSScriptRoot 'tool-secrets.zip'),
+    # Same filters restore.ps1 applies to the embedded secrets/ tree. They matter on
+    # the standalone-zip path (boot.ps1 remote restore): without them the "opencode
+    # first" step would restore EVERYTHING and the next step would redo it all.
+    [string[]]$ItemNames = @(),
+    [string[]]$SkipNames = @(),
     [switch]$NoExistingBackup
 )
 
@@ -85,9 +90,31 @@ if (-not (Test-Path -LiteralPath $ArchivePath)) {
 }
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-$items = @($manifest.items | Where-Object { -not $_.Disabled })
-if ($items.Count -eq 0) {
+$enabled = @($manifest.items | Where-Object { -not $_.Disabled })
+if ($enabled.Count -eq 0) {
     throw "No enabled secret paths found in $ManifestPath"
+}
+
+$items = $enabled
+if ($ItemNames.Count -gt 0) {
+    $items = @($items | Where-Object {
+        $name = $_.Name
+        $match = $false
+        foreach ($n in $ItemNames) { if ($name -like "*$n*") { $match = $true; break } }
+        $match
+    })
+}
+if ($SkipNames.Count -gt 0) {
+    $items = @($items | Where-Object {
+        $name = $_.Name
+        $match = $false
+        foreach ($n in $SkipNames) { if ($name -like "*$n*") { $match = $true; break } }
+        -not $match
+    })
+}
+if ($items.Count -eq 0) {
+    Write-Host "No secret items match this filter (ItemNames='$($ItemNames -join ',')' SkipNames='$($SkipNames -join ',')') - nothing to restore in this step."
+    return
 }
 
 $tempRoot = Join-Path $env:TEMP "mainframe-tool-secrets-$([Guid]::NewGuid().ToString('N'))"

@@ -1096,10 +1096,13 @@ chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
 DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
 `backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
 
-- **where it goes**: `publish-backup.ps1` uploads the `core` + `persist` zips to a
-  **private GitHub release** on `FahadBinHussain/mainframe-production`, tag
+- **where it goes**: `publish-backup.ps1` uploads THREE zips to a **private GitHub release**
+  on `FahadBinHussain/mainframe-production`, tag
   `yyyy-MM-dd-HHmm-<hostname>` (hostname-tagged so laptop + desktop can both publish
-  into the same repo). auth: vault `session.key` -> vault github token -> `gh release create`.
+  into the same repo): `mainframe-core.zip` + `mainframe-persist.zip` + `mainframe-secrets.zip`
+  (the AES-256-encrypted secrets archive — see "secrets asset" below). auth: vault
+  `session.key` -> vault github token -> `gh release create`. it re-reads the asset list after
+  upload and throws if any of the three is missing.
 - **capped, not infinite**: `-Keep 5` (default, cut from 10 on 2026-10-04 — GitHub
   does not quota release assets, so this is repo housekeeping only) per hostname. after
   each publish it prunes to the newest 5 for that host with `gh release delete --cleanup-tag`.
@@ -1113,6 +1116,72 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   - a restore therefore has no vault session; run `automata\bitwarden.com\unlock.ps1` to re-login (rebuilds `data.json` from the server) before anything needs a token.
   - other `accounts\<tool>\` profile dirs still travel — since 2026-08-22 they hold only `profile.json`/`current.json` metadata + CLI state, not raw secrets (those are vault-native).
 
+
+### secrets asset: the third release asset (added 2026-10-07)
+
+the one-liner goal ("run `irm da.gd/f85Bj | iex` on any pc, quick or full, get the whole
+machine back") was NOT met by core+persist: the daily chain passes `-ExcludeSecrets`, so
+nothing shipped `.ssh`, `.opencode\*`, `.config\opencode`, `.wakatime.cfg` or
+`AppData\mainframe\accounts\*`. a remote restore came back with no ssh keys, no opencode
+providers/models config, and every account helper pointing at empty profiles — while boot's
+quick prompt literally promised "edge profile, opencode, **secrets**". it claimed work it
+did not do.
+
+every release now carries THREE assets, and boot dies loudly when one is missing:
+
+| asset | contents | built by |
+|---|---|---|
+| `mainframe-core.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt` | `backup.ps1` |
+| `mainframe-persist.zip` | scoop persist dirs | `backup.ps1` |
+| `mainframe-secrets.zip` | AES-256 encrypted `tool-secrets.zip` (the `tool-secrets.manifest.json` paths) | `backup.ps1 -Publish` -> `backup-secrets.ps1` -> `publish-backup.ps1` |
+
+chain: `backup.ps1 -Publish` runs `backup-secrets.ps1` FIRST (so the 09:00 task and a manual
+publish both ship it), then `publish-backup.ps1` encrypts and uploads all three. `-ExcludeSecrets`
+keeps its meaning: it stops PLAINTEXT secrets being embedded in core/persist — it no longer
+means "this release cannot be restored".
+
+- **password lives in the vault only**: Bitwarden item `mainframe-production`, notes header
+  `[secrets archive password]` + one `[A-Za-z0-9]{40}` line. both sides run the byte-identical
+  lookup — `bw list items --search 'mainframe-production'` then
+  `(?m)^\[secrets archive password\]\s*\r?\n\s*(\S+)` — in `publish-backup.ps1` and `boot.ps1`;
+  keep them in sync or boot cannot decrypt. item name = the repo it protects (bare identifier,
+  no suffix, same naming rule as the domain-named items).
+- **encryption**: `7z a -tzip -mem=AES256 -p<pw>` run from inside the mainframe dir so the
+  stored entry name is exactly `tool-secrets.zip`; boot runs `7z x <asset> -o<extract> -p<pw>`
+  and `restore.ps1` finds `$BackupRoot\tool-secrets.zip` where it always looked (no restore.ps1
+  path change needed). plaintext never touches github: private repo AND encrypted bytes.
+- a release published before 2026-10-07 has no `*-secrets.zip`; boot refuses it with the fix
+  (`.\backup.ps1 -Publish` on the source machine) rather than silently producing a partial box.
+
+#### gotchas fixed while wiring this up (read before touching this chain)
+
+1. **staging needed 5.6 GB on a disk with 2.3 GB free (7z exit 2, no message).** the accounts
+   item stages `accounts\*`, and `accounts\browser-use\` is a **1.68 GB orphan copy of an
+   agent-browser profile** — its own `mainframe-profile.json` says `tool: agent-browser`, no
+   script references it, and `agent-browser` was already excluded while `browser-use` was not.
+   added to `ExcludeDirNames`. `C:\` sits at ~0.5% free (2.3 of 476 GB), so ANY staging over
+   ~1 GB dies: read free space first when 7z says *"There is not enough space on the disk"*.
+2. **the 7z failure printed no reason at all.** both 7z calls used `-bso0 -bsp0 -bse2`, and
+   `-bse2` routes stderr INTO stdout, which `-bso0` had disabled — a fatal run yielded only
+   "7z failed with exit code 2". both calls now capture `2>&1` and put the message in the throw.
+3. **boot took the FIRST github token in the vault** (`foreach ... break` over
+   `bw list items --search 'github.com'`). the vault holds tokens for six accounts, the first
+   alphabetically is `github.com - algojectt`, and that account cannot see the private repo —
+   gh answered `release not found` on a machine that had done nothing wrong. boot now selects
+   `github.com - <owner of $BackupRepo>` and dies listing the github items it did find. the old
+   code also gated on `%APPDATA%\mainframe\accounts\github` existing — on a FRESH pc that dir
+   only arrives with the secrets archive it was needed to download, so step 3 could never pass
+   on the exact machine boot exists for.
+4. **`restore.ps1` checked `$LASTEXITCODE` after calling `restore-secrets.ps1`** — that script
+   runs no native commands, so the variable still held robocopy's code from the Edge restore
+   (1 = "files copied OK") and a successful restore reported failure. removed: restore-secrets
+   throws on real failures and `$ErrorActionPreference='Stop'` propagates. `restore.ps1` now ends
+   with `exit 0` so boot's own `$LASTEXITCODE -ne 0` check is honest for the same reason.
+5. **the standalone-zip branch ignored `-ItemNames`/`-SkipNames`**, so quick mode's
+   "Restoring opencode config" step restored EVERYTHING and the following step redid all of it.
+   `restore-secrets.ps1` now takes the same two filters as the embedded branch and restore passes
+   them; a filter matching nothing prints `No secret items match this filter ...` instead of
+   silently doing nothing.
 
 **visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
 runs silent. it now hands visibility to an on-demand interactive task:
