@@ -41,7 +41,7 @@ It can also restore native Windows apps that should not be Scoop-owned. These ar
 - `hf-account.ps1` manages separate Hugging Face CLI profiles by detected account email using `HF_HOME` and profile-local token paths
 - `devvit-account.ps1` manages separate Reddit Devvit CLI profiles by account email, swapping Devvit's official `%USERPROFILE%\.devvit\token` file into per-profile mainframe storage (moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\devvit-account.ps1` in 2026-08-17)
 - `reddit-account.ps1` manages separate Reddit API OAuth profiles by account email for posting as your own Reddit account (moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps1` in 2026-08-17)
-- `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed (tracked here; requires reddit-account.ps1 from `C:\Users\Admin\Downloads\automata-private\reddit.com\`)
+- `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed (tracked in `C:\Users\Admin\Downloads\automata-private\reddit.com\` alongside reddit-account.ps1 - moved there 2026-10-08)
 - `scoopfile.json` is the exported package snapshot
 - `native-apps.json` describes non-Scoop apps that should be installed normally, plus settings-only entries with `SkipInstall`
 - `tool-secrets.manifest.json` is the editable list of auth/config/skill paths to carry across machines
@@ -288,7 +288,7 @@ Moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\devvit-account.ps
 
 Create and use Reddit API OAuth profiles:
 
-Moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps1` and `reddit-post.ps1` in 2026-08-17. See that repo's README for usage.
+Moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps1` (2026-08-17) and `reddit-post.ps1` (2026-10-08). See that repo's docs for usage.
 
 Create and use Google Cloud CLI profiles:
 

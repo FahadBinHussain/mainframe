@@ -91,18 +91,24 @@ context: neon projects can be under personal accounts or organizations. `project
 - api key auth (`--api-key`) is preferred over browser oauth for automation
 - the `neon-account.ps1` helper preserves the api key per profile and injects it into `neonctl` commands
 
-## neon: bulk scripts at mainframe root
+## neon: bulk scripts (moved to automata-private 2026-10-08)
 
-two helper scripts live next to the account helpers and iterate every mainframe neon profile automatically (no need to pass an email):
+**2026-10-08: `neon-hours-table.ps1` + `neon-projects-table.ps1` moved to
+`automata-private\neon.com\`** (mainframe -> automata merge) - edit them THERE,
+not here; this repo no longer has a copy (both now import `vault-secret.psm1`
+by its mainframe absolute path, uptimerobot-account.ps1 style). everything
+below still describes the behavior.
 
-- `<repo>\neon-hours-table.ps1` — per-project compute (CU-hours) remaining table across all accounts, against the Free plan quota (100 CU-hours/project/month). the quickest "how much neon is left" check.
-- `<repo>\neon-projects-table.ps1` — prints every project across all accounts (personal + per-org), with org names.
+two helper scripts (now in `automata-private\neon.com\`) iterate every mainframe neon profile automatically (no need to pass an email):
+
+- `<repo>\..\automata-private\neon.com\neon-hours-table.ps1` — per-project compute (CU-hours) remaining table across all accounts, against the Free plan quota (100 CU-hours/project/month). the quickest "how much neon is left" check.
+- `<repo>\..\automata-private\neon.com\neon-projects-table.ps1` — prints every project across all accounts (personal + per-org), with org names.
 - `neon-hours-table.ps1 -Json` returns the same sorted project records as JSON for scheduled consumers (e.g. a CU-hour warning notifier).
 
 ### run
 ```
-<repo>\neon-hours-table.ps1
-<repo>\neon-projects-table.ps1
+<repo>\..\automata-private\neon.com\neon-hours-table.ps1
+<repo>\..\automata-private\neon.com\neon-projects-table.ps1
 ```
 
 ### ⚠️ gotcha: vault migration left the bulk scripts file-blind (fixed 2026-09-13)
@@ -236,15 +242,20 @@ v1 and v2 are mutually exclusive (scoop's own notes: uninstall `opencode` before
 
 both `neon-hours-table.ps1` and `neon-projects-table.ps1` were migrated to the rest api (above) and no longer require neonctl. `neon-account.ps1 run`/`projects-json` still use neonctl — to migrate when needed, or fix neonctl: `pnpm add -g neonctl` plus verifying a windows-runnable `neonctl.cmd` exists.
 
-## vercel: bulk scripts at mainframe root
+## vercel: bulk scripts (moved to automata-private 2026-10-08)
 
-- `<repo>\vercel-usage-table.ps1` — per-account + per-project usage overview across all mainframe vercel profiles. reads tokens from the Bitwarden vault via `Read-VaultSecret` (no `token.txt` files in profile dirs since 2026-08-22 vault migration). reports plan, billing status, `softBlock` flag, projects count, prod deployments in last 30d, BLOCKED projects, runtime (Functions created), last prod deploy, repo, domains. this is the "vercel what's left / who's blocked" check.
-- `<repo>\vercel-projects-table.ps1` — older script, prints a simple per-account list of personal + team projects. `vercel-usage-table.ps1` supersedes this for usage/limits audits.
+**2026-10-08: `vercel-usage-table.ps1` moved to `automata-private\vercel.com\`**
+(mainframe -> automata merge) - edit it THERE; this repo no longer has a copy
+(it imports `vault-secret.psm1` by its mainframe absolute path,
+uptimerobot-account.ps1 style). global AGENTS rule 22 was repointed in the same
+change. the quota + BLOCKED-workflow sections below still describe it.
+
+- `<repo>\..\automata-private\vercel.com\vercel-usage-table.ps1` — per-account + per-project usage overview across all mainframe vercel profiles. reads tokens from the Bitwarden vault via `Read-VaultSecret` (no `token.txt` files in profile dirs since 2026-08-22 vault migration). reports plan, billing status, `softBlock` flag, projects count, prod deployments in last 30d, BLOCKED projects, runtime (Functions created), last prod deploy, repo, domains. this is the "vercel what's left / who's blocked" check.
+- `<repo>\vercel-projects-table.ps1` — older script, prints a simple per-account list of personal + team projects. `vercel-usage-table.ps1` superseded this for usage/limits audits; the script itself no longer exists anywhere (verified 2026-10-08).
 
 ### run
 ```
-<repo>\vercel-usage-table.ps1
-<repo>\vercel-projects-table.ps1
+<repo>\..\automata-private\vercel.com\vercel-usage-table.ps1
 ```
 
 ### quota and metering (read this — easy to get wrong)
@@ -782,7 +793,7 @@ helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile d
 
 - Hobby/team deploys without a GitHub login connection: avoid paid team-member upgrades and reconnecting GitHub per account.
 - detect: deploy shows `readyState: BLOCKED` with `seatBlock.blockCode: TEAM_ACCESS_REQUIRED` (Git author lacks team access).
-- surface ALL blocked projects across accounts at once: `<repo>\vercel-usage-table.ps1` - its BLOCKED-reason section shows the blockCode + commit author per project.
+- surface ALL blocked projects across accounts at once: `<repo>\..\automata-private\vercel.com\vercel-usage-table.ps1` - its BLOCKED-reason section shows the blockCode + commit author per project.
 - fix: create a local deployment-alignment commit authored with the target Vercel account email before deploying: `git -c user.email="<target-vercel-email>" -c user.name="<name>" commit --allow-empty -m "deployment alignment"` (empty commit only when there is no real scoped change to commit).
 - then redeploy and verify the live URL/domain.
 - verified 2026-09-05 (vubon-virtuals/vubon-ecommerce on fahads-projects-c67183fe): the alignment commit alone does NOT clear the block - git-push-triggered deploys stayed BLOCKED even with identical author email/login as a previous READY deploy (Vercel resolves the push to the GitHub identity, which has no seat). what works: after the alignment commit, deploy via CLI from the local linked clone as the owning account (`vercel-account.ps1 run <owner-email> deploy --prod --yes`) - the deploy is attributed to the owner and aliases the custom domain automatically.
@@ -812,9 +823,13 @@ helper: `<repo>\supabase-account.ps1` (contract PASS). profiles at `%APPDATA%\ma
 3. write `profile.json` (tool/service/profile/apiEndpoint/apiVersion/keyPath/updatedAt) + `current.json` for active state — the helper's `login` does this interactively too.
 4. verify with `.\supabase-account.ps1 run <email> GET v1/projects` (and `organizations`).
 
-### bulk scripts at mainframe root (mirror the neon equivalents)
-- `<repo>\supabase-projects-table.ps1` — every project across all supabase profiles (name, ref, org, region, db version, status, created). mirror of `neon-projects-table.ps1`.
-- `<repo>\supabase-usage-table.ps1` — per-project usage vs Free quota (500 MB database) using `config/disk/util` `fs_used_bytes` (byte-identical to the dashboard Database size). `-Json` for scheduled consumers. mirror of `neon-hours-table.ps1`.
+### bulk scripts (moved to automata-private 2026-10-08)
+
+**both scripts moved to `automata-private\supabase.com\`** (mainframe ->
+automata merge) - edit them THERE; neither has module imports, they read the
+profile `token.txt` directly. the details below still describe the behavior.
+- `<repo>\..\automata-private\supabase.com\supabase-projects-table.ps1` — every project across all supabase profiles (name, ref, org, region, db version, status, created). mirror of `neon-projects-table.ps1`.
+- `<repo>\..\automata-private\supabase.com\supabase-usage-table.ps1` — per-project usage vs Free quota (500 MB database) using `config/disk/util` `fs_used_bytes` (byte-identical to the dashboard Database size). `-Json` for scheduled consumers. mirror of `neon-hours-table.ps1`.
 - quota/limits: Free plan = 500 MB DB per project (Storage 1 GB + Egress 5 GB have NO public per-project Management API endpoint — not reported). paused projects return HTTP 500 on disk/util (expected → Status `n/a (paused?)`). rate limits: 120 req/min per user per project/org, analytics endpoints 30 req/min.
 - env overrides: `SUPABASE_FREE_DB_MB` (default 500), `SUPABASE_LOW_PCT` (default 0.85).
 
