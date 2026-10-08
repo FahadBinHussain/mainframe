@@ -1241,3 +1241,15 @@ runs silent. it now hands visibility to an on-demand interactive task:
   / headless run there is no desktop to draw on, so the only record is `C:\tmp\daily-backup.log`.
 
 
+
+## doc-surgery gotcha: Set-Content roundtrip flipped line endings (2026-10-08)
+
+while moving eight scripts to automata-private I rewrote this file with `Get-Content -Raw`,
+`-replace` note blocks (here-strings) and `Set-Content -NoNewline -Encoding utf8`, and the
+result came out mostly CRLF against an LF HEAD. git then showed the whole 1243-line file as
+changed and the secret scan tripped on untouched doc paragraphs reappearing as `+`.
+catch it by comparing `git diff --cached --stat` with `git diff --cached --ignore-cr-at-eol --stat`
+(45 real lines vs 2471 here). fix: normalize back to HEAD's style before staging -
+`while ($c.Contains("`r`n")) { $c = $c.Replace("`r`n","`n") }` (the loop also eats a leftover
+CR CR LF), re-`git add`, re-scan (32480be). append with `[IO.File]::AppendAllText` rather
+than `Add-Content`, which writes platform CRLF.
