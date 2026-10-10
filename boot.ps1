@@ -12,9 +12,16 @@ $ProgressPreference = 'SilentlyContinue'
 $Repo = 'FahadBinHussain/mainframe'
 $BackupRepo = 'FahadBinHussain/mainframe-production'
 $MainframeDir = Join-Path $HOME 'Downloads\mainframe'
+$script:BootTempDir = $null
 
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
-function Die($m) { Write-Host "`nFATAL: $m" -ForegroundColor Red; exit 1 }
+function Die($m) {
+    if ($script:BootTempDir -and (Test-Path -LiteralPath $script:BootTempDir)) {
+        Remove-Item -LiteralPath $script:BootTempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "`nFATAL: $m" -ForegroundColor Red
+    exit 1
+}
 function Get-BwItemsOrDie([string]$Search, [string]$Context) {
     $raw = & bw list items --search $Search --raw 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
@@ -163,20 +170,21 @@ if ($wantPersist) {
     $persistAsset = $release.assets | Where-Object name -like '*-persist.zip' | Select-Object -First 1
     if (-not $persistAsset) { Die "release $($release.tagName) has no persist asset needed for full restore" }
 }
-$quickPath = Join-Path $env:TEMP $quickAsset.name
+$script:BootTempDir = Join-Path $env:TEMP "mainframe-boot-$([Guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $script:BootTempDir -ErrorAction Stop | Out-Null
+$quickPath = Join-Path $script:BootTempDir $quickAsset.name
 gh release download $release.tagName --repo $BackupRepo --pattern '*-quick.zip' --output $quickPath
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path $quickPath)) { Die "quick download failed (token may lack repo scope for private repo $BackupRepo)" }
 $persistPath = $null
 if ($wantPersist) {
-    $persistPath = Join-Path $env:TEMP $persistAsset.name
+    $persistPath = Join-Path $script:BootTempDir $persistAsset.name
     gh release download $release.tagName --repo $BackupRepo --pattern '*-persist.zip' --output $persistPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $persistPath)) { Die "persist download failed" }
 }
 
 # --- 5. extract + restore ---
 Write-Host "extracting $mode assets + running $mode restore (walk away)"
-$extract = Join-Path $env:TEMP 'mainframe-boot-extract'
-if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
+$extract = Join-Path $script:BootTempDir 'extract'
 7z x $quickPath "-o$extract" -y | Out-Null
 if ($LASTEXITCODE -gt 1) { Die "7z quick extract failed (is 7zip installed? scoop install 7zip)" }
 if ($persistPath) {
@@ -213,6 +221,14 @@ try {
     $tailscaleScript = Join-Path $MainframeDir 'tailscale-account.ps1'
     & pwsh -NoProfile -ExecutionPolicy Bypass -File $tailscaleScript provision 2>$null
 } catch { Write-Warning "tailscale provision failed: $($_.Exception.Message) - do it manually later" }
+
+# The restore root contains decrypted secrets; remove the per-run workspace when done.
+try {
+    Remove-Item -LiteralPath $script:BootTempDir -Recurse -Force -ErrorAction Stop
+    $script:BootTempDir = $null
+} catch {
+    Write-Warning "could not remove temporary restore workspace '$script:BootTempDir': $($_.Exception.Message)"
+}
 
 # --- 7. report ---
 Step 'DONE - machine restored'
