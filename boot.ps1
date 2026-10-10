@@ -59,15 +59,43 @@ Step 'unlocking bitwarden vault'
 $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
 if ($bwStatus.status -ne 'unlocked') {
     $session = $null
+
+    $invokeBwUnlock = {
+        param([switch]$UsePasswordEnv)
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            if ($UsePasswordEnv) { $unlockOutput = @(& bw unlock --raw --passwordenv BW_PASSWORD 2>&1) }
+            else { $unlockOutput = @(& bw unlock --raw 2>&1) }
+            $unlockExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedEap
+        }
+        if ($unlockExit -ne 0) { return $null }
+        $unlockSession = $unlockOutput | Where-Object { $_ -is [string] -and -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace($unlockSession)) { return $null }
+        return $unlockSession
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($env:BW_PASSWORD)) {
-        $session = & bw unlock --raw --passwordenv BW_PASSWORD 2>$null
+        $session = & $invokeBwUnlock -UsePasswordEnv
+        if (-not $session) {
+            Write-Warning 'BW_PASSWORD was rejected. Falling back to interactive unlock.'
+        }
     }
-    if (-not $session -or $LASTEXITCODE -ne 0) {
-        # if BW_PASSWORD is absent/empty or env unlock fails, fall back to interactive prompt
-        Write-Host 'type your bitwarden MASTER PASSWORD:'
-        $session = & bw unlock --raw
+
+    $attempt = 0
+    while (-not $session -and $attempt -lt 3) {
+        $attempt++
+        Write-Host "type your bitwarden MASTER PASSWORD (attempt $attempt of 3):"
+        $session = & $invokeBwUnlock
+        if (-not $session -and $attempt -lt 3) {
+            Write-Warning 'Bitwarden rejected that password. Please try again.'
+        }
     }
-    if (-not $session) { Die 'vault unlock failed (wrong password?)' }
+    if (-not $session) {
+        Die 'vault unlock failed after 3 attempts. verify your master password and keyboard layout, then run boot.ps1 again.'
+    }
     $env:BW_SESSION = $session
     # persist for the restore helpers that read session.key
     $sk = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
