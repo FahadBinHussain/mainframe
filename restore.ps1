@@ -126,6 +126,20 @@ function Invoke-Scoop {
     }
 }
 
+function Enable-ScoopExternal7zip {
+    # Scoop uses its own 7zip helper by default and ignores 7z.exe on PATH.
+    # boot.ps1 already requires system 7-Zip for archive extraction, so tell
+    # Scoop to use that verified executable instead of leaving its helper path
+    # empty when it extracts .tgz packages such as opencode2.
+    $sevenZip = Get-Command '7z' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $sevenZip -or [string]::IsNullOrWhiteSpace($sevenZip.Source)) {
+        throw "7z.exe was not found on PATH. Install 7-Zip before restoring (for example: winget install --id 7zip.7zip)."
+    }
+
+    Invoke-Scoop config use_external_7zip true
+}
+
 # Run a native command while suppressing $ErrorActionPreference='Stop' aborts
 # from native stderr. Windows PowerShell 5.1 turns ANY native stderr line into
 # an error record, and under 'Stop' that terminates the whole restore (seen
@@ -706,6 +720,7 @@ function Install-OpencodePinned {
             }
         }
     }
+    Enable-ScoopExternal7zip
     Write-Host "Installing $opencodeSpec"
     try {
         Invoke-Scoop install $opencodeSpec --no-update-scoop --independent
