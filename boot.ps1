@@ -37,12 +37,16 @@ if (-not ([Security.Principal.WindowsPrincipal]$wid).IsInRole([Security.Principa
 }
 
 # --- 0b. bootstrap tools via built-in winget (no usb, no manual installs) ---
-Step 'installing bootstrap tools (git, bitwarden cli, github cli, 7zip)'
-foreach ($pkg in @('Git.Git', 'Bitwarden.CLI', 'GitHub.cli', '7zip.7zip')) {
+Step 'installing bootstrap tools (powershell 7, git, bitwarden cli, github cli, 7zip)'
+foreach ($pkg in @('Microsoft.PowerShell', 'Git.Git', 'Bitwarden.CLI', 'GitHub.cli', '7zip.7zip')) {
     winget install -e --id $pkg --accept-source-agreements --accept-package-agreements --silent 2>$null
     if ($LASTEXITCODE -ne 0) { Write-Host "$($pkg): already installed or winget hiccup (continuing)" }
 }
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+$pwshDefaultPath = Join-Path $env:ProgramFiles 'PowerShell\7'
+if (-not (Get-Command pwsh -ErrorAction SilentlyContinue) -and (Test-Path $pwshDefaultPath)) {
+    $env:Path = "$pwshDefaultPath;$env:Path"
+}
 foreach ($cmd in @('pwsh', 'git', 'bw', 'gh', '7z')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { Die "$cmd missing after winget step - install it manually and re-run" }
 }
