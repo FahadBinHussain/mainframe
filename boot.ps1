@@ -15,6 +15,17 @@ $MainframeDir = Join-Path $HOME 'Downloads\mainframe'
 
 function Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Die($m) { Write-Host "`nFATAL: $m" -ForegroundColor Red; exit 1 }
+function Get-BwItemsOrDie([string]$Search, [string]$Context) {
+    $raw = & bw list items --search $Search --raw 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        Die "failed to read vault items for $Context (bw list items --search '$Search' returned no JSON). ensure the vault is unlocked and contains the expected item."
+    }
+    try {
+        return @($raw | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        Die "failed to parse vault items for $Context (invalid JSON from bw list items --search '$Search')."
+    }
+}
 
 # --- 0. admin (scoop shims + VSS-based edge restore need it) ---
 Step 'checking elevation'
@@ -75,19 +86,21 @@ if ($bwStatus.status -ne 'unlocked') {
 # reading it here (the old code did) guaranteed failure exactly where boot is first used.
 $repoOwner = ($BackupRepo -split '/')[0]
 Step "fetching github token for $repoOwner from vault"
-$ghItems = @(& bw list items --search 'github.com' --raw 2>$null | ConvertFrom-Json)
+$ghItems = Get-BwItemsOrDie -Search 'github.com' -Context "github token for $repoOwner"
 $ownerItem = $ghItems | Where-Object { $_.name -eq "github.com - $repoOwner" } | Select-Object -First 1
 if (-not $ownerItem) {
     $found = (@($ghItems) | ForEach-Object { $_.name }) -join ', '
     Die "vault has no item named 'github.com - $repoOwner' - that is the token which can read $BackupRepo. github items in vault: $found. fix: github-account.ps1 token-add"
 }
 $ghToken = $null
-if ($ownerItem.notes -match '(gh[pousr]_[A-Za-z0-9_]{30,})') { $ghToken = $Matches[1] }
+$ownerNotes = [string]$ownerItem.notes
+$ghTokenMatch = [regex]::Match($ownerNotes, '(gh[pousr]_[A-Za-z0-9_]{30,})')
+if ($ghTokenMatch.Success -and $ghTokenMatch.Groups.Count -gt 1) { $ghToken = $ghTokenMatch.Groups[1].Value }
 if (-not $ghToken) { Die "vault item 'github.com - $repoOwner' has no github token in its notes. fix: github-account.ps1 token-add" }
 
 # --- 3b. secrets archive password (same search + regex publish-backup.ps1 uses) ---
 Step 'fetching secrets archive password from vault'
-$secretsItems = @(& bw list items --search 'mainframe-production' --raw 2>$null | ConvertFrom-Json)
+$secretsItems = Get-BwItemsOrDie -Search 'mainframe-production' -Context 'secrets archive password'
 $secretsItem = $secretsItems | Where-Object { $_.name -eq 'mainframe-production' } | Select-Object -First 1
 if (-not $secretsItem) { Die "no vault item named 'mainframe-production' - it holds the '[secrets archive password]' notes header the release is encrypted with" }
 if ($secretsItem.notes -notmatch '(?m)^\[secrets archive password\]\s*\r?\n\s*(\S+)') {
