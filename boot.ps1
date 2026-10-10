@@ -47,9 +47,12 @@ Set-Location $MainframeDir
 Step 'unlocking bitwarden vault'
 $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
 if ($bwStatus.status -ne 'unlocked') {
-    $session = & bw unlock --raw --passwordenv BW_PASSWORD 2>$null
+    $session = $null
+    if (-not [string]::IsNullOrWhiteSpace($env:BW_PASSWORD)) {
+        $session = & bw unlock --raw --passwordenv BW_PASSWORD 2>$null
+    }
     if (-not $session -or $LASTEXITCODE -ne 0) {
-        # bw unlock without env var: fall back to interactive prompt (still one password)
+        # if BW_PASSWORD is absent/empty or env unlock fails, fall back to interactive prompt
         Write-Host 'type your bitwarden MASTER PASSWORD:'
         $session = & bw unlock --raw
     }
