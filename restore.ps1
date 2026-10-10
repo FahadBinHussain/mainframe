@@ -333,6 +333,27 @@ function Restore-ToolSecretsArchive {
     Write-Warning 'No secrets found in backup (no secrets/ directory or tool-secrets.zip).'
 }
 
+function Restore-AgentInstructionsAndSkills {
+    $agentsMdSrc = Join-Path $BackupRoot 'AGENTS.md'
+    if (Test-Path -LiteralPath $agentsMdSrc) {
+        $agentsMdDest = Join-Path $env:USERPROFILE 'AGENTS.md'
+        Copy-Item -LiteralPath $agentsMdSrc -Destination $agentsMdDest -Force
+        Write-Host 'Restored AGENTS.md'
+    }
+
+    $agentSkillsSrc = Join-Path $BackupRoot '.agents\skills'
+    if (Test-Path -LiteralPath $agentSkillsSrc) {
+        $agentSkillsDest = Join-Path $env:USERPROFILE '.agents\skills'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $agentSkillsDest) | Out-Null
+        & robocopy $agentSkillsSrc $agentSkillsDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            Write-Warning "Robocopy .agents\skills failed with exit code $LASTEXITCODE"
+        } else {
+            Write-Host 'Restored .agents\skills'
+        }
+    }
+}
+
 function Restore-EdgeProfile {
     $edgeBackupDir = Join-Path $BackupRoot 'edge-profile'
     if (Test-Path -LiteralPath $edgeBackupDir) {
@@ -749,8 +770,9 @@ if ($Mode -eq 'quick') {
     Update-Step 'Restoring opencode config'
     Restore-ToolSecretsArchive -ItemNames @('opencode')
 
-    Update-Step 'Restoring mainframe secrets'
+    Update-Step 'Restoring mainframe secrets and Agent files'
     Restore-ToolSecretsArchive -SkipNames @('opencode')
+    Restore-AgentInstructionsAndSkills
 
     Update-Step 'Setting up Scoop'
     if (-not (Get-ScoopCommand)) {
@@ -777,7 +799,7 @@ if ($Mode -eq 'quick') {
     Install-OpencodePinned
 
     Write-Progress -Activity 'Restoring mainframe' -Completed
-    Write-Host 'Quick restore complete: Edge profile, opencode v2 config, mainframe secrets, and opencode2 (v2) installed.'
+    Write-Host 'Quick restore complete: Edge profile, opencode v2 config, mainframe secrets, Agent instructions and skills, and opencode2 (v2) installed.'
     return
 }
 
@@ -1152,26 +1174,7 @@ if (Test-Path -LiteralPath $tasksDir) {
 
 Update-Step 'Restoring secrets'
 Restore-ToolSecretsArchive -SkipNames @('opencode')
-
-$agentsMdSrc = Join-Path $BackupRoot 'AGENTS.md'
-if (Test-Path -LiteralPath $agentsMdSrc) {
-    $agentsMdDest = Join-Path $env:USERPROFILE 'AGENTS.md'
-    Copy-Item -LiteralPath $agentsMdSrc -Destination $agentsMdDest -Force
-    Write-Host 'Restored AGENTS.md'
-}
-
-$agentSkillsSrc = Join-Path $BackupRoot '.agents\skills'
-if (Test-Path -LiteralPath $agentSkillsSrc) {
-    $agentSkillsDest = Join-Path $env:USERPROFILE '.agents\skills'
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $agentSkillsDest) | Out-Null
-    & robocopy $agentSkillsSrc $agentSkillsDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL | Out-Null
-    if ($LASTEXITCODE -gt 7) {
-        Write-Warning "Robocopy .agents\skills failed with exit code $LASTEXITCODE"
-    } else {
-        Write-Host 'Restored .agents\skills'
-    }
-}
-
+Restore-AgentInstructionsAndSkills
 $gitconfigSrc = Join-Path $BackupRoot '.gitconfig'
 if (Test-Path -LiteralPath $gitconfigSrc) {
     $gitconfigDest = Join-Path $env:USERPROFILE '.gitconfig'
