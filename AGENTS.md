@@ -238,6 +238,9 @@ also: `restore.ps1` re-applies a local fork patcher (`github.com\anomalyco\openc
 
 v1 and v2 are mutually exclusive (scoop's own notes: uninstall `opencode` before installing `opencode2`), so the allowlist must name exactly one of them. when the agent major version changes again, these four are the places to touch: allowlist, pinned install spec + scoopfile lookup, secrets manifest path, fork patcher guard.
 
+### gotcha: Scoop ignores system 7-Zip unless configured
+the bootstrap installs 7-Zip through winget so `boot.ps1` can unpack the restore archives, but Scoop's archive extractor uses its own managed 7zip helper by default and does not use `7z.exe` from `PATH`. installing a `.tgz` package such as `versions/opencode2` before configuring `use_external_7zip` can pass an empty executable path and fail with `Cannot validate argument on parameter 'FilePath'`. `restore.ps1` now verifies the external `7z` command and runs `scoop config use_external_7zip true` before the pinned install.
+
 ### gotcha: neonctl is currently broken on windows under pnpm
 `neon-account.ps1 run`/`projects-json` still invoke `neonctl` via `& $neon.Source ...`. if neonctl was installed through `pnpm add -g neonctl`, only a `/bin/sh` shell shim is left at `scoop\apps\pnpm\current\bin\neonctl` with no matching `neonctl.cmd`/`neonctl.ps1`, pointing at a `global/.../node_modules/neonctl/dist/cli.js` that may not exist. under pwsh on windows these shims can't run, so the scripts silently fail. sanity-check: if a script reports 0 projects for every account, the neonctl call almost certainly failed.
 
