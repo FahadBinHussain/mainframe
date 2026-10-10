@@ -43,7 +43,7 @@ foreach ($pkg in @('Git.Git', 'Bitwarden.CLI', 'GitHub.cli', '7zip.7zip')) {
     if ($LASTEXITCODE -ne 0) { Write-Host "$($pkg): already installed or winget hiccup (continuing)" }
 }
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-foreach ($cmd in @('git', 'bw', 'gh', '7z')) {
+foreach ($cmd in @('pwsh', 'git', 'bw', 'gh', '7z')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { Die "$cmd missing after winget step - install it manually and re-run" }
 }
 Write-Host 'all bootstrap tools present'
@@ -196,7 +196,8 @@ Write-Host "secrets archive decrypted -> $extract\tool-secrets.zip"
 
 Step 'phase 1: repo restore (scoop, pnpm, uv, tasks, secrets)'
 try {
-    & (Join-Path $MainframeDir 'restore.ps1') -Mode $mode -BackupRoot $extract
+    $restoreScript = Join-Path $MainframeDir 'restore.ps1'
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File $restoreScript -Mode $mode -BackupRoot $extract
     if ($LASTEXITCODE -ne 0) { Die "restore.ps1 phase 1 failed (exit $LASTEXITCODE) - scroll up for the exact error" }
 } catch {
     Die "restore.ps1 phase 1 failed: $($_.Exception.Message)"
@@ -205,7 +206,8 @@ try {
 # --- 6. tailscale (vault authkey) ---
 Step 'provisioning tailscale'
 try {
-    & (Join-Path $MainframeDir 'tailscale-account.ps1') provision 2>$null
+    $tailscaleScript = Join-Path $MainframeDir 'tailscale-account.ps1'
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File $tailscaleScript provision 2>$null
 } catch { Write-Warning "tailscale provision failed: $($_.Exception.Message) - do it manually later" }
 
 # --- 7. report ---
