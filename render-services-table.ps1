@@ -5,6 +5,7 @@
 # plan, and branch.
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
 $accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\render'
 
 if (-not (Test-Path $accountRoot)) {
@@ -19,9 +20,10 @@ $accounts = Get-ChildItem $accountRoot -Directory |
 $rows = @()
 
 foreach ($email in $accounts) {
-    $apiKeyPath = Join-Path $accountRoot "$email\api-key.txt"
-    if (-not (Test-Path $apiKeyPath)) { continue }
-    $apiKey = (Get-Content $apiKeyPath -Raw).Trim()
+    # vault-native api key (no api-key.txt fallback); profiles without a vault entry are skipped.
+    try {
+        $apiKey = Read-VaultSecret -Email $email -NamePattern '*render.com*' -ValueRegex 'rnd_[A-Za-z0-9]+'
+    } catch { continue }
     if ([string]::IsNullOrWhiteSpace($apiKey)) { continue }
 
     $headers = @{ 'Authorization' = "Bearer $apiKey"; 'Accept' = 'application/json' }
