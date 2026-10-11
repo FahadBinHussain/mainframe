@@ -26,9 +26,25 @@ every `*-account.ps1` helper implements the same contract (`login`, `use`, `curr
 helper: `<repo>\gws-account.ps1` (google workspace cli `@googleworkspace/cli`, native `gws.exe`). profiles at `%APPDATA%\mainframe\accounts\gws\<email>\`. this is the **gmail send route** — `--scopes` defaults to the full set including `https://www.googleapis.com/auth/gmail.modify` (which covers send).
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages send --json '{"raw":"<base64url rfc2822>"}'
+# send — userId is a REQUIRED path param; omitting it fails loud with
+#   "Required path parameter userId is missing. Provide it via --params" (400, exit 3)
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages send --params '{"userId":"me"}' --json '{"raw":"<base64url rfc2822>"}'
 pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages list --params '{"userId":"me","maxResults":1}'
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages get   --params '{"userId":"me","id":"<id>","format":"full"}'
 ```
+
+**every** `gmail users ...` call needs `--params '{"userId":"me"}'`, not just `get`/`list`. the error names the missing param precisely, so read it — do not re-derive auth or scope from a 400.
+
+building the `raw` payload (RFC 2822 + base64url). note the subject/body may carry non-ascii (em dashes, quotes): the console mangles their display, so verify the BYTES, not the render. non-ascii in the subject must be RFC 2047 encoded (`=?UTF-8?B?<base64>?=`) or the header is malformed; the body only needs `Content-Type: text/plain; charset="UTF-8"`:
+
+```powershell
+$body = "hi," + "`r`n" + "`r`n" + "line with a " + [char]0x2014 + " em dash" + "`r`n" + "`r`n" + "thanks"
+$subjEnc = '=?UTF-8?B?' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($subject)) + '?='
+$msg = "To: $to`r`nSubject: $subjEnc`r`nMIME-Version: 1.0`r`nContent-Type: text/plain; charset=`"UTF-8`"`r`nContent-Transfer-Encoding: 8bit`r`n`r`n$body"   # CRLF everywhere
+$rawUrl = ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($msg))).TrimEnd('=').Replace('+','-').Replace('/','_')
+```
+
+verify before trusting a screenshot of the message: re-decode the base64url and assert `$msg.Contains([char]0x2014)` — the terminal prints `-` for `—`, so a message that LOOKS wrong can be right and vice versa. confirm delivery by `get ... "format":"full"` and reading `payload.headers` (`To`/`From`/`Subject`); note `--params '{"metadataHeaders":"To,Subject"}'` returns an EMPTY headers array, so `format: full` is the one that actually works.
 
 ### the bug
 
