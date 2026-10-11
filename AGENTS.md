@@ -21,6 +21,80 @@ every `*-account.ps1` helper implements the same contract (`login`, `use`, `curr
 - **`Read-VaultSecret` needs `-ValueRegex` or it silently returns null (2026-10-08)**: `Get-SecretFromNotes` returns null when `ValueRegex` is blank (no default), so `Read-VaultSecret -NamePattern 'github.com - *'` — no `-ValueRegex`, no `-Email` — always comes back null and reads like "vault broken / token missing" when it is a call-shape error. `-Email` also matters: `Find-VaultItemByEmail` with an empty email falls back to matching a BLANK line in the notes, so item selection becomes non-deterministic. for a token read that cannot go wrong use the `boot.ps1` recipe: `bw list items --search 'github.com' --raw` → exact `name -eq 'github.com - <owner>'` item → notes regex `(gh[pousr]_[A-Za-z0-9_]{30,})`; in a fresh shell set `$env:BW_SESSION` from `%APPDATA%\mainframe\accounts\bitwarden\session.key` first (or run via the module, which reads that file itself).
 - before using a service, check the active account first (`status-all`/`current`); if the task targets a specific project/repo/space, verify which account owns it and switch before proceeding.
 
+## gws: invalid_client is a stale client secret, not a dead session (fixed 2026-10-11)
+
+helper: `<repo>\gws-account.ps1` (google workspace cli `@googleworkspace/cli`, native `gws.exe`). profiles at `%APPDATA%\mainframe\accounts\gws\<email>\`. this is the **gmail send route** — `--scopes` defaults to the full set including `https://www.googleapis.com/auth/gmail.modify` (which covers send).
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages send --json '{"raw":"<base64url rfc2822>"}'
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages list --params '{"userId":"me","maxResults":1}'
+```
+
+### the bug
+
+every `run` failed with `invalid_client: The provided client secret is invalid` (401) while the refresh token was perfectly valid. the instinct is to re-login (re-consent in the browser) — that is the WRONG fix and it does not help, because the client secret is what is broken, not the session. it reads exactly like "my session expired, allow again".
+
+### why patching `client_secret.json` does nothing
+
+gws reads the client secret out of **`credentials.enc`**, not `client_secret.json`. the profile dir has both, and only the encrypted one is consulted when it carries a `client_secret` field (all of them do). editing the json is a silent no-op — the error stays byte-identical, which makes it look like the secret itself is dead upstream.
+
+### the real secret lives in the youtube profile
+
+the same google oauth client is used by the youtube scripts (client id is not repo material — read it out of the profile), which store the secret DPAPI-encrypted at `%APPDATA%\mainframe\accounts\youtube\client.dpapi`. that copy is valid; the gws copies were a stale rotation of the same client. prove it before touching anything — mint with each secret and see which one google accepts:
+
+```powershell
+$body = @{ client_id='<id>'; client_secret=<secret>; refresh_token=<rt>; grant_type='refresh_token' }
+Invoke-RestMethod -Uri 'https://oauth2.googleapis.com/token' -Method Post -Body $body -ContentType 'application/x-www-form-urlencoded'
+```
+
+**diagnose first, never assume**: compare the stored secrets by hash before deciding which is stale. two different 35-char secrets for one client id is the signature.
+
+### `credentials.enc` format
+
+`AES-256-GCM`, key = base64 of `.encryption_key` (44 chars → 32 bytes), file layout **12-byte nonce prefix + ciphertext + 16-byte auth tag suffix**. decrypt/re-encrypt recipe that works (backups first — `credentials.enc.bak-<stamp>`):
+
+```powershell
+$key=[Convert]::FromBase64String((Get-Content "$dir\.encryption_key" -Raw).Trim())
+$enc=[IO.File]::ReadAllBytes("$dir\credentials.enc")
+$nonce=[byte[]]::new(12);[Array]::Copy($enc,0,$nonce,0,12)
+$ctLen=$enc.Length-12-16; $ct=[byte[]]::new($ctLen);[Array]::Copy($enc,12,$ct,0,$ctLen)
+$tag=[byte[]]::new(16);[Array]::Copy($enc,12+$ctLen,$tag,0,16)
+$pt=[byte[]]::new($ctLen); [System.Security.Cryptography.AesGcm]::new($key).Decrypt($nonce,$ct,$tag,$pt)
+$o=[Text.Encoding]::UTF8.GetString($pt)|ConvertFrom-Json   # client_id / client_secret / refresh_token
+# re-encrypt: RANDOMIZE the nonce, never reuse the old one
+$newPt=[Text.Encoding]::UTF8.GetBytes(($o|ConvertTo-Json -Compress -Depth 10))
+$newNonce=[byte[]]::new(12); [Security.Cryptography.RandomNumberGenerator]::Fill($newNonce)
+$newCt=[byte[]]::new($newPt.Length); $newTag=[byte[]]::new(16)
+[System.Security.Cryptography.AesGcm]::new($key).Encrypt($newNonce,$newPt,$newCt,$newTag)   # see the arg-order trap
+$out=[byte[]]::new(12+$newPt.Length+16)
+[Array]::Copy($newNonce,0,$out,0,12); [Array]::Copy($newCt,0,$out,12,$newPt.Length); [Array]::Copy($newTag,0,$out,12+$newPt.Length,16)
+[IO.File]::WriteAllBytes("$dir\credentials.enc",$out)
+```
+
+- **⚠️ `AesGcm.Encrypt` argument order is `(nonce, plaintext, CIPHERTEXT, tag)`** — ciphertext third, tag fourth. `Decrypt` is `(nonce, ciphertext, tag, plaintext)`. passing tag third on the encrypt side makes .NET compare your plaintext against the 16-byte tag and throw `Plaintext and ciphertext must have the same length` *even when both arrays are the same length* — and the throw happens AFTER the write in a naive loop, so the on-disk file is already corrupt. always round-trip-decrypt the file you just wrote and assert the secret before moving to the next profile.
+- keep `client_secret.json` in sync with the same value so any other reader stays consistent; patch **every** gws profile dir at once — a half-repaired set is how this bug hides (one account works, the others look like dead sessions). list them with `<repo>\gws-account.ps1 list`.
+
+### scope checks per account (2026-10-11)
+
+`gmail.modify` is NOT uniform — a profile can be healthy and still be unable to send. as of 2026-10-11 two of the three profiles carried it and one carried only `youtube.force-ssl` + openid/email/profile (fixed by re-consent that day). `credentials.enc` does not store a `scopes` field, so always read the granted set from the **token endpoint response**, not the file — that is the only place the truth lives:
+
+```
+POST https://oauth2.googleapis.com/token   (same body as the mint above)
+  → the response `scope` field is the authoritative granted set
+```
+
+a missing scope is the one thing that genuinely requires `login <email>` (a browser consent click) — nothing else about a broken profile does. run it detached — `gws auth login` blocks on the loopback callback and will hang an agent shell for the full timeout:
+
+```powershell
+Start-Process pwsh -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','<repo>\gws-account.ps1','login','<email>' -RedirectStandardOutput 'C:\tmp\gws-login-out.txt' -RedirectStandardError 'C:\tmp\gws-login-err.txt' -WindowStyle Hidden
+```
+
+the auth url is printed on **stderr** with `redirect_uri=http://localhost:<port>`; if no browser tab appeared, extract it from the err file and `Start-Process` it by hand. completion signal = the `gws.exe` process named `auth login` exits and stdout prints `"status": "success"` with the scope list.
+
+### refresh tokens are permanent here — do not re-consent preventively
+
+google expires refresh tokens after 7 days **only** for apps whose oauth consent screen is in *testing* status. one of these profiles was minted **2026-05-18** and still minted a working access token on 2026-10-11 (146 days of no re-auth) → this client's consent screen is **published**, so tokens do not age out. they only die if unused for 6 months or manually revoked. `gws auth login` hardcodes `prompt=select_account+consent`, so a manual `login` always shows the allow screen — that is cosmetic to the login command only; `run` never prompts.
+
 ## neon: list all projects for an account
 
 context: neon projects can be under personal accounts or organizations. `projects list` without `--org-id` only returns personal projects. org-owned projects require `--org-id`.
