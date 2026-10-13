@@ -1243,13 +1243,29 @@ every release now carries TWO assets, and boot dies loudly when one is missing:
 
 | asset | contents | built by |
 |---|---|---|
-| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt` + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
+| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt`, `quick-persist\ditto` (Ditto settings so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
 | `mainframe-persist.zip` | scoop persist dirs | `backup.ps1` |
 
 the encrypted blob rides INSIDE quick on purpose: quick mode = 1 download, full mode = 2,
 and neither mode can end up on a box with no `.ssh`/opencode/account profiles. an earlier
 same-day shape shipped it as a third asset — `mainframe-quick.zip` + `mainframe-persist.zip`
 + `mainframe-secrets.zip` — which worked but forced every restore to make a third request.
+
+**ditto parity in quick mode (2026-10-13)**: ditto was full-mode-only — its settings
+(`persist\ditto`, `Ditto.db` excluded), the allowlist-loop install and the fork rebuild all sat
+past quick's `return`, so a quick restore ended with no clipboard manager. quick now ends with
+the same Ditto: `backup.ps1` copies `persist\ditto` into quick staging as `quick-persist\ditto`
+(settings only — the 2 GB+ clip DB stays out of BOTH zips, clip history starts fresh either way),
+and `restore.ps1`'s quick route runs `Install-DittoQuick` (restore settings -> ensure the `extras`
+bucket -> pinned install from scoopfile, loud warning when the backup carries no
+`quick-persist\ditto`) followed by the shared `Rebuild-DittoFork`, the same patcher the full route
+uses — so a missing `automata-private` warns identically in both. full mode is deliberately
+unchanged: persist restore + allowlist loop + patcher step already produce that state, and routing
+it through `Install-DittoQuick` would have skipped the loop's `hold` handling.
+(the `quick-persist` name is load-bearing: 7z's `-x!persist` filter is name-exact, so it drops
+`persist\` from `mainframe-quick.zip` while `quick-persist\` rides along — verified with a local
+`7z l` listing. both copies re-apply `/XF Ditto.db` so a future `persist-include.json` list mode
+cannot smuggle the clip DB into the quick zip.)
 
 chain: `backup.ps1 -Publish` runs `backup-secrets.ps1` FIRST (so the 09:00 task and a manual
 publish both build `tool-secrets.zip`), zips core staging into `mainframe-quick.zip`, then
