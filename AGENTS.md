@@ -1243,8 +1243,8 @@ every release now carries TWO assets, and boot dies loudly when one is missing:
 
 | asset | contents | built by |
 |---|---|---|
-| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt`, `quick-persist\ditto` (Ditto settings so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
-| `mainframe-persist.zip` | scoop persist dirs | `backup.ps1` |
+| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt`, `quick-persist\ditto` (Ditto settings + starred-only `Ditto.db` so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
+| `mainframe-persist.zip` | scoop persist dirs (incl. the same starred-only `Ditto.db` under `persist\ditto`) | `backup.ps1` |
 
 the encrypted blob rides INSIDE quick on purpose: quick mode = 1 download, full mode = 2,
 and neither mode can end up on a box with no `.ssh`/opencode/account profiles. an earlier
@@ -1255,17 +1255,40 @@ same-day shape shipped it as a third asset — `mainframe-quick.zip` + `mainfram
 (`persist\ditto`, `Ditto.db` excluded), the allowlist-loop install and the fork rebuild all sat
 past quick's `return`, so a quick restore ended with no clipboard manager. quick now ends with
 the same Ditto: `backup.ps1` copies `persist\ditto` into quick staging as `quick-persist\ditto`
-(settings only — the 2 GB+ clip DB stays out of BOTH zips, clip history starts fresh either way),
-and `restore.ps1`'s quick route runs `Install-DittoQuick` (restore settings -> ensure the `extras`
-bucket -> pinned install from scoopfile, loud warning when the backup carries no
-`quick-persist\ditto`) followed by the shared `Rebuild-DittoFork`, the same patcher the full route
-uses — so a missing `automata-private` warns identically in both. full mode is deliberately
-unchanged: persist restore + allowlist loop + patcher step already produce that state, and routing
-it through `Install-DittoQuick` would have skipped the loop's `hold` handling.
+(settings plus the starred-only `Ditto.db`, see the next block — the full 2 GB+ clip DB still
+stays out of BOTH zips), and `restore.ps1`'s quick route runs `Install-DittoQuick` (restore
+settings -> ensure the `extras` bucket -> pinned install from scoopfile, loud warning when the
+backup carries no `quick-persist\ditto`) followed by the shared `Rebuild-DittoFork`, the same
+patcher the full route uses — so a missing `automata-private` warns identically in both. full
+mode is deliberately unchanged: persist restore + allowlist loop + patcher step already produce
+that state, and routing it through `Install-DittoQuick` would have skipped the loop's `hold`
+handling.
 (the `quick-persist` name is load-bearing: 7z's `-x!persist` filter is name-exact, so it drops
 `persist\` from `mainframe-quick.zip` while `quick-persist\` rides along — verified with a local
-`7z l` listing. both copies re-apply `/XF Ditto.db` so a future `persist-include.json` list mode
-cannot smuggle the clip DB into the quick zip.)
+`7z l` listing. the settings robocopies re-apply `/XF Ditto.db` so a future
+`persist-include.json` list mode cannot smuggle the FULL clip DB into the quick zip; the only
+Ditto.db that ships is the stripped one placed by the starred-db block below.)
+
+**starred-only Ditto.db in both modes (2026-10-13)**: both zips now carry a stripped clip DB
+so a restore lands the user's STARRED clips while full history stays local-only. starred =
+`Main.lDontAutoDelete > 0` — the exact flag the fork's starred-clips filter PRs #1098/#1107
+read (there is NO `bFavorite` column; verified against the live db). `strip-ditto-favorites.py`
+(repo root, python stdlib sqlite3) builds it at BACKUP time into BOTH `persist\ditto` and
+`quick-persist\ditto` staging, so the restore target needs no python. kept: starred clips +
+ancestor groups (recursive `lParentID` walk) + their `Data` blobs + `Types` rows;
+`MainDeletes`/`CopyBuffers` ride as EMPTY tables (old-deletion tombstones must never
+propagate to a restored box via sync); `sqlite_sequence` copied as-is so future autoincrement
+lIDs never collide with kept rows. guards: source opened READ-ONLY (`mode=ro`,
+`immutable=1` retry announced loud) — safe while Ditto is running; 0 starred clips = refuse to
+ship (an empty favorites db would wipe clips on restore); schema drift (missing
+`lDontAutoDelete`) = loud fail, no db shipped. restore side, BOTH routes: settings/persist
+robocopies carry `/XF Ditto.db` and the db is placed only when the target has none —
+fresh-box only, an existing/live clip DB is never overwritten (warned loud). measured on the
+laptop: 121 starred of 66,267 clips, 132.7 MB live db -> a few MB stripped. tested ONLY on
+synthetic dbs (`C:\tmp\ditto-fav-test\run-tests.py`, 16 checks incl. 2 loud-failure paths);
+the live db was never written. sqlite traps hit + fixed: `sqlite_sequence` is a reserved name
+(it auto-exists via AUTOINCREMENT, never CREATE it), and VACUUM cannot run inside python's
+implicit transaction (`isolation_level=None`).
 
 chain: `backup.ps1 -Publish` runs `backup-secrets.ps1` FIRST (so the 09:00 task and a manual
 publish both build `tool-secrets.zip`), zips core staging into `mainframe-quick.zip`, then
