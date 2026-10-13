@@ -150,13 +150,13 @@ $secretsPassword = $Matches[1]
 # --- 4. restore mode choice (before download - Q skips the persist zip) ---
 Step 'restore mode'
 Write-Host '[F]ull = everything (~30min: bulk apps, pnpm/uv, winget, tasks, patches)'
-Write-Host '[Q]uick = essentials only (~10min: edge profile, opencode, secrets)'
+Write-Host '[Q]uick = essentials only (~10min: edge profile, opencode, ditto, secrets)'
 $mode = 'full'
 $pick = Read-Host 'mode? [F]ull/[Q]uick (default F)'
 if ($pick -match '^(q|quick)$') { $mode = 'quick' }
 
 # --- 4b. download machine-state zips from private release store ---
-# Q = quick only (~225MB: edge profile + config + skills + encrypted secrets)
+# Q = quick only (~225MB: edge profile + config + skills + ditto settings + encrypted secrets)
 # F = quick + persist (persist = scoop app data, the only full-mode-only piece)
 # the encrypted secrets archive rides INSIDE quick, so both modes get secrets in one download.
 Step "downloading machine-state zips from $BackupRepo"

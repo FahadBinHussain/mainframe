@@ -399,6 +399,21 @@ if ($SkipPersist) {
     }
 }
 
+# Ditto's settings (Ditto.Settings - the 2GB+ Ditto.db clip DB stays excluded above)
+# must also ride inside mainframe-quick.zip: quick mode never downloads
+# mainframe-persist.zip, and restore.ps1's quick route installs Ditto from
+# quick-persist\ditto so both routes end with the same clipboard config.
+if (-not $SkipPersist) {
+    $dittoPersistSrc = Join-Path $OutputDir 'persist\ditto'
+    if (Test-Path -LiteralPath $dittoPersistSrc) {
+        $dittoQuickDest = Join-Path $OutputDir 'quick-persist\ditto'
+        Invoke-RobocopyLockedAware -RobocopyArgs @($dittoPersistSrc, $dittoQuickDest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XF', 'Ditto.db') -Context 'quick-persist ditto'
+        Write-Host 'Copied ditto settings to quick-persist (ships inside mainframe-quick.zip)'
+    } else {
+        Write-Warning "No $dittoPersistSrc - mainframe-quick.zip will carry no Ditto settings (quick restore starts Ditto with defaults)"
+    }
+}
+
 # Winget-managed apps may also have persist directories (AnyDesk, Directory Opus, etc.).
 # Shape winget-allowed packages into the same {Name, Persist, ServiceName} shape Write-NativePersistArchive expects.
 # Create a shared VSS shadow for native persist copies (Directory Opus holds
