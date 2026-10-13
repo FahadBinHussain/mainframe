@@ -449,6 +449,23 @@ if (-not $SkipPersist) {
     }
 }
 
+# flameshot settings: scoop's manifest has NO persist entry, so
+# %APPDATA%\Flameshot\flameshot.ini is the app's only config home and nothing
+# else in the backup chain captures it. it ships in the quick zip next to the
+# ditto settings (quick-persist\flameshot) and both restore routes place it in
+# %APPDATA%\Flameshot, fresh-box only.
+if (-not $SkipPersist) {
+    $flameshotIni = Join-Path $env:APPDATA 'Flameshot\flameshot.ini'
+    if (Test-Path -LiteralPath $flameshotIni) {
+        $flameshotStage = Join-Path $OutputDir 'quick-persist\flameshot'
+        New-Item -ItemType Directory -Force -Path $flameshotStage | Out-Null
+        Copy-Item -LiteralPath $flameshotIni -Destination (Join-Path $flameshotStage 'flameshot.ini')
+        Write-Host 'Shipped flameshot settings in the quick zip'
+    } else {
+        Write-Warning "No $flameshotIni - backup ships no flameshot settings (restore starts flameshot with defaults)"
+    }
+}
+
 # Winget-managed apps may also have persist directories (AnyDesk, Directory Opus, etc.).
 # Shape winget-allowed packages into the same {Name, Persist, ServiceName} shape Write-NativePersistArchive expects.
 # Create a shared VSS shadow for native persist copies (Directory Opus holds

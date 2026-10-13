@@ -1290,6 +1290,16 @@ the live db was never written. sqlite traps hit + fixed: `sqlite_sequence` is a 
 (it auto-exists via AUTOINCREMENT, never CREATE it), and VACUUM cannot run inside python's
 implicit transaction (`isolation_level=None`).
 
+**flameshot in quick mode + settings shipped (2026-10-13)**: quick route gained a 7th step —
+`Install-FlameshotQuick` (pinned from scoopfile, `extras/flameshot` at bucket head as the loud
+second method, skip when installed) + `Restore-FlameshotSettings`. the scoop manifest has NO
+`persist` entry (unlike ditto), so `%APPDATA%\Flameshot\flameshot.ini` was captured by NOTHING
+in the chain — backup.ps1 now ships it as `quick-persist\flameshot\flameshot.ini` (the quick
+zip always downloads, in both modes; the full route calls `Restore-FlameshotSettings` right
+after the persist restore since its install comes from the allowlist loop —
+`scoop-allowed.json` already lists flameshot). same fresh-box-only rule as the starred db: an
+existing `%APPDATA%\Flameshot\flameshot.ini` is never overwritten, warned loud.
+
 chain: `backup.ps1 -Publish` runs `backup-secrets.ps1` FIRST (so the 09:00 task and a manual
 publish both build `tool-secrets.zip`), zips core staging into `mainframe-quick.zip`, then
 `publish-backup.ps1` encrypts the archive, appends it into quick as `mainframe-secrets.zip`
