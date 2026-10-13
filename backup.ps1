@@ -414,6 +414,41 @@ if (-not $SkipPersist) {
     }
 }
 
+# starred-only clip DB: BOTH zips now ship a stripped Ditto.db that keeps only
+# the starred clips (Main.lDontAutoDelete > 0 - the flag the fork's starred-
+# clips filter PRs #1098/#1107 read) plus their ancestor groups; full history
+# stays local-only. built HERE at backup time by strip-ditto-favorites.py
+# (python stdlib sqlite3) so the restore target needs no python. the live db
+# is opened READ-ONLY by the script - safe while Ditto is running. the restore
+# side only places it on a FRESH box (never overwrites an existing Ditto.db).
+if (-not $SkipPersist) {
+    $dittoLiveDb = Join-Path $persistPath 'ditto\Ditto.db'
+    $stripScript = Join-Path $PSScriptRoot 'strip-ditto-favorites.py'
+    if (-not (Test-Path -LiteralPath $dittoLiveDb)) {
+        Write-Warning "No $dittoLiveDb - backup ships NO starred-clips db (restore starts Ditto with empty favorites)"
+    } elseif (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Write-Warning 'python not found - starred-clips Ditto.db NOT shipped (strip-ditto-favorites.py needs it at backup time)'
+    } else {
+        $strippedDb = Join-Path $env:TEMP "ditto-favorites-$([Guid]::NewGuid().ToString('N')).db"
+        python $stripScript $dittoLiveDb $strippedDb
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $strippedDb)) {
+            Write-Warning "strip-ditto-favorites.py failed (exit $LASTEXITCODE) - no starred-clips db shipped"
+        } else {
+            foreach ($dittoStage in @(
+                    @{ Dir = Join-Path $OutputDir 'persist\ditto';       Label = 'persist zip' },
+                    @{ Dir = Join-Path $OutputDir 'quick-persist\ditto'; Label = 'quick zip' })) {
+                if (Test-Path -LiteralPath $dittoStage.Dir) {
+                    Copy-Item -LiteralPath $strippedDb -Destination (Join-Path $dittoStage.Dir 'Ditto.db')
+                    Write-Host "Shipped starred-only Ditto.db in the $($dittoStage.Label)"
+                } else {
+                    Write-Warning "No $($dittoStage.Dir) staging dir - starred-only Ditto.db not added to the $($dittoStage.Label)"
+                }
+            }
+        }
+        Remove-Item -LiteralPath $strippedDb -ErrorAction SilentlyContinue
+    }
+}
+
 # Winget-managed apps may also have persist directories (AnyDesk, Directory Opus, etc.).
 # Shape winget-allowed packages into the same {Name, Persist, ServiceName} shape Write-NativePersistArchive expects.
 # Create a shared VSS shadow for native persist copies (Directory Opus holds

@@ -156,7 +156,7 @@ $pick = Read-Host 'mode? [F]ull/[Q]uick (default F)'
 if ($pick -match '^(q|quick)$') { $mode = 'quick' }
 
 # --- 4b. download machine-state zips from private release store ---
-# Q = quick only (~225MB: edge profile + config + skills + ditto settings + encrypted secrets)
+# Q = quick only (~225MB: edge profile + config + skills + ditto settings + starred-only Ditto.db + encrypted secrets)
 # F = quick + persist (persist = scoop app data, the only full-mode-only piece)
 # the encrypted secrets archive rides INSIDE quick, so both modes get secrets in one download.
 Step "downloading machine-state zips from $BackupRepo"

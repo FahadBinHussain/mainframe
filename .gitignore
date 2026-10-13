@@ -21,3 +21,4 @@ Thumbs.db
 mainframe-backup/
 last-sync-content.txt
 last-popup.txt
+__pycache__/

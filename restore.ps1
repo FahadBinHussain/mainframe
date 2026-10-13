@@ -758,8 +758,10 @@ function Install-DittoQuick {
     # full mode reads its settings from mainframe-persist.zip; quick never
     # downloads that zip, so backup.ps1 also drops Ditto.Settings into
     # mainframe-quick.zip under quick-persist\ditto and this function links it
-    # into scoop's persist dir BEFORE installing. the 2GB+ Ditto.db clip DB is
-    # shipped in neither mode - clip history starts fresh either way.
+    # into scoop's persist dir BEFORE installing. the FULL clip DB is shipped in
+    # neither mode, but BOTH modes carry a starred-only Ditto.db (built at
+    # backup time by strip-ditto-favorites.py) - placed here only when the box
+    # has no existing db, so a live machine's clip history is never overwritten.
     $dittoSpec = 'extras/ditto'
     # extras carries ditto and a quick restore can have no scoopfile.json at all,
     # so make sure that bucket exists before installing.
@@ -789,11 +791,24 @@ function Install-DittoQuick {
     $settingsDest = Join-Path $ScoopRoot 'persist\ditto'
     if (Test-Path -LiteralPath $settingsSrc) {
         New-Item -ItemType Directory -Force -Path $settingsDest | Out-Null
-        & robocopy $settingsSrc $settingsDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL | Out-Null
+        # /XF Ditto.db: the settings robocopy never carries a clip DB - the
+        # starred-only db gets its own guarded placement right below.
+        & robocopy $settingsSrc $settingsDest /E $script:RoboCopyFlag /XF 'Ditto.db' /R:1 /W:1 /NP /NDL /NFL | Out-Null
         if ($LASTEXITCODE -gt 7) {
             Write-Warning "Robocopy quick-persist\ditto failed with exit code $LASTEXITCODE"
         } else {
             Write-Host "Restored Ditto settings to $settingsDest"
+        }
+        # starred-clips db: FRESH box only - never overwrite an existing clip DB
+        $favDbSrc = Join-Path $settingsSrc 'Ditto.db'
+        $favDbDest = Join-Path $settingsDest 'Ditto.db'
+        if (Test-Path -LiteralPath $favDbSrc) {
+            if (Test-Path -LiteralPath $favDbDest) {
+                Write-Warning "existing $favDbDest kept - the backup's starred-only db was NOT applied (fresh-box only)"
+            } else {
+                Copy-Item -LiteralPath $favDbSrc -Destination $favDbDest
+                Write-Host 'Restored starred-only Ditto.db (fresh clip DB: starred clips only)'
+            }
         }
     } else {
         Write-Warning "Backup carries no quick-persist\ditto - Ditto starts with default settings. (Full mode ships them in mainframe-persist.zip; refresh the release with .\backup.ps1 -Publish.)"
@@ -918,11 +933,26 @@ Update-Step 'Restoring persist data'
 Write-Host "Restoring persisted Scoop settings from $persistDir"
 $persistDest = Join-Path $ScoopRoot 'persist'
 New-Item -ItemType Directory -Force -Path $persistDest | Out-Null
-& robocopy $persistDir $persistDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL | Out-Null
+# /XF Ditto.db: the starred-only clip DB gets a guarded fresh-box-only placement
+# below (same rule as the quick route) instead of riding the blanket overwrite.
+& robocopy $persistDir $persistDest /E $script:RoboCopyFlag /XF 'Ditto.db' /R:1 /W:1 /NP /NDL /NFL | Out-Null
 if ($LASTEXITCODE -gt 7) {
     Write-Warning "Robocopy persist data failed with exit code $LASTEXITCODE"
 } else {
     Write-Host "Restored persist data to $persistDest"
+}
+# starred-clips db from mainframe-persist.zip: FRESH box only - never overwrite
+# an existing clip DB (live history wins, backup db skipped loud)
+$favDbSrc = Join-Path $persistDir 'ditto\Ditto.db'
+$favDbDest = Join-Path $persistDest 'ditto\Ditto.db'
+if (Test-Path -LiteralPath $favDbSrc) {
+    if (Test-Path -LiteralPath $favDbDest) {
+        Write-Warning "existing $favDbDest kept - the backup's starred-only db was NOT applied (fresh-box only)"
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $favDbDest) | Out-Null
+        Copy-Item -LiteralPath $favDbSrc -Destination $favDbDest
+        Write-Host 'Restored starred-only Ditto.db (fresh clip DB: starred clips only)'
+    }
 }
 
 $import = Get-Content -LiteralPath $scoopfile -Raw | ConvertFrom-Json
