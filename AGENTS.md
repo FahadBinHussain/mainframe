@@ -402,7 +402,30 @@ to get concrete numeric usage on Hobby (CPU-h, GB-h, invocations) — open the V
 - `pnpm add -g <pkg> --force` is worse: it relinks into a fresh `global\v11\<hash>` staging dir and rewrites shims to paths that then get purged — at that point *all* global CLIs break at once (this is what killed `agent-browser` mid-session while it was needed for browser work).
 - therefore always install/repair the **full set in one command**: `pnpm add -g agent-browser vercel firebase-tools ntn omniroute pinggy`, then verify each with `--version` (`agent-browser`/`vercel`/`vc`/`firebase`/`ntn`/`omniroute`/`pinggy`). `blindspot` (points into `Downloads\blindspot\tools\relay`) and `gws` live elsewhere and are unaffected. never use `--force` here.
 - `pinggy` only works after its native addon install script is allowed: `allowBuilds: '@pinggy/pinggy': true` must be in `scoop\persist\pnpm\global\v11\pnpm-workspace.yaml` (pnpm blocks install scripts by default; `@mimo-ai/cli` is the only other allowlisted package), then `pnpm remove -g pinggy` + `pnpm add -g pinggy` so `node-pre-gyp install` downloads `lib/addon.node` from GitHub releases.
-- sanity check after any pnpm global command: `pnpm ls -g --depth 0` must list every package you expect — if it shows fewer, the others were just wiped.
+- sanity check after any pnpm global command: `pnpm ls -g --depth 0` must list every package you expect - if it shows fewer, the others were just wiped.
+
+**pnpm fixed: upstream bug + frozen scoop user-manifest (2026-10-14)**: the wipe above was pnpm
+upstream bug pnpm/pnpm#11587 (v11 shipped global installs as ONE shared dep set, so add/remove of
+any package touched all of them), fixed same day by pnpm/pnpm#11588 (each `add -g` gets its own
+isolated `global\v11\<hash>\` dir with its own package.json + lockfile). this box stayed buggy
+because scoop had installed pnpm from a **user manifest**: `apps\pnpm\<ver>\install.json` holds
+`"url": "...\scoop\workspace\pnpm.json"` with no bucket, so `scoop update pnpm` and `scoop status`
+compare against that local file - frozen at 11.5.3 since the 2026-06-30 bootstrap - and never
+see the bucket. fix: copy `buckets\main\bucket\pnpm.json` over `workspace\pnpm.json`, then
+`scoop update pnpm` - now 12.13.0 (persist\global survived, allowBuilds yaml intact).
+- `scoop\workspace\*.json` = 16 bootstrap-era local manifests (bitwarden-cli cmake curl deno
+  ffmpeg flameshot gcloud gh nodejs-lts parsec pnpm pwsh qbittorrent tor-browser uv vscode).
+  for those apps scoop ignores the buckets entirely - that is why they look "up to date" in
+  `scoop status` while being weeks behind. refreshing the file is what makes the app updatable.
+- pnpm 12 has NO global rebuild (`pnpm rebuild -g` fails: unexpected argument) - to run build
+  scripts after allowlisting, remove + re-add the set in one command (rule above still holds).
+  newly allowlisted in `persist\pnpm\global\v11\pnpm-workspace.yaml` allowBuilds: `@parcel/watcher`
+  `@swc/core` `esbuild` `keytar` `omniroute` `onnxruntime-node` `open-computer-use` `protobufjs`
+  (alongside the existing `@pinggy/pinggy` + `@mimo-ai/cli`).
+- repaired + verified 2026-10-14: agent-browser 0.39.0, vercel 63.1.2, firebase 15.33.0,
+  ntn 0.23.19, omniroute 3.8.51, pinggy 0.6.1, open-computer-use 1.0.0 - `pnpm ls -g --depth 0`
+  lists all 7, every shim answers `--version`. isolated dirs mean a future single `add -g` no
+  longer wipes the others - keep the one-command habit anyway.
 
 **2026-09-01 vault migration:** tokens are no longer stored in `token.txt` files in the profile dir. the script now imports `vault-secret.psm1` and calls `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'` per profile. profiles without a vault entry (e.g. the `daffodilresourcehub-8188@vercel` stub) are skipped silently.
 
