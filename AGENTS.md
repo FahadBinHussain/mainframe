@@ -274,12 +274,19 @@ foreach ($org in $orgs) {
     foreach ($p in $projects) { Write-Host "  - $($p.name) ($($p.id))" }
 }
 ```
-**to get a project's DATABASE_URL** (common reason agents are looking at neon in the first place):
+**to get a project's DATABASE_URL** (common reason agents are looking at neon in the first place).
+⚠️ `neon-account.ps1 run <email> connection-string ...` does NOT work on this box — with the
+broken pnpm `neonctl` shim it **hangs indefinitely with zero output** (2026-10-14: 240s, no
+stdout/stderr at all, not even a throw), so a `run` that "does nothing" is this, not a dead
+network. `current`/`use` still respond instantly (they only touch profile files). use the
+REST route below instead. also note `api-key.txt` no longer exists (2026-08-22 vault
+migration) — the key comes from the vault:
 ```powershell
-$key = (Get-Content "$env:APPDATA\mainframe\accounts\neon\<email>\api-key.txt" -Raw).Trim()
+Import-Module "C:\Users\Admin\Downloads\mainframe\vault-secret.psm1" -Force
+$key = Read-VaultSecret -Email '<email>' -NamePattern 'console.neon.tech*' -ValueRegex 'napi_[A-Za-z0-9]+'
 $headers = @{ 'Authorization' = "Bearer $key"; 'Accept' = 'application/json' }
 $projectId = '<project-id>'
-$branchId  = (Invoke-RestMethod -Uri "https://console.neon.tech/api/v2/projects/$projectId/branches" -Headers $headers).branches[0].id
+$branchId  = (Invoke-RestMethod -Uri "https://console.neon.tech/api/v2/projects/$projectId/branches" -Headers $headers).branches | Where-Object { $_.default } | Select-Object -First 1 -ExpandProperty id   # NOT branches[0] — pick the default branch or you audit the wrong DB
 $uri = (Invoke-RestMethod -Uri "https://console.neon.tech/api/v2/projects/$projectId/connection_uri?database_name=neondb&branch_id=$branchId&role_name=neondb_owner" -Headers $headers).uri
 Write-Host $uri   # postgresql://neondb_owner:npg_xxx@ep-...neon.tech/neondb?...
 ```
