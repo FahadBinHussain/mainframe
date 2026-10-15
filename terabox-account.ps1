@@ -120,9 +120,12 @@ function Invoke-TeraboxApi {
             'User-Agent'     = $userAgent
             'X-Requested-With' = 'XMLHttpRequest'
         }
-        $homeResp = Invoke-WebRequest -Uri "$base/" -Headers $headers -UseBasicParsing -TimeoutSec 30
-        $m = [regex]::Match($homeResp.Content, 'function%20fn%28a%29%7Bwindow.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29')
-        if (-not $m.Success) { throw "jsToken not found on $base/ homepage" }
+        # scrape the /main app shell: since 2026-10-15 the bare / landing page no longer carries the
+        # jsToken blob (it serves a stripped page), /main always does.
+        $pageHeaders = @{ Cookie = $cookie; Accept = 'text/html,application/xhtml+xml'; 'User-Agent' = $userAgent }
+        $pageResp = Invoke-WebRequest -Uri "$base/main" -Headers $pageHeaders -UseBasicParsing -TimeoutSec 30
+        $m = [regex]::Match($pageResp.Content, 'function%20fn%28a%29%7Bwindow.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29')
+        if (-not $m.Success) { throw "jsToken not found on $base/main (app shell)" }
         $qs = "app_id=$appId&web=1&channel=dubox&clienttype=0&version=4&jsToken=$($m.Groups[1].Value)"
         if ($Params) { $qs = "$Params&$qs" }
         $uri = "$base$Path`?$qs"
@@ -153,21 +156,57 @@ function Get-TeraboxQuota {
 }
 
 function Get-TeraboxJsToken {
-    param([string]$Cookie, [string]$Base = 'https://www.terabox.com')
+    # Writes (precreate/create/mkdir) ONLY accept the jsToken served by dm.terabox.com WITH the session
+    # cookie (128 hex chars, 0C936C34...-style). The www.terabox.com bare no-cookie token is 192 hex chars
+    # (B2F04C39...-style) and every write with it answers errno 4000023 "need verify" while reads still
+    # pass — verified 2026-10-15. Never scrape the bare www token for writes.
+    # Scrape /main, not /: since 2026-10-15 the bare / landing page serves a stripped page without the
+    # jsToken blob; the /main app shell always carries it (same value).
+    param([string]$Cookie)
     $pat = 'function%20fn%28a%29%7Bwindow\.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29'
-    foreach ($src in @(@{ u = 'https://www.terabox.com'; ck = $false }, @{ u = 'https://dm.terabox.com'; ck = $true })) {
-        for ($try = 1; $try -le 3; $try++) {
-            try {
-                $headers = @{ Accept = 'text/html,application/xhtml+xml'; 'User-Agent' = $userAgent }
-                if ($src.ck -and $Cookie) { $headers['Cookie'] = $Cookie }
-                $r = Invoke-WebRequest -Uri "$($src.u)/" -Headers $headers -UseBasicParsing -TimeoutSec 30
-                $m = [regex]::Match($r.Content, $pat)
-                if ($m.Success) { return $m.Groups[1].Value }
-            } catch {}
-            Start-Sleep -Milliseconds (400 * $try)
-        }
+    for ($try = 1; $try -le 3; $try++) {
+        try {
+            $headers = @{ Accept = 'text/html,application/xhtml+xml'; 'User-Agent' = $userAgent; Cookie = $Cookie }
+            $r = Invoke-WebRequest -Uri 'https://dm.terabox.com/main' -Headers $headers -UseBasicParsing -TimeoutSec 30
+            $m = [regex]::Match($r.Content, $pat)
+            if ($m.Success) { return $m.Groups[1].Value }
+        } catch {}
+        Start-Sleep -Milliseconds (400 * $try)
     }
-    throw 'jsToken not found on www/dm homepages after 3x each (simple-verify gate) — open https://www.terabox.com once in the browser, then retry'
+    throw 'jsToken not found on dm.terabox.com/main with session cookie after 3 tries — open https://dm.terabox.com once in a logged-in browser, then retry'
+}
+
+function Remove-TeraboxPaths {
+    # Web-client delete shape (verified 2026-10-15): /api/filemanager needs BOTH the jsToken AND the
+    # bdstoken scraped from the /main app shell, async=2, onnest=fail, and the filelist in an
+    # x-www-form-urlencoded body. The old async=0/no-bdstoken shape answers a bare errno -6 on
+    # dm.terabox.com that LOOKS like the redirect dance but carries no Url-Domain-Prefix header.
+    param([string]$Email, [string[]]$Paths)
+    if (-not $Paths -or $Paths.Count -eq 0) { throw 'Remove-TeraboxPaths: no remote paths given' }
+    $cookie = Read-ProfileCookie -Email $Email
+    $filelistRaw = '[' + (($Paths | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ',') + ']'
+    $body = "filelist=$([Uri]::EscapeDataString($filelistRaw))"
+    $base = 'https://dm.terabox.com'
+    for ($hop = 0; $hop -lt 4; $hop++) {
+        $pageHeaders = @{ Cookie = $cookie; Accept = 'text/html,application/xhtml+xml'; 'User-Agent' = $userAgent }
+        $page = (Invoke-WebRequest -Uri "$base/main" -Headers $pageHeaders -UseBasicParsing -TimeoutSec 30).Content
+        $js = [regex]::Match($page, 'jsToken":"function%20fn%28a%29%7Bwindow\.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29').Groups[1].Value
+        if (-not $js) { throw "jsToken not found on $base/main (app shell)" }
+        $bd = [regex]::Match($page, '"bdstoken":"([^"]+)"').Groups[1].Value
+        if (-not $bd) { throw "bdstoken not found on $base/main (app shell)" }
+        $hdr = @{ Cookie = $cookie; Accept = 'application/json, text/plain, */*'; Referer = "$base/main"; 'User-Agent' = $userAgent; 'X-Requested-With' = 'XMLHttpRequest'; 'Content-Type' = 'application/x-www-form-urlencoded' }
+        $uri = "$base/api/filemanager?async=2&onnest=fail&opera=delete&bdstoken=$bd&app_id=$appId&web=1&channel=dubox&clienttype=0&version=4&jsToken=$js"
+        $r = Invoke-WebRequest -Uri $uri -Method Post -Headers $hdr -Body $body -UseBasicParsing -TimeoutSec 60
+        $j = $r.Content | ConvertFrom-Json
+        if ($j.errno -eq 0) { return $j }
+        if ($j.errno -eq 4000023 -or $j.errno -eq 450016) { continue }   # stale token / need verify -> re-scrape + retry
+        if ($j.errno -eq -6) {
+            $prefix = $r.Headers['Url-Domain-Prefix']
+            if ($prefix) { $base = "https://$prefix.terabox.com"; continue }
+        }
+        throw "TeraBox delete failed (errno $($j.errno)): $($r.Content.Substring(0, [Math]::Min(200, $r.Content.Length)))"
+    }
+    throw 'TeraBox delete: token/redirect loop (>4 hops)'
 }
 
 function Upload-TeraboxFile {
@@ -178,7 +217,7 @@ function Upload-TeraboxFile {
     if ($item.Length -gt 4294967296) { throw "file >4GB: free-tier web cap (VIP 20GB). refusing: $($item.Name)" }
     $api = 'https://dm.terabox.com'
     $hdr = @{ Cookie = $cookie; Accept = 'application/json, text/plain, */*'; Referer = "$api/"; 'User-Agent' = $userAgent; 'X-Requested-With' = 'XMLHttpRequest' }
-    $js = Get-TeraboxJsToken -Cookie $cookie -Base 'https://www.terabox.com'
+    $js = Get-TeraboxJsToken -Cookie $cookie
     function New-TeraBlockMd5s([System.IO.FileInfo]$fi, [int]$chunkSize) {
         $fs = [IO.File]::OpenRead($fi.FullName)
         try {
@@ -193,7 +232,7 @@ function Upload-TeraboxFile {
         } finally { $fs.Dispose() }
     }
     $chunkSize = 4MB
-    $md5s = New-TeraBlockMd5s -fi $item -chunkSize $chunkSize
+    $md5s = @(New-TeraBlockMd5s -fi $item -chunkSize $chunkSize)   # @() — a 1-chunk file returns a bare string otherwise
     $blockJson = ($md5s | ConvertTo-Json -Compress)
     if ($md5s.Count -eq 1) { $blockJson = '["' + $md5s[0] + '"]' }
     $remoteDir = $remoteDir.TrimEnd('/')
@@ -203,14 +242,14 @@ function Upload-TeraboxFile {
         $r = Invoke-WebRequest -Uri "$api$Path`?app_id=$appId&web=1&channel=dubox&clienttype=0&jsToken=$Token$Query" -Method Post -Headers ($hdr + @{ 'Content-Type' = 'application/x-www-form-urlencoded' }) -Body $Form -UseBasicParsing -TimeoutSec 60
         $j = $r.Content | ConvertFrom-Json
         if ($j.errno -eq 4000023) {
-            $Token = Get-TeraboxJsToken -Cookie $cookie -Base 'https://www.terabox.com'
+            $Token = Get-TeraboxJsToken -Cookie $cookie
             $r = Invoke-WebRequest -Uri "$api$Path`?app_id=$appId&web=1&channel=dubox&clienttype=0&jsToken=$Token$Query" -Method Post -Headers ($hdr + @{ 'Content-Type' = 'application/x-www-form-urlencoded' }) -Body $Form -UseBasicParsing -TimeoutSec 60
             $j = $r.Content | ConvertFrom-Json
         }
         return @{ Json = $j; Token = $Token }
     }
     $mtime = [DateTimeOffset]::FromUnixTimeSeconds([DateTimeOffset]::UtcNow.ToUnixTimeSeconds()).ToUnixTimeSeconds()
-    $pre = Invoke-TeraApiPost -Path '/api/precreate' -Query '' -Form "path=$([Uri]::EscapeDataString($cloudPath))&autoinit=1&target_path=$([Uri]::EscapeDataString($remoteDir))&block_list=$([Uri]::EscapeDataString($blockJson))&local_mtime=$mtime&file_limit_switch_v34=true"
+    $pre = Invoke-TeraApiPost -Path '/api/precreate' -Query '' -Form "path=$([Uri]::EscapeDataString($cloudPath))&autoinit=1&target_path=$([Uri]::EscapeDataString("$remoteDir/"))&block_list=$([Uri]::EscapeDataString($blockJson))&size=$($item.Length)&file_limit_switch_v34=true&g_identity=&local_mtime=$mtime"
     if ($pre.Json.errno -ne 0) { throw "precreate failed (errno $($pre.Json.errno)): $($pre.Json.errmsg)" }
     if ($pre.Json.return_type -eq 2) {
         Write-Host 'rapid upload (return_type=2): content already on server, skipping chunk transfer'
@@ -242,7 +281,9 @@ function Upload-TeraboxFile {
             if ($seq % 25 -eq 0 -or $fs.Position -ge $item.Length) { Write-Host ("  chunk {0}/{1} [{2:hh\:mm\:ss}]" -f $seq, $md5s.Count, $swUp.Elapsed) }
         }
     } finally { $fs.Dispose() }
-    $cr = Invoke-TeraApiPost -Path '/api/create' -Query '&isdir=0&rtype=1' -Form "path=$([Uri]::EscapeDataString($cloudPath))&size=$($item.Length)&uploadid=$($uploadid)&target_path=$([Uri]::EscapeDataString($remoteDir))&block_list=$([Uri]::EscapeDataString(($realMd5s | ConvertTo-Json -Compress)))&local_mtime=$mtime" -Token $pre.Token
+    $realBlockJson = ($realMd5s | ConvertTo-Json -Compress)
+    if ($realMd5s.Count -eq 1) { $realBlockJson = '["' + $realMd5s[0] + '"]' }   # pipeline unrolls a 1-element array to a JSON string
+    $cr = Invoke-TeraApiPost -Path '/api/create' -Query '&isdir=0&rtype=1' -Form "path=$([Uri]::EscapeDataString($cloudPath))&size=$($item.Length)&uploadid=$($uploadid)&target_path=$([Uri]::EscapeDataString($remoteDir))&block_list=$([Uri]::EscapeDataString($realBlockJson))&local_mtime=$mtime" -Token $pre.Token
     if ($cr.Json.errno -ne 0) { throw "create failed (errno $($cr.Json.errno)): $($cr.Json.errmsg)" }
     [pscustomobject]@{ Email = $Email; CloudPath = $cloudPath; SizeBytes = $item.Length; FsId = $cr.Json.fs_id; Rapid = $false }
 }
@@ -382,7 +423,7 @@ switch ($action.ToLowerInvariant()) {
         $email = Normalize-Email -Email $rest[0]
         $dir = $rest[1]
         $cookie = Read-ProfileCookie -Email $email
-        $js = Get-TeraboxJsToken -Cookie $cookie -Base 'https://www.terabox.com'
+        $js = Get-TeraboxJsToken -Cookie $cookie
         $r = Invoke-WebRequest -Uri "https://dm.terabox.com/api/create?path=$([Uri]::EscapeDataString($dir))&size=0&isdir=1&name=$([Uri]::EscapeDataString((Split-Path $dir -Leaf)))&app_id=$appId&web=1&channel=dubox&clienttype=0&version=4&jsToken=$js" -Method Post -Headers @{ Cookie = $cookie; 'User-Agent' = $userAgent; Referer = 'https://dm.terabox.com/'; Origin = 'https://www.terabox.com'; 'Content-Type' = 'application/x-www-form-urlencoded' } -Body '' -UseBasicParsing -TimeoutSec 40 | ConvertFrom-Json
         if ($r.errno -ne 0) { throw "mkdir failed: $($r | ConvertTo-Json -Compress)" }
         Write-Host "dir: $($r.path)"
@@ -402,8 +443,7 @@ switch ($action.ToLowerInvariant()) {
         if ($rest.Count -lt 2) { throw 'Usage: delete <email> </remote/path> [more paths...]' }
         $email = Normalize-Email -Email $rest[0]
         $paths = @($rest[1..($rest.Count - 1)])
-        $list = ($paths | ForEach-Object { '"' + $_ + '"' }) -join ','
-        $null = Invoke-TeraboxApi -Email $email -Method 'POST' -Path '/api/filemanager' -Params 'onnest=fail&opera=delete' -Body "async=0&filelist=$([Uri]::EscapeDataString("[$list]"))&ondup=newcopy"
+        $null = Remove-TeraboxPaths -Email $email -Paths $paths
         Write-Host "deleted: $($paths -join ', ')"
     }
 

@@ -1014,11 +1014,17 @@ PASSWORD lives only in the vault item `terabox.com` (2 items, told apart by
 consolidated 2026-09-13 from `terabox.com` + stale dup `dubox.com` (old pw preserved
 in notes) + `terabox.com[2]`).
 
-- auth model: terabox web API = cookies + `jsToken` scraped from the site homepage
+- auth model: terabox web API = cookies + `jsToken` scraped from `https://dm.terabox.com/main`
   per request + `app_id=250528&web=1&channel=dubox&clienttype=0&version=4`. start at
   `https://dm.terabox.com`; an `errno -6` response with a `Url-Domain-Prefix` header
   means retry against `https://<prefix>.terabox.com` (handled in `Invoke-TeraboxApi`,
   max 4 hops, throws on loop).
+- **jsToken scrape source (2026-10-15): `/main`, never bare `/`** — the bare `/` landing page
+  stopped carrying the token blob that day and now serves a stripped page (a missing token
+  throws loud, never a silent empty). scrape it WITH the session cookie:
+  `function%20fn%28a%29%7Bwindow.jsToken%20%3D%20a%7D%3Bfn%28%22([^%"]+)%22%29`. the www
+  bare no-cookie token (192 hex) passes READS but every WRITE fails `4000023` — only the
+  dm+cookie token (128 hex) is valid for writes.
 - quota/plan check: `GET /api/quota?disk_type=0` → `{total, used, extra.init_quota_type}`
   (free promo accounts show `permanent_1024g_temp_0g`). every `import`/`login` runs this
   BEFORE writing anything: an unverifiable cookie never creates a profile.
@@ -1041,9 +1047,22 @@ in notes) + `terabox.com[2]`).
   ?method=upload&path&uploadid&partseq&app_id&web=1&channel=dubox&clienttype=0` per 4MB
   chunk (each returns its md5 — verify). Then `/api/create` (query `isdir=0&rtype=1`, form
   body path/size/uploadid/target_path/block_list/local_mtime) → `fs_id`. `4000023` = stale
-  jsToken → resrape + retry once (NOT a captcha wall). verified 2026-09-13: 12 MB + 100 MB
-  round-trip, ~0.95 MB/s free-tier. AList's 3-cookie set (ndus+browserid+lang) is SUFFICIENT
-  for the whole flow incl. upload.
+  jsToken → rescrape + retry once (NOT a captcha wall; `450016` = token missing/rejected
+  entirely — e.g. an empty scrape — both are token causes, not verification walls). verified
+  2026-09-13: 12 MB + 100 MB round-trip, ~0.95 MB/s free-tier. AList's 3-cookie set
+  (ndus+browserid+lang) is SUFFICIENT for the whole flow incl. upload.
+- **delete protocol (fixed 2026-10-15)**: `/api/filemanager` delete only accepts the
+  web-client shape — POST
+  `https://dm.terabox.com/api/filemanager?async=2&onnest=fail&opera=delete&bdstoken=<bdstoken>&app_id=250528&web=1&channel=dubox&clienttype=0&version=4&jsToken=<jsToken>`
+  with an x-www-form-urlencoded body `filelist=<urlencoded JSON array of paths>` and headers
+  Cookie + Referer `https://dm.terabox.com/main` + X-Requested-With. needs BOTH tokens scraped
+  from `/main`: jsToken (as above) and `bdstoken` via `"bdstoken":"([^"]+)"`. the old shape
+  (`async=0`, no bdstoken, `ondup=newcopy`) is the signature of a bare `errno -6` with NO
+  `Url-Domain-Prefix` header. delete is async — the response carries a `taskid`, so always
+  re-list to confirm. implemented as the self-contained `Remove-TeraboxPaths` (re-scrape +
+  retry on 4000023/450016, `-6` hop via `Url-Domain-Prefix`, throws on other errnos); the
+  `delete` case calls it. consumer: `automata-private\github.com\to-terabox.ps1` (bundle
+  mirror push).
 - restore/download side: dlinks from `/api/filemetas?target=["<path>"]&dlink=1&origin=dlna`
   (crack mode) are ~30KB/s CDN-throttled for big files with the session cookie (see imgvault
   AGENTS tsl=30 vs 2000). fast lane = cookie-less redirect. prefer for occasional pulls.
