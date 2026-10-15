@@ -1035,6 +1035,10 @@ in notes) + `terabox.com[2]`).
   `delete <email> </path> [...]`, `upload <email> <file> [-RemoteDir /dir]`, and
   `run [email] <GET|POST> </api/path> [params-or-body]` (params = `a=1&b=2` raw on GET,
   form body on POST; helper injects app_id/jsToken/channel + follows the -6 dance).
+- gotcha: `run` stdout round-trips through the console — a parent process capturing it can get
+  mojibake'd non-ASCII filenames that break `ConvertFrom-Json` (measured 2026-10-16 against a root
+  listing; ASCII paths like `/gh-mirror` are unaffected). name-matching consumers over non-ASCII
+  trees should parse via an in-process API path instead (that is what `terabox-clean.ps1` does).
 - **upload protocol** (ported from imgvault `uploaders.js` `TeraBoxUploader`, the proven
   implementation — do NOT re-derive from the desktop app): `/api/precreate` on
   `dm.terabox.com` with the params as an **x-www-form-urlencoded BODY** (query-string
