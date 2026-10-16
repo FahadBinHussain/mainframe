@@ -993,12 +993,14 @@ helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile d
 ### vercel: multi-account deploy BLOCKED workaround (TEAM_ACCESS_REQUIRED)
 
 - Hobby/team deploys without a GitHub login connection: avoid paid team-member upgrades and reconnecting GitHub per account.
-- detect: deploy shows `readyState: BLOCKED` with `seatBlock.blockCode: TEAM_ACCESS_REQUIRED` (Git author lacks team access).
+- detect: deploy shows `readyState: BLOCKED` with `seatBlock.blockCode: TEAM_ACCESS_REQUIRED` (Git author lacks team access). the CLI hides it (an upload blocked this way just sits at `Building…`/`status UNKNOWN`, no build logs) - read the truth from REST: `vercel-account.ps1 api <owner-email> GET '/v6/deployments?projectId=<prj_...>&limit=8&meta=1'` → `readyState: BLOCKED`, `errorMessage: "commit author doesn't have permission…"`, `seatBlock.blockCode`, `attribution.commitMeta` names the offending author.
 - surface ALL blocked projects across accounts at once: `<repo>\..\automata-private\vercel.com\vercel-usage-table.ps1` - its BLOCKED-reason section shows the blockCode + commit author per project.
 - fix: create a local deployment-alignment commit authored with the target Vercel account email before deploying: `git -c user.email="<target-vercel-email>" -c user.name="<name>" commit --allow-empty -m "deployment alignment"` (empty commit only when there is no real scoped change to commit).
 - then redeploy and verify the live URL/domain.
 - verified 2026-09-05 (vubon-virtuals/vubon-ecommerce on fahads-projects-c67183fe): the alignment commit alone does NOT clear the block - git-push-triggered deploys stayed BLOCKED even with identical author email/login as a previous READY deploy (Vercel resolves the push to the GitHub identity, which has no seat). what works: after the alignment commit, deploy via CLI from the local linked clone as the owning account (`vercel-account.ps1 run <owner-email> deploy --prod --yes`) - the deploy is attributed to the owner and aliases the custom domain automatically.
 - never pay for team-member seat upgrades or reconnect GitHub per account to work around this.
+- helper arg quirk (2026-10-16): never insert a literal `--` before the vercel subcommand when invoking through `powershell -File` - the separator is not stripped, lands in `@VercelArgs` verbatim, and vercel parses it as a positional path → `Error: Can't deploy more than one path.` with no deployment created. correct shape: `run <email> deploy --prod --yes --force`.
+- long deploys: launch detached (`Start-Process powershell -ArgumentList '…','-File','…\vercel-account.ps1','run','<email>','deploy','--prod','--yes','--force' -RedirectStandardOutput C:\tmp\deploy.log -PassThru`) and poll log + REST - they can outlive the 15-min shell timeout, and stdout buffering means the log may still read `Building…` while REST already shows READY/BLOCKED.
 
 ### vercel: alias/deployment URL hits "Log in to Vercel" wall (SSO protection)
 
