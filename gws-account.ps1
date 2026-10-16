@@ -919,7 +919,17 @@ switch ($action.ToLowerInvariant()) {
 
         $gws = Get-GwsCommand
         Invoke-WithGwsProfile -ProfilePath $profilePath -KeyringBackend 'file' -Script {
-            & $gws auth login @loginArgs
+            $opened = $false
+            & $gws auth login @loginArgs 2>&1 | ForEach-Object {
+                $line = [string]$_
+                Write-Host $line
+                if (-not $opened -and $line -match '^\s*(https://accounts\.google\.com/[^\s]+)') {
+                    $authUrl = $matches[1]
+                    Write-Host "Opening Google OAuth in browser: $authUrl"
+                    Start-Process $authUrl
+                    $opened = $true
+                }
+            }
             if ($LASTEXITCODE -ne 0) {
                 throw "gws auth login failed with exit code $LASTEXITCODE"
             }
