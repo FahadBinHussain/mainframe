@@ -115,7 +115,12 @@ function Get-ProfilePath {
 }
 
 function Get-GwsCommand {
-    foreach ($candidate in @('gws.cmd', 'gws.ps1', 'gws.exe', 'gws.bat')) {
+    # .ps1 FIRST: invoking gws.cmd from pwsh requotes the argument line for
+    # cmd.exe, which strips the inner quotes off a JSON --params value - every
+    # call then dies with `Invalid --params JSON: key must be a string at line 1
+    # column 2` (exit 3) while the same args through gws.ps1 return exit 0.
+    # verified 2026-10-16; .exe/.bat stay as the last resort for a real binary.
+    foreach ($candidate in @('gws.ps1', 'gws.cmd', 'gws.exe', 'gws.bat')) {
         $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
         if ($cmd -and $cmd.Source) {
             return $cmd.Source

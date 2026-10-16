@@ -111,6 +111,46 @@ the auth url is printed on **stderr** with `redirect_uri=http://localhost:<port>
 
 google expires refresh tokens after 7 days **only** for apps whose oauth consent screen is in *testing* status. one of these profiles was minted **2026-05-18** and still minted a working access token on 2026-10-11 (146 days of no re-auth) → this client's consent screen is **published**, so tokens do not age out. they only die if unused for 6 months or manually revoked. `gws auth login` hardcodes `prompt=select_account+consent`, so a manual `login` always shows the allow screen — that is cosmetic to the login command only; `run` never prompts.
 
+### the helper itself was the blocker twice over, not google (fixed 2026-10-16)
+
+two faults stacked, and both read like auth from the outside:
+
+1. `Get-GwsCommand` used to return `Get-Command gws` verbatim, and PATH resolves the bare
+   extensionless pnpm posix shim (`scoop\apps\pnpm\current\bin\gws`, a `#!/bin/sh` file) before
+   anything else. pwsh cannot execute a document, so the call produced NO output and an EMPTY
+   `$LASTEXITCODE`: `throw "... failed with exit code "` with nothing after it is that signature,
+   never a google error. those bare shims are now `*.posix-only-shim.bak` (the same rename the
+   vercel/pnpm gotcha below prescribes) and `837f70a` added the extensionless-match guard.
+2. that commit probed `gws.cmd` first, which then hit the cmd requoting bug: pwsh hands the
+   argument line back through cmd.exe, which strips the inner quotes off a JSON `--params` value,
+   so every call came back `error[validation]: Invalid --params JSON: key must be a string at
+   line 1 column 2` (exit **3**) while the identical args through `gws.ps1` return exit 0.
+   `Get-GwsCommand` now probes `.ps1` first - verified 2026-10-16 on gmail `users.messages.list`
+   and drive `files.list`, both exit 0.
+
+read the exit code before blaming auth: **empty** = posix shim, **3** = arg quoting, **2** = dead
+refresh token, **403** = project permission, **401 invalid_client** = the stale-secret bug above.
+
+### status re-check 2026-10-16: the client is alive, every fault is per-account
+
+`gws auth status` on all three profiles: `credential_source client_secret.json`, `encryption_valid true`, `client_config_exists true`, same
+client id and same quota project across the three (the values live in each profile's
+`credentials.enc` and are not repo material). there is **no `invalid_client` anywhere** - the
+2026-10-11 secret patch is still holding, so do not mint a new oauth client for this.
+
+- `<primary profile>` (whatever `gws-account.ps1 current` prints, `IsActive True`): healthy. gmail
+  `users.messages.list` and drive `files.list` both exit 0, `token_valid true`, 16 scopes including
+  `drive`.
+- `<institution profile>` (the work/school account): every call, gmail AND drive, dies 403
+  `Caller does not have required permission to use project <quota project id> ... roles/serviceusage.serviceUsageConsumer`.
+  the token side is fine (`token_valid true`, refresh works, `token_cache.json` rewritten
+  2026-10-16) - that account is simply not a member of the quota project. fix is an IAM grant by
+  whoever owns the project (the console link is in the error text), not a re-login.
+- `<secondary profile>` (`IsActive False`): `401 invalid_grant: Token has been expired or
+  revoked`, `token_valid false`, refresh token present but dead (last good cache 2026-10-15 20:57).
+  this is the one case where the detached `login <email>` recipe above is the real fix; the
+  consent screen is published, so it should not recur once re-minted.
+
 ## neon: list all projects for an account
 
 context: neon projects can be under personal accounts or organizations. `projects list` without `--org-id` only returns personal projects. org-owned projects require `--org-id`.
