@@ -1565,26 +1565,33 @@ EVERY exit path runs it (published / metered skip / already-ran-today skip / fat
 so a box that was once at 2.3 GB free never accumulates backup debris.
 `Remove-BackupArtifacts`:
 
-- deletes the five zip names in the repo root - `mainframe-quick.zip`,
-  `mainframe-persist.zip`, `mainframe-secrets.zip` + retired `mainframe-core.zip` /
+- deletes the six zip names in the repo root - `mainframe-quick.zip`,
+  `mainframe-persist.zip`, `mainframe-secrets.zip`, `tool-secrets.zip` (the PLAINTEXT
+  secrets archive - publish encrypts it into the blob that rides inside quick and the
+  next run rebuilds it, so it must never linger) + retired `mainframe-core.zip` /
   `mainframe-backup.zip` (sweeps pre-2026-10-07 strays). the release store is the
   durable copy; a failed publish's zips are rebuilt from live state by the next run.
 - deletes crash leftovers in `%TEMP%`: `mainframe-backup-*` staging trees,
-  `mainframe-zip-stage-*`, `ditto-favorites-*.db`, a stray `mainframe-secrets.zip`,
-  `robocopy-log-*.txt`. age-guarded to older-than-2h so a live manual run's files are
-  never touched. this covers `backup.ps1`'s own gap: it only removes its staging on
-  the success path, so a crash before that leaks whole GB (the oct 13 crash had left
-  4.1 GB staging + 4.1 GB zip-stage).
+  `mainframe-zip-stage-*`, `mainframe-tool-secrets-*`, `ditto-favorites-*.db`, a stray
+  `mainframe-secrets.zip`, `robocopy-log-*.txt`. age-guarded to older-than-2h so a live
+  manual run's files are never touched. this covers the gap where a run dies before its
+  own self-cleanup (the oct 13 crash left 4.1 GB `mainframe-backup-*` + 4.1 GB
+  `mainframe-zip-stage-*`; backup-secrets.ps1's own staging is finally-guarded but a
+  hard kill can still strand it).
 - logs `cleanup: removed N artifact(s), freed X MB` on every run (0/0 included - a
   missing line means the cleanup step itself died, reported as `cleanup WARNING: ...`).
   cleanup catches everything and never changes the run's exit code.
 - a manual `backup.ps1` run is not cleaned by its own invocation (cleanup lives only in
   the daily chain), but its zips land at the same repo-root paths and the next daily run
-  sweeps them - use `-OutputDir <dir>` when you want to keep one.
+  sweeps them - use `-OutputDir <dir>` when you want to keep one. same window applies to
+  a manual `backup.ps1 -Publish`'s `tool-secrets.zip`: the plaintext archive sits there
+  until the next daily sweep.
 
 measured 2026-10-18 (first live sweep, on a metered skip): removed 7 artifacts, freed
 10714.1 MB = 10.5 GB (2.4 GB of zips incl. the 2 GB persist from the failed 07:32
-publish + the two 4.1 GB oct 13 temp trees + a 3.4 MB stray temp blob).
+publish + the two 4.1 GB oct 13 temp trees + a 3.4 MB stray temp blob). a follow-up
+sweep the same day caught the one class the first list missed - `tool-secrets.zip`
+(the 3.5 MB PLAINTEXT secrets archive from the failed run), verified live and added.
 
 ## doc-surgery gotcha: Set-Content roundtrip flipped line endings (2026-10-08)
 
