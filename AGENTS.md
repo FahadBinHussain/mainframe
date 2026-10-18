@@ -1558,6 +1558,34 @@ marker is NOT set, so the next run still happens once the link is usable again.
   Fixed -> skip, Unrestricted -> proceed, revert -> skip again).
 - only the daily chain is gated; manual `backup.ps1 -Publish` runs are not.
 
+### artifact autoclean (added 2026-10-18)
+
+`daily-backup-publish.ps1` now sweeps its own artifacts from a `finally` block:
+EVERY exit path runs it (published / metered skip / already-ran-today skip / fatal),
+so a box that was once at 2.3 GB free never accumulates backup debris.
+`Remove-BackupArtifacts`:
+
+- deletes the five zip names in the repo root - `mainframe-quick.zip`,
+  `mainframe-persist.zip`, `mainframe-secrets.zip` + retired `mainframe-core.zip` /
+  `mainframe-backup.zip` (sweeps pre-2026-10-07 strays). the release store is the
+  durable copy; a failed publish's zips are rebuilt from live state by the next run.
+- deletes crash leftovers in `%TEMP%`: `mainframe-backup-*` staging trees,
+  `mainframe-zip-stage-*`, `ditto-favorites-*.db`, a stray `mainframe-secrets.zip`,
+  `robocopy-log-*.txt`. age-guarded to older-than-2h so a live manual run's files are
+  never touched. this covers `backup.ps1`'s own gap: it only removes its staging on
+  the success path, so a crash before that leaks whole GB (the oct 13 crash had left
+  4.1 GB staging + 4.1 GB zip-stage).
+- logs `cleanup: removed N artifact(s), freed X MB` on every run (0/0 included - a
+  missing line means the cleanup step itself died, reported as `cleanup WARNING: ...`).
+  cleanup catches everything and never changes the run's exit code.
+- a manual `backup.ps1` run is not cleaned by its own invocation (cleanup lives only in
+  the daily chain), but its zips land at the same repo-root paths and the next daily run
+  sweeps them - use `-OutputDir <dir>` when you want to keep one.
+
+measured 2026-10-18 (first live sweep, on a metered skip): removed 7 artifacts, freed
+10714.1 MB = 10.5 GB (2.4 GB of zips incl. the 2 GB persist from the failed 07:32
+publish + the two 4.1 GB oct 13 temp trees + a 3.4 MB stray temp blob).
+
 ## doc-surgery gotcha: Set-Content roundtrip flipped line endings (2026-10-08)
 
 while moving eight scripts to automata-private I rewrote this file with `Get-Content -Raw`,

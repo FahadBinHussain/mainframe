@@ -13,6 +13,41 @@ function Notify($state, $msg) {
         Start-ScheduledTask -TaskName $notifyTask -ErrorAction Stop
     } catch { Log "notify($state) failed: $($_.Exception.Message)" }
 }
+# autoclean: remove the artifacts the daily chain leaves behind. the zips are
+# rebuildable intermediates (the release store holds the durable copy - a failed
+# run's zips are rebuilt by the next run) and the temp trees are leftovers from
+# crashed runs. called from a finally so every exit path sweeps. never throws.
+function Remove-BackupArtifacts {
+    $report = [pscustomobject]@{ Removed = 0; FreedBytes = 0L; Failed = @() }
+    $zipNames = 'mainframe-quick.zip', 'mainframe-persist.zip', 'mainframe-secrets.zip',
+                'mainframe-core.zip', 'mainframe-backup.zip'
+    foreach ($n in $zipNames) {
+        $f = Join-Path $PSScriptRoot $n
+        $item = Get-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        try {
+            Remove-Item -LiteralPath $f -Force -ErrorAction Stop
+            $report.Removed++; $report.FreedBytes += $item.Length
+        } catch { $report.Failed += "$n ($($_.Exception.Message))" }
+    }
+    # temp leftovers: staging trees, strip-ditto dbs, stray blob, robocopy logs.
+    # age guard - a live manual run may own anything younger than 2h.
+    $cutoff = (Get-Date).AddHours(-2)
+    $patterns = 'mainframe-backup-*', 'mainframe-zip-stage-*', 'ditto-favorites-*.db',
+                'mainframe-secrets.zip', 'robocopy-log-*.txt'
+    foreach ($pat in $patterns) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $env:TEMP -Filter $pat -Force -ErrorAction SilentlyContinue)) {
+            if ($item.LastWriteTime -gt $cutoff) { continue }
+            $size = if ($item.PSIsContainer) { (Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum } else { $item.Length }
+            if (-not $size) { $size = 0L }
+            try {
+                Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+                $report.Removed++; $report.FreedBytes += $size
+            } catch { $report.Failed += "$($item.Name) ($($_.Exception.Message))" }
+        }
+    }
+    $report
+}
 try {
     Log 'daily backup+publish starting'
     # metered-connection gate: if the link we would upload over is metered (or there is
@@ -49,4 +84,12 @@ try {
     Log "FATAL: $($_.Exception.Message)"
     Notify 'fail' $_.Exception.Message
     exit 1
+} finally {
+    # autoclean artifacts (see Remove-BackupArtifacts) - logs only, never throws,
+    # so it can never mask the real exit code or the FATAL above.
+    try {
+        $c = Remove-BackupArtifacts
+        Log "cleanup: removed $($c.Removed) artifact(s), freed $([math]::Round($c.FreedBytes / 1MB, 1)) MB"
+        foreach ($f in @($c.Failed)) { Log "cleanup WARNING: could not remove $f" }
+    } catch { Log "cleanup WARNING: $($_.Exception.Message)" }
 }
