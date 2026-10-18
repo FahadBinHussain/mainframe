@@ -255,6 +255,12 @@ without a vault entry are skipped. when the table prints zero rows, check the re
 vault-native BEFORE assuming the accounts are empty. `render-services-table.ps1` was also
 updated (2026-10-05) to read via `Read-VaultSecret -NamePattern '*render.com*' -ValueRegex 'rnd_[A-Za-z0-9]+'`.
 
+**2026-10-18: `render-services-table.ps1` moved to `automata-private\render.com\`**
+(mainframe -> automata merge) - edit it THERE; this repo no longer has a copy
+(it imports `vault-secret.psm1` by its mainframe absolute path, uptimerobot-account.ps1
+style, like the neon/vercel/supabase tables). the render bulk tooling (this table +
+`render-quota.ps1`) now all lives under `automata-private\render.com\`.
+
 ### ⚠️ gotcha: `Read-VaultSecret` returns a plain String, not an object (2026-10-02)
 `$tok = Read-VaultSecret ...` gives you the secret itself (`System.String`). writing
 `$tok.Value` (a natural habit from other `Read-*` helpers) silently yields **empty**, so
