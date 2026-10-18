@@ -15,6 +15,21 @@ function Notify($state, $msg) {
 }
 try {
     Log 'daily backup+publish starting'
+    # metered-connection gate: if the link we would upload over is metered (or there is
+    # no internet at all), skip BEFORE any backup work - no point burning metered data
+    # on a backup that could never be uploaded. the check itself runs via Windows
+    # PowerShell 5.1 because the WinRT NetworkInformation API is unavailable in pwsh 7
+    # (see network-cost-check.ps1). a failed check is a loud fatal error, never a skip.
+    $netRaw = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'network-cost-check.ps1') 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "network-cost-check failed (exit $LASTEXITCODE): $($netRaw -join ' ')" }
+    try { $net = ($netRaw -join "`n") | ConvertFrom-Json } catch { throw "network-cost-check returned unparseable output: $($netRaw -join ' ')" }
+    if ($net.skip) {
+        $short = if (-not $net.connected) { 'no internet' } else { 'metered connection' }
+        Log "skip: $($net.reasons -join '; ') - backup not run"
+        Notify 'skip' "$short - backup skipped"
+        exit 0
+    }
+    Log "upload link ok: $($net.interface) ($($net.costType))"
     Set-Location (Join-Path $env:USERPROFILE 'Downloads\mainframe')
     $marker = 'C:\tmp\daily-backup-lastdate.txt'
     $today = Get-Date -Format 'yyyy-MM-dd'

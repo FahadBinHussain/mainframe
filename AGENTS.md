@@ -1517,6 +1517,47 @@ runs silent. it now hands visibility to an on-demand interactive task:
 
 
 
+### metered-connection skip (added 2026-10-18)
+
+`daily-backup-publish.ps1` now checks the upload link BEFORE any backup work: if the
+active internet connection is metered (or there is no internet at all), the whole run
+is skipped - no point burning metered data on a backup that could not be uploaded
+anyway. skip = log line + gray `skip` banner (now shows the reason, e.g. "metered
+connection - backup skipped") + `exit 0` (task shows success, no retry); the daily
+marker is NOT set, so the next run still happens once the link is usable again.
+
+- the check is `network-cost-check.ps1` (repo root): prints one JSON object
+  (`connected`, `interface`, `costType`, `roaming`, `overDataLimit`,
+  `approachingDataLimit`, `skip`, `reasons[]`) and exits 0 when the check completed.
+  `skip=true` for: cost type Fixed/Variable, roaming, over data limit, approaching
+  data limit, or no internet profile.
+- **it must run under Windows PowerShell 5.1, invoked as
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File`** - it uses the WinRT
+  `Windows.Networking.Connectivity.NetworkInformation` API (the exact source the
+  Settings "metered connection" toggle writes to). pwsh 7 cannot load WinRT
+  projections at all (verified 2026-10-18: *Unable to find type
+  [Windows.Networking.Connectivity.NetworkInformation,...]*), so the helper has a
+  loud guard that throws when run under pwsh instead of silently degrading. the
+  daily script (which runs under pwsh) shells out to 5.1 for this one check.
+- **a failed check is fatal, not a skip** - non-zero exit or unparseable JSON throws
+  `network-cost-check failed`, the task fails loudly, and no backup is silently
+  cancelled.
+- registry `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\DefaultMediaCost`
+  is NOT a substitute: it holds the per-media-type DEFAULTS only; a per-network
+  metered flag (i.e. a Wi-Fi profile toggled metered in Settings) lives in the WLAN
+  profile and only NLM/WinRT reports it. measured 2026-10-18: `DefaultMediaCost\WiFi=1`
+  while the active connection was metered - a registry-only check would have said
+  "not metered".
+- `backup-notify.ps1` `skip` state now renders its message when one is passed
+  (`already ran today - skipped` stays the default for the marker-skip call, which
+  passes none - banner text for that path is byte-identical to before).
+- testing: `-Simulate unrestricted|metered|offline` runs synthetic values through the
+  same classifier (JSON carries `"simulated": true`); a real two-way test toggles the
+  active profile (`netsh wlan set profileparameter name=<ssid> cost=unrestricted`,
+  then `cost=fixed` to restore) and re-runs the helper (verified live 2026-10-18:
+  Fixed -> skip, Unrestricted -> proceed, revert -> skip again).
+- only the daily chain is gated; manual `backup.ps1 -Publish` runs are not.
+
 ## doc-surgery gotcha: Set-Content roundtrip flipped line endings (2026-10-08)
 
 while moving eight scripts to automata-private I rewrote this file with `Get-Content -Raw`,
