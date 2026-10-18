@@ -19,8 +19,11 @@ function Notify($state, $msg) {
 # crashed runs. called from a finally so every exit path sweeps. never throws.
 function Remove-BackupArtifacts {
     $report = [pscustomobject]@{ Removed = 0; FreedBytes = 0L; Failed = @() }
+    # tool-secrets.zip is the PLAINTEXT secrets archive (ssh keys, account profiles) -
+    # publish encrypts it into mainframe-secrets.zip (which rides inside quick), the
+    # next run rebuilds it from live state, so it must never linger after the run ends.
     $zipNames = 'mainframe-quick.zip', 'mainframe-persist.zip', 'mainframe-secrets.zip',
-                'mainframe-core.zip', 'mainframe-backup.zip'
+                'tool-secrets.zip', 'mainframe-core.zip', 'mainframe-backup.zip'
     foreach ($n in $zipNames) {
         $f = Join-Path $PSScriptRoot $n
         $item = Get-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
@@ -33,8 +36,8 @@ function Remove-BackupArtifacts {
     # temp leftovers: staging trees, strip-ditto dbs, stray blob, robocopy logs.
     # age guard - a live manual run may own anything younger than 2h.
     $cutoff = (Get-Date).AddHours(-2)
-    $patterns = 'mainframe-backup-*', 'mainframe-zip-stage-*', 'ditto-favorites-*.db',
-                'mainframe-secrets.zip', 'robocopy-log-*.txt'
+    $patterns = 'mainframe-backup-*', 'mainframe-zip-stage-*', 'mainframe-tool-secrets-*',
+                'ditto-favorites-*.db', 'mainframe-secrets.zip', 'robocopy-log-*.txt'
     foreach ($pat in $patterns) {
         foreach ($item in @(Get-ChildItem -LiteralPath $env:TEMP -Filter $pat -Force -ErrorAction SilentlyContinue)) {
             if ($item.LastWriteTime -gt $cutoff) { continue }
