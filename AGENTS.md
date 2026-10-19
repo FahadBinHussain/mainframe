@@ -151,6 +151,46 @@ client id and same quota project across the three (the values live in each profi
   this is the one case where the detached `login <email>` recipe above is the real fix; the
   consent screen is published, so it should not recur once re-minted.
 
+### a re-login can land on the WRONG account - always verify the identity (2026-10-19)
+
+the dead secondary profile above was re-minted 2026-10-19 06:34, but the consent flow completed as
+a DIFFERENT google account the user owns. `gws auth login` hardcodes `prompt=select_account`, so
+with several google sessions in Edge the chooser defaults to the last-active account and gws writes
+whatever was picked into that profile's `credentials.enc` without ever comparing it to the profile
+dir name. nothing errors: the profile looks healthy, mints fine, and simply serves another mailbox.
+
+- **verify with the API, never from the profile name or `auth status`.** `gws auth status` reports
+  `token_valid true` for a wrong-account token. the only truth is the identity endpoint:
+
+  ```powershell
+  pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users getProfile --params '{"userId":"me"}'
+  # -> {"emailAddress":"...","messagesTotal":N}   emailAddress MUST equal <email>
+  ```
+
+- **`gws-account.ps1 login <email>` cannot pre-select the account** - it builds and `Start-Process`es
+  the auth URL itself, so there is nowhere to inject a hint. for a wrong-account repair, run the raw
+  command with the helper's env and open the URL yourself:
+
+  ```powershell
+  $env:GOOGLE_WORKSPACE_CLI_CONFIG_DIR = "$env:APPDATA\mainframe\accounts\gws\<email>"
+  $env:GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND = 'file'
+  gws auth login --scopes (<same list as $DefaultGwsLoginScopes> -join ',') 2>&1 |
+    ForEach-Object { $l=[string]$_; if ($l -match '^\s*(https://accounts\.google\.com/\S+)') { Start-Process ($matches[1] + '&login_hint=<url-encoded email>') } }
+  ```
+
+  `login_hint` pre-selects the account in the chooser (it does not skip consent). keep the process
+  running - it owns the `localhost:<port>` loopback callback; success prints
+  `"account": "<email>"` + the granted scope list and exits 0.
+
+- **the "Google hasn't verified this app" screen names the APP OWNER, not the account signing in.**
+  the red line `(...gmail.com) verifies this app with Google` is the GCP project owner contact of the
+  shared oauth client - it appears on every consent flow and says nothing about which account is
+  being granted. clicking `Advanced` -> `Go to ... (unsafe)` is expected for this client.
+- **back up `credentials.enc` before re-login** and delete the consumer caches afterwards. the inbox
+  keeps its own mint at `<profile>\inbox-token.json` plus `token_cache.json`; both outlive a re-login
+  and will keep serving the OLD mailbox until deleted. `profile.json`/`current.json` `updatedAt` is
+  written by the helper's login, so a hand-run consent leaves it stale - bump it or `status-all` lies.
+
 ## neon: list all projects for an account
 
 context: neon projects can be under personal accounts or organizations. `projects list` without `--org-id` only returns personal projects. org-owned projects require `--org-id`.
