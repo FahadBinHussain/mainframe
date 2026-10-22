@@ -28,10 +28,13 @@ APT_MAP = {
     "flameshot": "flameshot", "qbittorrent": "qbittorrent", "mpv-git": "mpv",
     "rclone": "rclone", "yt-dlp": "yt-dlp", "syncplay": "syncplay", "rustup": "rustup",
 }
+# Scoop's pinned extractor helper is covered by the native extractor, not a
+# Linux 19.00 version pin or a second package installation.
+PACKAGE_COVERAGE = {"7zip19.00-helper": "7zip"}
 # These are known to be Windows-oriented in this inventory.  They are not
 # silently omitted: each becomes an explicit blocker.
 WINDOWS_ONLY = {
-    "7zip19.00-helper", "autohotkey", "bulk-crap-uninstaller", "dark",
+    "autohotkey", "bulk-crap-uninstaller", "dark",
     "ditto", "innounp", "micmute", "rufus", "sysinternals",
     "vcredist-aio", "windows-terminal", "winfsp-np",
 }
@@ -60,6 +63,7 @@ class Action:
     source: str = ""
     status: str = "planned"
     reason: str = ""
+    covered_by: str | None = None
 
 @dataclass
 class Plan:
@@ -167,6 +171,10 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
     for name in scoop.get("apps", []):
         if not _safe_arg(name):
             reason = f"Invalid Scoop package name: {name!r}"; blockers.append(reason); actions.append(_blocked("apt", str(name), reason, "scoop"))
+        elif name in PACKAGE_COVERAGE:
+            target = PACKAGE_COVERAGE[name]
+            actions.append(Action("apt", name, source="scoop", status="covered", covered_by=target,
+                                  reason=f"Extractor helper covered by native {target}; the Windows helper version pin does not apply on Linux."))
         elif name in WINDOWS_ONLY:
             reason = f"Windows-only package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
         elif name in UNVALIDATED_NATIVE:
@@ -183,6 +191,12 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
             actions.append(Action("apt", name, [*elevate, "apt-get", "install", "-y", *packages], source="scoop"))
         else:
             reason = f"No explicit native equivalent for Scoop package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
+    # A helper-only allowlist still needs its canonical native action. Reuse an
+    # existing one regardless of declaration order, never install the helper.
+    for target in dict.fromkeys(a.covered_by for a in actions if a.status == "covered"):
+        if not any(a.name == target for a in actions):
+            elevate = [] if os.geteuid() == 0 else ["sudo", "-n"]
+            actions.append(Action("apt", target, [*elevate, "apt-get", "install", "-y", APT_MAP[target]], source="package-coverage"))
     for pkg in winget.get("packages", []):
         ident = pkg.get("id", "") if isinstance(pkg, dict) else pkg
         if not isinstance(ident, str) or not ident.strip():
@@ -242,15 +256,22 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     known = {a.name for a in plan.actions}
     unknown = selected_set - known
     if unknown: raise RuntimeError("Unknown --select action name(s): " + ", ".join(sorted(unknown)))
+    covered = [a for a in plan.actions if a.status == "covered" and
+               (not selected_set or a.name in selected_set or a.covered_by in selected_set)]
+    for action in covered:
+        if not any(a.kind == "apt" and a.name == action.covered_by and a.status == "planned" and a.command for a in plan.actions):
+            raise RuntimeError(f"Missing planned native coverage target for: {action.name}")
+    coverage_targets = {a.covered_by for a in covered}
     if not selected_set and plan.blockers:
         raise RuntimeError('Plan contains unresolved manifest or package blockers; no full execution is permitted.')
     unresolved = [a for a in plan.actions if a.status == "blocked" and (not selected_set or a.name in selected_set)]
     if unresolved: raise RuntimeError("Unresolved blockers prevent full restore: " + "; ".join(a.reason for a in unresolved))
-    chosen = [a for a in plan.actions if a.status == "planned" and (not selected_set or a.name in selected_set)]
+    chosen = [a for a in plan.actions if a.status == "planned" and
+              (not selected_set or a.name in selected_set or (a.kind == "apt" and a.name in coverage_targets))]
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
-    report = {"executed": [], "failed": None, "skipped": [a.name for a in plan.actions if a not in chosen], "partial": bool(selected_set), "note": "Explicit selection is a partial restore; it does not claim full parity." if selected_set else "Full planned restore."}
+    report = {"executed": [], "failed": None, "covered": {a.name: a.covered_by for a in covered}, "skipped": [a.name for a in plan.actions if a not in chosen and a not in covered], "partial": bool(selected_set), "note": "Explicit selection is a partial restore; it does not claim full parity." if selected_set else "Full planned restore."}
     for action in chosen:
         try:
             result = runner(action.command, check=False, shell=False, timeout=300)

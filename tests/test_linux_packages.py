@@ -26,7 +26,123 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertTrue(set(scoop) <= names); self.assertTrue(set(winget) <= names)
         self.assertTrue({"@googleworkspace/cli", "vercel", "graphifyy"} <= names)
         self.assertIn("github.com/openclaw/wacli/cmd/wacli", names)
-        self.assertTrue(all(a.status in {"planned", "blocked"} for a in plan.actions))
+        self.assertTrue(all(a.status in {"planned", "blocked", "covered"} for a in plan.actions))
+
+    def helper_plan(self, apps):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            for filename, key, value in (
+                ("scoop-allowed.json", "apps", apps),
+                ("winget-allowed.json", "packages", [{"id": "Vendor.Tool"}]),
+                ("pnpm-allowed.json", "packages", ["tool"]),
+                ("uv-allowed.json", "packages", ["tool"]),
+                ("go-allowed.json", "packages", ["example.com/tool"]),
+            ):
+                (root / filename).write_text(json.dumps({key: value}))
+            return lp.build_plan(root)
+
+    def test_extractor_helper_is_explicitly_covered_without_duplicate_install(self):
+        for apps in (["7zip", "7zip19.00-helper"], ["7zip19.00-helper", "7zip"], ["7zip19.00-helper"]):
+            with self.subTest(apps=apps):
+                plan = self.helper_plan(apps)
+                helper = next(a for a in plan.actions if a.name == "7zip19.00-helper")
+                self.assertEqual(helper.status, "covered")
+                self.assertEqual(helper.covered_by, "7zip")
+                self.assertIsNone(helper.command)
+                self.assertIn("version pin does not apply", helper.reason)
+                self.assertFalse(any("7zip19.00-helper" in b for b in plan.blockers))
+                installs = [a for a in plan.actions if a.kind == "apt" and a.status == "planned"]
+                self.assertEqual(len(installs), 1)
+                self.assertEqual(installs[0].name, "7zip")
+                self.assertEqual(installs[0].command[-3:], ["install", "-y", "7zip"])
+
+    def test_selecting_helper_runs_only_native_target_after_preflight(self):
+        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        report = lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(runner.call_args_list[0].args[0], ["apt-cache", "policy", "7zip"])
+        self.assertEqual(runner.call_args_list[1].args[0][-3:], ["install", "-y", "7zip"])
+        self.assertEqual(report["executed"], ["7zip"])
+        self.assertEqual(report["covered"], {"7zip19.00-helper": "7zip"})
+        self.assertNotIn("7zip19.00-helper", report["skipped"])
+        self.assertTrue(report["partial"])
+
+    def test_helper_selection_does_not_select_same_named_other_manager_action(self):
+        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
+        plan.actions.append(lp.Action("pnpm", "7zip", ["pnpm", "add", "--global", "--", "7zip"]))
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        report = lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        self.assertEqual(runner.call_count, 2)
+        self.assertTrue(all(call.args[0][0] != "pnpm" for call in runner.call_args_list))
+        self.assertEqual(report["executed"], ["7zip"])
+        self.assertEqual(report["covered"], {"7zip19.00-helper": "7zip"})
+
+    def test_non_apt_name_collision_cannot_satisfy_native_coverage(self):
+        plan = self.helper_plan(["7zip19.00-helper"])
+        plan.actions = [a for a in plan.actions if a.name != "7zip"]
+        plan.actions.append(lp.Action("pnpm", "7zip", ["pnpm", "add", "--global", "--", "7zip"]))
+        runner = Mock()
+        with self.assertRaisesRegex(RuntimeError, "Missing planned native coverage target"):
+            lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        runner.assert_not_called()
+
+    def test_selecting_native_target_also_reports_helper_coverage(self):
+        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        report = lp.execute(plan, ["7zip"], runner=runner)
+        self.assertEqual(report["executed"], ["7zip"])
+        self.assertEqual(report["covered"], {"7zip19.00-helper": "7zip"})
+        self.assertNotIn("7zip19.00-helper", report["skipped"])
+        self.assertEqual(runner.call_count, 2)
+
+    def test_unrelated_selection_does_not_claim_helper_coverage(self):
+        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+        report = lp.execute(plan, ["example.com/tool"], runner=runner)
+        self.assertEqual(report["covered"], {})
+        self.assertIn("7zip19.00-helper", report["skipped"])
+        self.assertIn("7zip", report["skipped"])
+        self.assertEqual(report["executed"], ["example.com/tool"])
+
+    def test_full_execution_covers_helper_once_and_keeps_blocker_guard(self):
+        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        with self.assertRaisesRegex(RuntimeError, "blockers"):
+            lp.execute(plan, runner=runner)
+        runner.assert_not_called()
+        plan.actions = [a for a in plan.actions if a.name in {"7zip", "7zip19.00-helper"}]
+        plan.blockers = []
+        report = lp.execute(plan, runner=runner)
+        self.assertEqual(report["executed"], ["7zip"])
+        self.assertEqual(report["covered"], {"7zip19.00-helper": "7zip"})
+        self.assertEqual(report["skipped"], [])
+        self.assertFalse(report["partial"])
+        self.assertEqual(runner.call_count, 2)
+
+    def test_helper_cannot_bypass_missing_candidate_or_missing_target(self):
+        plan = self.helper_plan(["7zip19.00-helper"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: (none)\n"))
+        with self.assertRaisesRegex(RuntimeError, "No apt candidate"):
+            lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        self.assertEqual(runner.call_count, 1)
+        plan.actions = [a for a in plan.actions if a.name != "7zip"]
+        runner.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "Missing planned native coverage target"):
+            lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        runner.assert_not_called()
+
+    def test_helper_dry_plan_serializes_coverage_and_never_executes(self):
+        plan = self.helper_plan(["7zip19.00-helper"])
+        output = io.StringIO()
+        with patch.object(lp, "build_plan", return_value=plan), patch.object(lp, "execute") as execute, contextlib.redirect_stdout(output):
+            self.assertEqual(lp.main([]), 3)
+        execute.assert_not_called()
+        helper = next(a for a in json.loads(output.getvalue())["actions"] if a["name"] == "7zip19.00-helper")
+        self.assertEqual(helper["covered_by"], "7zip")
+        self.assertEqual(helper["status"], "covered")
+        self.assertIsNone(helper["command"])
 
     def test_go_version_tags_and_string_declaration(self):
         plan = lp.build_plan(ROOT, distro="debian", architecture="aarch64")
