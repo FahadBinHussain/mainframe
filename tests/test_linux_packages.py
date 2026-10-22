@@ -11,12 +11,25 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
 import linux_packages as lp
 ROOT = Path(__file__).parents[1]
+ANDROID_RESOLVER = lp.android_tools.resolve_release
+
+ANDROID_RELEASE = {
+    "version": "12345678",
+    "url": "https://dl.google.com/android/repository/commandlinetools-linux-12345678_latest.zip",
+    "sha256": "a" * 64,
+    "manifest_source": "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/android-clt.json",
+    "checksum_source": "https://developer.android.com/studio",
+    "terms_url": "https://developer.android.com/studio/terms.html",
+}
 
 class LinuxPackagesTests(unittest.TestCase):
     def setUp(self):
         host = patch.object(lp, 'host_info', return_value=('ubuntu', 'x86_64'))
         host.start()
         self.addCleanup(host.stop)
+        metadata = patch.object(lp.android_tools, 'resolve_release', return_value=dict(ANDROID_RELEASE))
+        metadata.start()
+        self.addCleanup(metadata.stop)
 
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
@@ -41,6 +54,107 @@ class LinuxPackagesTests(unittest.TestCase):
             ):
                 (root / filename).write_text(json.dumps({key: value}))
             return lp.build_plan(root)
+
+    def test_android_plans_same_product_archive_not_apt_adb_or_android_cli(self):
+        plan = self.helper_plan(["android-clt"])
+        action = next(a for a in plan.actions if a.name == "android-clt")
+        self.assertEqual(action.kind, "android-sdk-archive")
+        self.assertEqual(action.status, "planned")
+        self.assertEqual(action.version, ANDROID_RELEASE["version"])
+        self.assertEqual(action.archive, ANDROID_RELEASE)
+        self.assertEqual(action.sdk_layout, "<explicit-sdk-root>/cmdline-tools/latest")
+        self.assertTrue(action.acceptance_required)
+        self.assertIsNone(action.command)
+        self.assertIn("sdkmanager", action.reason)
+        self.assertFalse(any("android-clt" in b for b in plan.blockers))
+        self.assertEqual(plan.to_dict()["actions"][0]["archive"]["sha256"], "a" * 64)
+
+    def test_android_metadata_or_arch_failure_remains_explicit_blocker(self):
+        for error in ("Missing checksum", "Version mismatch", "Unsupported architecture: aarch64"):
+            with self.subTest(error=error), patch.object(lp.android_tools, "resolve_release", side_effect=RuntimeError(error)):
+                plan = self.helper_plan(["android-clt"])
+                action = next(a for a in plan.actions if a.name == "android-clt")
+                self.assertEqual(action.status, "blocked")
+                self.assertIn(error, action.reason)
+                self.assertIn(action.reason, plan.blockers)
+
+    def test_android_consent_and_root_gate_all_selected_changes(self):
+        plan = self.helper_plan(["curl", "android-clt"])
+        runner = Mock()
+        with patch.object(lp.android_tools, "install_release") as install:
+            with self.assertRaisesRegex(RuntimeError, "terms"):
+                lp.execute(plan, ["curl", "android-clt"], runner=runner)
+            with self.assertRaisesRegex(RuntimeError, "sdk-root"):
+                lp.execute(plan, ["curl", "android-clt"], runner=runner, android_sdk_terms_accepted=True)
+            runner.assert_not_called()
+            install.assert_not_called()
+
+    def test_android_execution_uses_adapter_only_with_explicit_consent_and_root(self):
+        plan = self.helper_plan(["android-clt"])
+        root = Path("/synthetic/new-sdk")
+        runner = Mock()
+        with patch.object(lp.android_tools, "validate_install") as validate, patch.object(lp.android_tools, "install_release") as install:
+            report = lp.execute(plan, ["android-clt"], runner=runner,
+                                android_sdk_root=root, android_sdk_terms_accepted=True)
+        validate.assert_called_once_with(ANDROID_RELEASE, root, accepted_terms=True)
+        install.assert_called_once_with(ANDROID_RELEASE, root, accepted_terms=True)
+        runner.assert_not_called()
+        self.assertEqual(report["executed"], ["android-clt"])
+        self.assertTrue(report["partial"])
+
+    def test_android_invalid_destination_prevents_other_selected_installs(self):
+        plan = self.helper_plan(["curl", "android-clt"])
+        runner = Mock()
+        with patch.object(lp.android_tools, "validate_install", side_effect=RuntimeError("Refusing existing SDK")), patch.object(lp.android_tools, "install_release") as install:
+            with self.assertRaisesRegex(RuntimeError, "existing SDK"):
+                lp.execute(plan, ["curl", "android-clt"], runner=runner,
+                           android_sdk_root=Path("/synthetic/sdk"), android_sdk_terms_accepted=True)
+            runner.assert_not_called()
+            install.assert_not_called()
+
+    def test_android_dry_run_even_with_consent_never_downloads(self):
+        plan = self.helper_plan(["android-clt"])
+        with patch.object(lp, "build_plan", return_value=plan), patch.object(lp, "execute") as execute, contextlib.redirect_stdout(io.StringIO()):
+            lp.main(["--android-sdk-terms-accepted", "--android-sdk-root", "/synthetic/sdk"])
+        execute.assert_not_called()
+
+    def test_android_cli_reports_validation_and_corrupt_zip_errors_as_json(self):
+        for error in (ValueError("bad SDK destination"), lp.zipfile.BadZipFile("bad ZIP")):
+            output = io.StringIO()
+            with self.subTest(error=error), patch.object(lp, "execute", side_effect=error), contextlib.redirect_stdout(output):
+                code = lp.main(["--repo", str(ROOT), "--execute", "--select", "android-clt",
+                                "--android-sdk-terms-accepted", "--android-sdk-root", "/synthetic/sdk"])
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(output.getvalue())["error"], str(error))
+
+    def test_android_architecture_blocker_never_fetches_metadata_or_installs(self):
+        with patch.object(lp.android_tools, "resolve_release", side_effect=ANDROID_RESOLVER), patch.object(lp.android_tools, "_open_url") as network:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="aarch64")
+        android = next(a for a in plan.actions if a.name == "android-clt")
+        self.assertEqual(android.status, "blocked")
+        self.assertIn("aarch64", android.reason)
+        network.assert_not_called()
+        with patch.object(lp, "host_info", return_value=("ubuntu", "aarch64")), patch.object(lp.android_tools, "install_release") as install:
+            with self.assertRaisesRegex(RuntimeError, "Unresolved blockers"):
+                lp.execute(plan, ["android-clt"], android_sdk_terms_accepted=True,
+                           android_sdk_root=Path("/synthetic/sdk"))
+        install.assert_not_called()
+
+    def test_android_failure_reports_prior_selected_actions_and_failed_action(self):
+        plan = self.helper_plan(["curl", "android-clt"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        with patch.object(lp.android_tools, "validate_install"), patch.object(lp.android_tools, "install_release", side_effect=ValueError("SHA-256 checksum mismatch")):
+            with self.assertRaises(lp.PackageExecutionError) as caught:
+                lp.execute(plan, ["curl", "android-clt"], runner=runner,
+                           android_sdk_terms_accepted=True, android_sdk_root=Path("/synthetic/sdk"))
+        report = caught.exception.report
+        self.assertEqual(report["executed"], ["curl"])
+        self.assertEqual(report["failed"], {"name": "android-clt", "error": "SHA-256 checksum mismatch"})
+        output = io.StringIO()
+        with patch.object(lp, "build_plan", return_value=plan), patch.object(lp, "execute", side_effect=caught.exception), contextlib.redirect_stdout(output):
+            code = lp.main(["--execute", "--select", "android-clt"])
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())["report"], report)
 
     def test_extractor_helper_is_explicitly_covered_without_duplicate_install(self):
         for apps in (["7zip", "7zip19.00-helper"], ["7zip19.00-helper", "7zip"], ["7zip19.00-helper"]):
