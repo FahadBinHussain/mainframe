@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: verified production release.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is an inventory and staging contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: production metadata baseline plus fixture-tested Git subset conversion.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -8,7 +8,7 @@ The Linux path is deliberately **offline and non-destructive**:
 
 - `linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
 - `--apply-portable` may additionally copy explicitly classified files into a **new** `home-staging/` tree. It never writes the live home directory, activates services, changes global agent instructions, imports credentials, or executes Windows files.
-- The implementation never inspects backup payload contents for this coverage review, and never decrypts or prints secrets. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
+- `--convert-portable` separately opts into the exact Git settings adapter documented below. It reads only the verified root `.gitconfig` for conversion, emits an offline allowlisted subset, and never activates it. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
 - Every native target below is a **staging candidate layout, not confirmed operational**. A staged byte is not proof that its application, plugins, identity, paths, permissions, or behavior work on Linux.
 - This is **not the user's requested 100% Linux runtime**. It is a lossless-byte-preservation and selective-native-staging tool with explicit blockers.
 
@@ -66,6 +66,46 @@ The following is the complete persist-app metadata inventory requested for this 
 
 Additional persist data has explicit handling: `flameshot` settings are candidates under `.config/flameshot/`; OBS exports are candidates under `.config/obs-studio/`; qBittorrent exports are candidates under `.config/qBittorrent/` and torrent metadata under `.local/share/qBittorrent/`. These are also staging candidates, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
 
+## Implemented conversion map: Git portable settings v1
+
+`linux_migrations.py` contains a versioned explicit map for root `.gitconfig` to
+offline `home-staging/.gitconfig`. It is enabled **only** by `--recover
+--convert-portable`; default inventory, ordinary recovery, and
+`--apply-portable` alone do not run it. Git must already be installed; nothing
+is downloaded. Git parses stdin with `--no-includes`, an isolated environment,
+and a timeout. Configured commands and includes are never executed/read.
+
+| Setting | Accepted source values and target semantics |
+|---|---|
+| `core.autocrlf` | `true` → `input` (LF checkout, normalize CRLF on add); `input` and `false` retained. |
+| `core.eol` | `crlf` or `native` → `lf`; `lf` retained. Does not rewrite working files. |
+| `core.safecrlf` | `true`, `false`, `warn` retained. |
+| `diff.algorithm` | `myers`, `minimal`, `patience`, `histogram` retained. |
+| `merge.conflictstyle` | `merge`, `diff3`, `zdiff3` retained; destination Git version still needs review. |
+| `color.ui` | `auto`, `always`, `never`, `true`, `false` retained. Other aliases are explicitly unsupported. |
+
+Duplicate supported keys and unsupported values are excluded, with sanitized
+decisions. All other settings (including identity, helpers, includes, paths,
+signing, URL rewrites, aliases, and default branch) remain blocked/raw-only.
+Unknown decisions report counts, not arbitrary key/subsection names that could
+contain private identifiers. Values and parser stderr are never reported.
+Quoted/multiline input uses Git's grammar; generated output is deterministic,
+LF-only and mode 0600. A generated subset is not an equivalent full Git config.
+
+Competing configs across quick/full archives, unsafe members, malformed config,
+missing Git, oversized inputs (>256 KiB), and target conflicts cannot silently
+pick a winner. No accepted setting means no output file. Output is verified
+before publication without overwrite. Original archive/member hashes and
+preservation outcomes are independent of conversion blockers.
+
+The manifest now uses schema version 3 with `conversion_status`,
+`activation_status`, and (when requested) `conversion_counts` and per-entry
+`migration` decisions/output hashes. `review-required` means inspect decisions,
+not all settings converted. Runtime status remains `incomplete`, and the CLI
+retains exit 3 for incomplete operational restoration, even for a blocked
+conversion with successfully preserved originals. No package/setting activation
+is performed. See [the phased plan](../plan.md) for the remaining work.
+
 ## Source action coverage
 
 This table records the actual source actions, not hypothetical Linux work. Windows actions remain reference evidence; Linux actions are limited to the checked-in planner/recovery behavior.
@@ -76,6 +116,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | ZIP metadata inventory | Linux validates ZIP names, traversal, duplicate paths, file/directory collisions, symlinks/special entries, and encrypted members without decrypting payloads. |
 | Safe materialization | Safe ordinary members are copied to `recovered/<archive>/<member>` with verification; unsafe/encrypted/special members remain raw-only. Existing destinations, symlinks, and unsafe parent paths are rejected. |
 | Explicit native staging | Only classifier-approved targets are copied to a new offline `home-staging/` tree. A collision becomes `staging-conflict`; no overwrite or live-home merge occurs. |
+| Git preference conversion | Opt-in six-setting `.gitconfig` adapter above; original preserved, Windows line-ending defaults translated, unknown/identity/command/credential state excluded with explicit decisions. No native activation. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Winget IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
@@ -107,6 +148,16 @@ Archive entry totals are not totals of usable Linux applications. Directory entr
 The metadata-only classifier accounts for **59,554 physical entries**. File-only categories are 26,876 native-path staging candidates, 7,307 blocked files, 33 opaque archives, one review-required Git config, and 11 package/control metadata files. No unsafe materialization paths were found in this release. These are classifier labels, not application-level validation; the production payloads were not extracted or restored during development. The current public secret manifest adds six enabled-but-unverified coverage records and two disabled/excluded records; this does not establish the contents of the encrypted backup manifest.
 
 The repository allowlists produce **82 package actions: 40 planned native actions (36 APT, two pnpm, one uv, one Go) and 42 explicit blockers**. This is static command coverage, not 40 successful installs. Supplying an extracted backup root adds pip-manifest validation/rebuild actions; a missing or incompatible `pip-freeze.txt` blocks that rebuild. APT availability, runtime versions, CGO/build prerequisites, plugin dependencies, and authentication still require validation on the destination.
+
+The Git adapter does **not** change these production metadata labels or package
+counts. Its evidence is deterministic synthetic fixtures only, not conversion
+of the production config, an operational restore, or live Windows validation.
+Validation: 63 Python tests (including 24 new migration fixtures); Bash dispatch,
+forwarding, and offline boot suites (43 / 3 / 12 checks); mocked PowerShell
+dispatch (33 checks); six Bash syntax checks; Python compilation; clean diff
+whitespace check. Fixtures cover private-value exclusion, includes disabled,
+unknown/duplicate values, parser failures, config size, collisions, no-overwrite,
+symlink refusal, cleanup failure, private permissions, and original-byte hashes.
 
 ## Secret and credential boundaries
 
