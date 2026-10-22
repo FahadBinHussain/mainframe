@@ -31,7 +31,7 @@ The following describes application schemas recognized by the classifier, not a 
 
 | Persist app | Current implementation | Staging candidate or blocker |
 |---|---|---|
-| `7zip` | Blocked | Windows GUI/registry settings have no native p7zip import. Raw bytes remain in `recovered/`. |
+| `7zip` | Blocked | Windows GUI/registry settings have no native 7zip import. Raw bytes remain in `recovered/`; native package coverage does not import these settings. |
 | `alist` | Native staging candidate | `.local/share/alist/`; layout, permissions, runtime, and config compatibility are unverified. |
 | `archisteamfarm` | Native staging candidate | `.local/share/ArchiSteamFarm/`; layout and Linux runtime compatibility are unverified. |
 | `autohotkey` | Blocked | AutoHotkey scripts require a deliberate Linux automation rewrite. |
@@ -120,6 +120,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Winget IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
+| Scoop extractor helper coverage | `7zip19.00-helper` is explicitly `covered` with `covered_by: "7zip"`, a reason, and no separate install command. One native APT `7zip` action covers the extractor role, even when only the helper is declared or declarations are reordered. Selecting the helper selects that native action with candidate preflight. This is not a Linux 19.00 pin, Scoop execution, or Windows settings migration. Execution reports covered helpers separately from skipped actions; unrelated blockers remain intact. |
 | Package holds and version mappings | Recorded Windows/Scoop versions are preserved as metadata/provenance, not silently asserted equivalent to APT versions. The Linux planner has no general package-hold or Windows-version-lock implementation; exact versions requiring holds, repositories, or manual pinning remain a scope item. |
 | pnpm globals/config | Windows records `@googleworkspace/cli`, `vercel`, and the global bin directory. Linux plans `pnpm add --global` per allowlist and must normalize the bin directory; native dependencies and authentication remain review items. |
 | uv tools | Windows records `graphifyy`; Linux plans `uv tool install graphifyy` without assuming Windows entry points or indexes. |
