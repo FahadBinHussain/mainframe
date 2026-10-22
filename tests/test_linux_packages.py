@@ -12,6 +12,15 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 import linux_packages as lp
 ROOT = Path(__file__).parents[1]
 ANDROID_RESOLVER = lp.android_tools.resolve_release
+ANYDESK_RESOLVER = lp.anydesk_tools.resolve_release
+ANYDESK_RELEASE = {
+    "version": "9.2.3",
+    "url": "https://deb.anydesk.com/pool/main/a/anydesk/anydesk_9.2.3_amd64.deb",
+    "sha256": "b" * 64,
+    "size": "1234",
+    "checksum_source": "https://deb.anydesk.com/dists/all/main/binary-amd64/Packages",
+    "terms_url": "https://anydesk.com/en/terms-conditions",
+}
 
 ANDROID_RELEASE = {
     "version": "12345678",
@@ -30,6 +39,9 @@ class LinuxPackagesTests(unittest.TestCase):
         metadata = patch.object(lp.android_tools, 'resolve_release', return_value=dict(ANDROID_RELEASE))
         metadata.start()
         self.addCleanup(metadata.stop)
+        anydesk_metadata = patch.object(lp.anydesk_tools, 'resolve_release', return_value=dict(ANYDESK_RELEASE))
+        anydesk_metadata.start()
+        self.addCleanup(anydesk_metadata.stop)
 
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
@@ -41,19 +53,95 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertIn("github.com/openclaw/wacli/cmd/wacli", names)
         self.assertTrue(all(a.status in {"planned", "blocked", "covered"} for a in plan.actions))
 
-    def helper_plan(self, apps):
+    def helper_plan(self, apps, winget=None):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
             root = Path(d)
             for filename, key, value in (
                 ("scoop-allowed.json", "apps", apps),
-                ("winget-allowed.json", "packages", [{"id": "Vendor.Tool"}]),
+                ("winget-allowed.json", "packages", winget if winget is not None else [{"id": "Vendor.Tool"}]),
                 ("pnpm-allowed.json", "packages", ["tool"]),
                 ("uv-allowed.json", "packages", ["tool"]),
                 ("go-allowed.json", "packages", ["example.com/tool"]),
             ):
                 (root / filename).write_text(json.dumps({key: value}))
             return lp.build_plan(root)
+
+    def test_anydesk_plans_official_package_and_covers_winget_duplicate(self):
+        plan = lp.build_plan(ROOT)
+        action = next(a for a in plan.actions if a.name == "anydesk")
+        self.assertEqual(action.kind, "anydesk-deb")
+        self.assertEqual(action.version, ANYDESK_RELEASE["version"])
+        self.assertEqual(action.archive, ANYDESK_RELEASE)
+        self.assertTrue(action.acceptance_required)
+        self.assertIsNone(action.command)
+        self.assertIn("Xorg", action.reason)
+        duplicate = next(a for a in plan.actions if a.name == "AnyDesk.AnyDesk")
+        self.assertEqual((duplicate.status, duplicate.covered_by), ("covered", "anydesk"))
+        self.assertFalse(any("AnyDesk" in b for b in plan.blockers))
+
+    def test_anydesk_fail_closed_on_metadata_errors(self):
+        with patch.object(lp.anydesk_tools, "resolve_release", side_effect=ValueError("Missing SHA256")):
+            plan = self.helper_plan(["anydesk"])
+        action = next(a for a in plan.actions if a.name == "anydesk")
+        self.assertEqual(action.status, "blocked")
+        self.assertIn("Missing SHA256", action.reason)
+        self.assertIn(action.reason, plan.blockers)
+
+    def test_anydesk_terms_and_service_gate_all_selected_changes(self):
+        plan = self.helper_plan(["curl", "anydesk"])
+        runner = Mock()
+        with patch.object(lp.anydesk_tools, "install_release") as install:
+            for options in ({}, {"anydesk_terms_accepted": True}):
+                with self.assertRaises((PermissionError, RuntimeError, ValueError)):
+                    lp.execute(plan, ["curl", "anydesk"], runner=runner, **options)
+            install.assert_not_called()
+            runner.assert_not_called()
+
+    def test_anydesk_duplicate_select_installs_native_package_once(self):
+        plan = lp.build_plan(ROOT)
+        runner = Mock()
+        with patch.object(lp.anydesk_tools, "validate_install") as validate, patch.object(lp.anydesk_tools, "install_release") as install:
+            report = lp.execute(plan, ["AnyDesk.AnyDesk"], runner=runner,
+                                anydesk_terms_accepted=True, anydesk_service_allowed=True)
+        validate.assert_called_once_with(ANYDESK_RELEASE, accepted_terms=True, allow_service=True)
+        install.assert_called_once_with(ANYDESK_RELEASE, accepted_terms=True, allow_service=True, runner=runner)
+        runner.assert_not_called()
+        self.assertEqual(report["executed"], ["anydesk"])
+        self.assertEqual(report["covered"], {"AnyDesk.AnyDesk": "anydesk"})
+
+    def test_anydesk_winget_only_creates_native_target_without_other_manager_selection(self):
+        plan = self.helper_plan(["curl"], winget=[{"id": "AnyDesk.AnyDesk"}])
+        plan.actions.append(lp.Action("pnpm", "anydesk", ["pnpm", "add", "--global", "anydesk"]))
+        self.assertEqual(len([a for a in plan.actions if a.kind == "anydesk-deb"]), 1)
+        runner = Mock()
+        with patch.object(lp.anydesk_tools, "validate_install"), patch.object(lp.anydesk_tools, "install_release") as install:
+            report = lp.execute(plan, ["AnyDesk.AnyDesk"], runner=runner,
+                                anydesk_terms_accepted=True, anydesk_service_allowed=True)
+        install.assert_called_once()
+        runner.assert_not_called()
+        self.assertEqual(report["executed"], ["anydesk"])
+
+    def test_anydesk_dry_cli_with_acceptance_never_executes(self):
+        with patch.object(lp, "execute") as execute, contextlib.redirect_stdout(io.StringIO()):
+            lp.main(["--anydesk-terms-accepted", "--anydesk-service-allowed"])
+        execute.assert_not_called()
+
+    def test_anydesk_architecture_refusal_precedes_network(self):
+        with patch.object(lp.anydesk_tools, "resolve_release", side_effect=ANYDESK_RESOLVER), patch.object(lp.anydesk_tools, "_open_url") as network:
+            plan = lp.build_plan(ROOT, architecture="aarch64")
+        action = next(a for a in plan.actions if a.name == "anydesk")
+        self.assertEqual(action.status, "blocked")
+        self.assertIn("aarch64", action.reason)
+        network.assert_not_called()
+
+    def test_anydesk_failure_reports_failed_action(self):
+        plan = self.helper_plan(["anydesk"])
+        with patch.object(lp.anydesk_tools, "validate_install"), patch.object(lp.anydesk_tools, "install_release", side_effect=ValueError("SHA-256 mismatch")):
+            with self.assertRaises(lp.PackageExecutionError) as caught:
+                lp.execute(plan, ["anydesk"], anydesk_terms_accepted=True, anydesk_service_allowed=True)
+        self.assertEqual(caught.exception.report["executed"], [])
+        self.assertEqual(caught.exception.report["failed"], {"name": "anydesk", "error": "SHA-256 mismatch"})
 
     def test_android_plans_same_product_archive_not_apt_adb_or_android_cli(self):
         plan = self.helper_plan(["android-clt"])
@@ -273,11 +361,11 @@ class LinuxPackagesTests(unittest.TestCase):
     def test_windows_vendor_and_variant_items_are_explicit_blockers(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
         blocked = {a.name: a.reason for a in plan.actions if a.status == "blocked"}
-        for item in ("ditto", "AnyDesk.AnyDesk", "cloudflared", "nodejs-lts", "mpv-git"):
+        for item in ("ditto", "GPSoftware.DirectoryOpus", "cloudflared", "nodejs-lts", "mpv-git"):
             self.assertIn(item, blocked); self.assertTrue(blocked[item])
         mapped = {a.name for a in plan.actions if a.status == 'planned'}
         self.assertTrue({'qbittorrent', 'rclone', 'yt-dlp', 'syncplay'} <= mapped)
-        for item in ('pwsh', 'anydesk', 'discord'):
+        for item in ('pwsh', 'discord'):
             self.assertIn('No validated Linux', blocked[item])
 
     def test_pip_freeze_required_for_backup_root_and_windows_lines_blocked(self):

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import android_commandline_tools as android_tools
+import anydesk_linux as anydesk_tools
 
 APT_MAP = {
     "7zip": "7zip", "cacert": "ca-certificates", "cmake": "cmake",
@@ -45,7 +46,7 @@ WINDOWS_ONLY = {
 # pinned source/translation for it.
 UNVALIDATED_NATIVE = {
     "alist", "bitwarden-cli", "gcloud", "cloudflared",
-    "deno", "bun", "ngrok", "yq", "anydesk", "parsec", "pwsh", "steam",
+    "deno", "bun", "ngrok", "yq", "parsec", "pwsh", "steam",
     "tor-browser", "discord", "opencode2", "nuget",
 }
 VARIANT_DRIFT = {"nodejs-lts", "mpv-git"}
@@ -160,6 +161,22 @@ def _manifest(repo: Path, filename: str, blockers: list[str]) -> dict[str, Any]:
 def _blocked(kind: str, name: str, reason: str, source: str) -> Action:
     return Action(kind, name, status="blocked", reason=reason, source=source)
 
+def _anydesk_action(architecture: str, blockers: list[str], source: str) -> Action:
+    """Resolve package intent only; never import Windows identity or service state."""
+    try:
+        release = anydesk_tools.resolve_release(architecture)
+    except (RuntimeError, OSError, ValueError) as exc:
+        reason = f"Cannot resolve official Linux AnyDesk: {exc}"
+        blockers.append(reason)
+        return _blocked("anydesk-deb", "anydesk", reason, source)
+    return Action("anydesk-deb", "anydesk", version=release["version"], source=source,
+                  archive=release, acceptance_required=True,
+                  reason="Official AnyDesk Linux DEB; Linux and Windows versions are independent. "
+                         "Installation requires explicit AnyDesk terms acceptance and permission for the "
+                         "vendor package to install/start its service. Xorg is required for incoming "
+                         "sessions; Wayland supports outgoing only. No Windows identity, credentials, "
+                         "unattended password or service configuration is imported. Runtime is untested.")
+
 def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None = None, architecture: str | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -183,6 +200,8 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                   reason=f"Extractor helper covered by native {target}; the Windows helper version pin does not apply on Linux."))
         elif name in WINDOWS_ONLY:
             reason = f"Windows-only package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
+        elif name == "anydesk":
+            actions.append(_anydesk_action(architecture, blockers, "scoop"))
         elif name == "android-clt":
             try:
                 release = android_tools.resolve_release(architecture)
@@ -225,6 +244,12 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
             reason = f"Invalid WinGet package ID: {ident!r}"
             blockers.append(reason)
             actions.append(_blocked("winget", str(ident), reason, "winget"))
+        elif ident == "AnyDesk.AnyDesk":
+            if not any(a.name == "anydesk" for a in actions):
+                actions.append(_anydesk_action(architecture, blockers, "winget"))
+            actions.append(Action("winget", ident, source="winget", status="covered", covered_by="anydesk",
+                                  reason="Duplicate AnyDesk package intent covered by official Linux AnyDesk; "
+                                         "Windows identity and service state remain preserved, not migrated."))
         else:
             reason = f"Windows WinGet declaration has no validated native package/state adapter: {ident}"
             blockers.append(reason)
@@ -275,7 +300,8 @@ class PackageExecutionError(RuntimeError):
         self.report = report
 
 def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess.run,
-            *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False) -> dict[str, Any]:
+            *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False,
+            anydesk_terms_accepted: bool = False, anydesk_service_allowed: bool = False) -> dict[str, Any]:
     if not plan.supported: raise RuntimeError("Unsupported host; no restore commands are permitted")
     actual = host_info()
     if actual != (plan.distro, plan.architecture):
@@ -287,7 +313,8 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     covered = [a for a in plan.actions if a.status == "covered" and
                (not selected_set or a.name in selected_set or a.covered_by in selected_set)]
     for action in covered:
-        if not any(a.kind == "apt" and a.name == action.covered_by and a.status == "planned" and a.command for a in plan.actions):
+        if not any(a.name == action.covered_by and a.status == "planned" and
+                   ((a.kind == "apt" and a.command) or (a.kind == "anydesk-deb" and a.archive)) for a in plan.actions):
             raise RuntimeError(f"Missing planned native coverage target for: {action.name}")
     coverage_targets = {a.covered_by for a in covered}
     if not selected_set and plan.blockers:
@@ -295,7 +322,11 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     unresolved = [a for a in plan.actions if a.status == "blocked" and (not selected_set or a.name in selected_set)]
     if unresolved: raise RuntimeError("Unresolved blockers prevent full restore: " + "; ".join(a.reason for a in unresolved))
     chosen = [a for a in plan.actions if a.status == "planned" and
-              (not selected_set or a.name in selected_set or (a.kind == "apt" and a.name in coverage_targets))]
+              (not selected_set or a.name in selected_set or
+               (a.kind in {"apt", "anydesk-deb"} and a.name in coverage_targets))]
+    for action in (a for a in chosen if a.kind == "anydesk-deb"):
+        anydesk_tools.validate_install(action.archive, accepted_terms=anydesk_terms_accepted,
+                                       allow_service=anydesk_service_allowed)
     for action in (a for a in chosen if a.kind == "android-sdk-archive"):
         if not android_sdk_terms_accepted:
             raise RuntimeError("Read Google Android SDK terms and explicitly pass --android-sdk-terms-accepted before download/use")
@@ -310,6 +341,9 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
         try:
             if action.kind == "android-sdk-archive":
                 android_tools.install_release(action.archive, android_sdk_root, accepted_terms=android_sdk_terms_accepted)
+            elif action.kind == "anydesk-deb":
+                anydesk_tools.install_release(action.archive, accepted_terms=anydesk_terms_accepted,
+                                              allow_service=anydesk_service_allowed, runner=runner)
             else:
                 result = runner(action.command, check=False, shell=False, timeout=300)
                 code = getattr(result, "returncode", result if isinstance(result, int) else 0)
@@ -333,6 +367,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--android-sdk-root", type=Path, help="new SDK directory; no default home location or existing SDK overwrite")
     ap.add_argument("--android-sdk-terms-accepted", action="store_true",
                     help="user attests acceptance of Google Android SDK terms for this download/use; never inferred from --execute")
+    ap.add_argument("--anydesk-terms-accepted", action="store_true",
+                    help="user attests acceptance of AnyDesk terms for this download/use, not other products")
+    ap.add_argument("--anydesk-service-allowed", action="store_true",
+                    help="explicitly permit vendor DEB installation including its service and possible automatic start")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture)
@@ -341,7 +379,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"plan": plan.to_dict(), "error": "blockers present; use --select for an explicitly partial restore"}, indent=2)); return 2
         try:
             report = execute(plan, args.select, android_sdk_root=args.android_sdk_root,
-                             android_sdk_terms_accepted=args.android_sdk_terms_accepted)
+                             android_sdk_terms_accepted=args.android_sdk_terms_accepted,
+                             anydesk_terms_accepted=args.anydesk_terms_accepted,
+                             anydesk_service_allowed=args.anydesk_service_allowed)
             output = {"plan": plan.to_dict(), "report": report}
         except PackageExecutionError as exc:
             print(json.dumps({"plan": plan.to_dict(), "error": str(exc), "report": exc.report}, indent=2)); return 1
