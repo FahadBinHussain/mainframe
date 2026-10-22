@@ -11,9 +11,12 @@ import json
 import os
 import platform
 import subprocess
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+import android_commandline_tools as android_tools
 
 APT_MAP = {
     "7zip": "7zip", "cacert": "ca-certificates", "cmake": "cmake",
@@ -41,7 +44,7 @@ WINDOWS_ONLY = {
 # A Linux package may exist, but this adapter deliberately has no validated,
 # pinned source/translation for it.
 UNVALIDATED_NATIVE = {
-    "android-clt", "alist", "bitwarden-cli", "gcloud", "cloudflared",
+    "alist", "bitwarden-cli", "gcloud", "cloudflared",
     "deno", "bun", "ngrok", "yq", "anydesk", "parsec", "pwsh", "steam",
     "tor-browser", "discord", "opencode2", "nuget",
 }
@@ -64,6 +67,9 @@ class Action:
     status: str = "planned"
     reason: str = ""
     covered_by: str | None = None
+    archive: dict[str, str] | None = None
+    sdk_layout: str | None = None
+    acceptance_required: bool = False
 
 @dataclass
 class Plan:
@@ -177,6 +183,22 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                   reason=f"Extractor helper covered by native {target}; the Windows helper version pin does not apply on Linux."))
         elif name in WINDOWS_ONLY:
             reason = f"Windows-only package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
+        elif name == "android-clt":
+            try:
+                release = android_tools.resolve_release(architecture)
+            except (RuntimeError, OSError, ValueError) as exc:
+                reason = f"Cannot resolve official Linux Android Command-Line Tools: {exc}"
+                blockers.append(reason)
+                actions.append(_blocked("android-sdk-archive", name, reason, "scoop"))
+            else:
+                actions.append(Action("android-sdk-archive", name, version=release["version"],
+                                      source="scoop", archive=release,
+                                      sdk_layout="<explicit-sdk-root>/cmdline-tools/latest",
+                                      acceptance_required=True,
+                                      reason="Same SDK Command-Line Tools build as current Scoop android-clt; includes sdkmanager. "
+                                             "Requires explicit SDK root and user acceptance of Google SDK terms before download/use. "
+                                             "Set ANDROID_HOME to that root and add cmdline-tools/latest/bin and platform-tools to PATH manually. "
+                                             "No adb/platform packages, licenses, Java runtime, or shell configuration are installed."))
         elif name in UNVALIDATED_NATIVE:
             reason = f"No validated Linux source/adapter for package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
         elif name in VARIANT_DRIFT:
@@ -247,7 +269,13 @@ def _apt_preflight(actions: list[Action], runner: Any) -> None:
             if not candidate or candidate == "(none)":
                 raise RuntimeError(f"No apt candidate available for mapped package: {package}")
 
-def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess.run) -> dict[str, Any]:
+class PackageExecutionError(RuntimeError):
+    def __init__(self, message: str, report: dict[str, Any]):
+        super().__init__(message)
+        self.report = report
+
+def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess.run,
+            *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False) -> dict[str, Any]:
     if not plan.supported: raise RuntimeError("Unsupported host; no restore commands are permitted")
     actual = host_info()
     if actual != (plan.distro, plan.architecture):
@@ -268,20 +296,31 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     if unresolved: raise RuntimeError("Unresolved blockers prevent full restore: " + "; ".join(a.reason for a in unresolved))
     chosen = [a for a in plan.actions if a.status == "planned" and
               (not selected_set or a.name in selected_set or (a.kind == "apt" and a.name in coverage_targets))]
+    for action in (a for a in chosen if a.kind == "android-sdk-archive"):
+        if not android_sdk_terms_accepted:
+            raise RuntimeError("Read Google Android SDK terms and explicitly pass --android-sdk-terms-accepted before download/use")
+        if android_sdk_root is None:
+            raise RuntimeError("Android SDK installation requires --android-sdk-root pointing to a new directory")
+        android_tools.validate_install(action.archive, android_sdk_root, accepted_terms=android_sdk_terms_accepted)
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
     report = {"executed": [], "failed": None, "covered": {a.name: a.covered_by for a in covered}, "skipped": [a.name for a in plan.actions if a not in chosen and a not in covered], "partial": bool(selected_set), "note": "Explicit selection is a partial restore; it does not claim full parity." if selected_set else "Full planned restore."}
     for action in chosen:
         try:
-            result = runner(action.command, check=False, shell=False, timeout=300)
+            if action.kind == "android-sdk-archive":
+                android_tools.install_release(action.archive, android_sdk_root, accepted_terms=android_sdk_terms_accepted)
+            else:
+                result = runner(action.command, check=False, shell=False, timeout=300)
+                code = getattr(result, "returncode", result if isinstance(result, int) else 0)
+                if code != 0:
+                    raise RuntimeError(f"{action.name} failed with exit code {code}")
         except subprocess.TimeoutExpired as exc:
             report["failed"] = {"name": action.name, "error": f"timed out after {exc.timeout}s"}
-            raise RuntimeError(f"{action.name} timed out") from exc
-        except OSError as exc: report["failed"] = {"name": action.name, "error": str(exc)}; raise
-        code = getattr(result, "returncode", result if isinstance(result, int) else 0)
-        if code != 0:
-            report["failed"] = {"name": action.name, "returncode": code}; raise RuntimeError(f"{action.name} failed with exit code {code}")
+            raise PackageExecutionError(f"{action.name} timed out", report) from exc
+        except (RuntimeError, OSError, ValueError, zipfile.BadZipFile) as exc:
+            report["failed"] = {"name": action.name, "error": str(exc)}
+            raise PackageExecutionError(str(exc), report) from exc
         report["executed"].append(action.name)
     return report
 
@@ -291,17 +330,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--backup-root", type=Path)
     ap.add_argument("--execute", action="store_true", help="execute reviewed planned commands; default is dry plan")
     ap.add_argument("--select", action="append", default=[])
+    ap.add_argument("--android-sdk-root", type=Path, help="new SDK directory; no default home location or existing SDK overwrite")
+    ap.add_argument("--android-sdk-terms-accepted", action="store_true",
+                    help="user attests acceptance of Google Android SDK terms for this download/use; never inferred from --execute")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture)
     if args.execute:
         if plan.blockers and not args.select:
             print(json.dumps({"plan": plan.to_dict(), "error": "blockers present; use --select for an explicitly partial restore"}, indent=2)); return 2
-        try: report = execute(plan, args.select); output = {"plan": plan.to_dict(), "report": report}
+        try:
+            report = execute(plan, args.select, android_sdk_root=args.android_sdk_root,
+                             android_sdk_terms_accepted=args.android_sdk_terms_accepted)
+            output = {"plan": plan.to_dict(), "report": report}
+        except PackageExecutionError as exc:
+            print(json.dumps({"plan": plan.to_dict(), "error": str(exc), "report": exc.report}, indent=2)); return 1
         except subprocess.TimeoutExpired as exc:
             detail = f"command timed out after {exc.timeout}s"
             print(json.dumps({"plan": plan.to_dict(), "error": detail}, indent=2)); return 1
-        except (RuntimeError, OSError) as exc: print(json.dumps({"plan": plan.to_dict(), "error": str(exc)}, indent=2)); return 1
+        except (RuntimeError, OSError, ValueError, zipfile.BadZipFile) as exc:
+            print(json.dumps({"plan": plan.to_dict(), "error": str(exc)}, indent=2)); return 1
     else:
         output = plan.to_dict()
         # A dry plan is still useful output, but blockers must be visible to
