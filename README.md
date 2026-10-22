@@ -6,42 +6,91 @@ Strict Scoop backup and restore for Windows machines.
 
 It can also restore native Windows apps that should not be Scoop-owned. These are service-style exceptions for apps where Scoop's portable package loses important behavior.
 
-## One bootstrap command (Windows or Linux)
+## Native bootstrap entry points (Windows and Linux)
 
-With **PowerShell 7 (`pwsh`) already installed**, paste this same command into
-PowerShell on Windows or a POSIX shell on Linux:
+Use the platform's native shell: **PowerShell on Windows**, **Bash on Linux**.
+Both launchers announce their selected path before downloading or running the
+child, support a no-change route preview, and fail rather than silently switching
+platforms, downloading a missing local child, or ignoring a failed download/child.
+They share a launch contract, **not identical restoration features**.
 
-```text
-pwsh -NoProfile -Command "& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/bootstrap.ps1')))"
+### Windows: PowerShell
+
+The existing Windows restore requires **PowerShell 7 (`pwsh`) already installed**;
+this prerequisite is unchanged. Windows PowerShell 5.1 is not supported by
+`boot.ps1`, and the launcher does not install or silently substitute a runtime.
+Run this in PowerShell 7:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/bootstrap.ps1')))
 ```
 
-The launcher prints its selected platform and script **before** downloading or
-running the native bootstrap. Windows runs the existing `boot.ps1` restore
-(including its elevation and vault prompts). Linux runs `boot.sh`: a minimal
-Debian/Ubuntu (or Debian/Ubuntu-derived) setup that installs `git`, `curl`, and
-`ca-certificates` via `apt-get`, then clones the source to `~/Downloads/mainframe`.
-Linux requires root or `sudo`; an existing destination is rejected before changes.
-It does **not** restore Windows apps, browser state, accounts, services, or tasks
-from `mainframe-production`. Other operating systems and Linux distributions fail
-loudly rather than attempting a Windows restore. This is a shared entry point,
-not identical machine restoration on both platforms.
+It prints `mainframe: selected Windows -> boot.ps1` and delegates to the existing
+`boot.ps1` unchanged, including its elevation and vault prompts. The launcher's
+fail-loud contract does not change the restore's existing internal policies.
+`bootstrap.ps1` rejects Linux and other operating systems with guidance to use
+Bash on Linux; it no longer dispatches Bash from PowerShell.
 
-The command trusts scripts on this repository's `main` branch. Review them first;
-the URL becomes available when the launcher change is merged. The existing
-`da.gd/f85Bj` short link still targets the Windows-only `boot.ps1`; it is unchanged.
-PowerShell 7 is a prerequisite on **both** platforms, not installed by the launcher.
+### Linux: Bash (no PowerShell dependency)
+
+Run this in Bash. `curl` and working HTTPS CA certificates must already be
+available to fetch the entry point and child; neither PowerShell nor Git is
+required beforehand. The `&&` prevents execution if fetching the entry point fails:
+
+```bash
+bootstrap="$(curl --fail --show-error --silent --location https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/bootstrap.sh)" && bash -c "$bootstrap" --
+```
+
+It prints `mainframe: selected Linux -> boot.sh`. `boot.sh` supports Debian/Ubuntu
+and their derivatives with `apt-get`; it installs `git`, `curl`, and
+`ca-certificates`, then clones the source to `~/Downloads/mainframe`. Root or
+`sudo` is required. An existing destination is rejected before package changes.
+This is tools + clone only: it does **not** restore Windows archives, apps,
+accounts, browser state, services, or tasks from `mainframe-production`, nor port
+the Windows account helpers. Other Linux distributions fail explicitly in
+`boot.sh`; non-Linux operating systems fail in the Bash launcher.
+
+### Review and preview
+
+Remote commands trust executable scripts on this repository's `main` branch.
+The new Bash launcher URL becomes available there after this change is merged.
+Review the scripts first, or use a reviewed checkout. A remote command fetches the
+launcher itself even when previewing; the launcher's preview does not download or
+execute its child. Local execution uses a sibling child and never falls back to
+the network if it is missing. Remote execution downloads only the platform child
+into a temporary directory and removes it after success or failure.
 
 From a reviewed checkout, preview the route without downloads or execution:
 
-```text
+```powershell
+# Windows / PowerShell 7
 pwsh -NoProfile -File ./bootstrap.ps1 -DryRun
 ```
 
-Remove `-DryRun` to run it. Offline routing tests (native bootstraps are mocked):
+```bash
+# Linux / Bash
+bash ./bootstrap.sh --dry-run
+```
+
+Preview checks platform selection only; it does not validate restore prerequisites,
+Linux distribution support, privileges, or the destination. Remove the preview
+flag to run setup. For remote preview, append `-DryRun` to the Windows scriptblock
+invocation, or `--dry-run` after `--` in the Linux command above.
+
+Offline tests replace HTTP and child execution with inert fixtures:
 
 ```text
 pwsh -NoProfile -File ./tests/bootstrap.Tests.ps1
+bash ./tests/bootstrap.Tests.sh
+bash -n bootstrap.sh
+bash -n boot.sh
+bash -n tests/bootstrap.Tests.sh
 ```
+
+The PowerShell test harness can run under PowerShell 7 on Linux for mocked
+Windows dispatch and real wrong-platform rejection, but that does not test a live
+Windows restore. Bash tests do not install packages or clone the real source.
+The existing `da.gd/f85Bj` short link remains Windows-only and unchanged.
 
 ## What It Saves
 
@@ -458,5 +507,4 @@ To support another tool later, add its natural config/auth path to `tool-secrets
 <a href="https://github.com/FahadBinHussain/mainframe/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=FahadBinHussain/mainframe" alt="Contributors" />
 </a>
-
 
