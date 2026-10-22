@@ -73,6 +73,31 @@ streams and verifies bytes, checks free space, and limits expanded data to 100 G
 and any one member to 8 GiB by default. Limits can be raised explicitly with
 `--max-expanded-bytes` and `--max-member-bytes` after reviewing metadata.
 
+An additional **opt-in conversion**, separate from candidate copying, is available:
+
+```bash
+bash ./restore.sh /path/to/backup-directory --recover \
+  --destination /path/to/new-converted-export --convert-portable
+```
+
+The first explicit adapter generates an offline `.gitconfig` subset from the
+root Windows export using installed Git as a parser (includes disabled). Only
+`core.autocrlf`, `core.eol`, `core.safecrlf`, `diff.algorithm`,
+`merge.conflictstyle`, and `color.ui` have supported enum mappings. Windows
+`autocrlf=true` becomes `input`; `eol=crlf/native` becomes `lf`. Unsupported
+values, duplicate keys, and all identity/helper/include/path/credential settings
+are blocked with value-free decisions in the private manifest. Original bytes
+remain intact. No supported settings means no generated file; competing source
+configs mean no winner. A missing Git parser or malformed input is a conversion
+blocker, not loss of the original archive. No other app is converted yet.
+
+`--convert-portable` requires `--recover`; it can be combined with
+`--apply-portable` but neither implies the other. `conversion_counts` records
+`converted-subset` versus `blocked` sources in `restore-manifest.json`;
+`conversion_status=review-required` is not success for every setting and is not
+activation. The [implementation plan](plan.md) separates preservation,
+conversion/staging, future native activation, and impossible/excluded state.
+
 Exit **3** means a usable inventory/export exists but operational restore remains
 incomplete. Exit **2** means invalid input, preflight, or recovery failure. A
 verified raw copy is not an installed app, usable login, or activated setting.

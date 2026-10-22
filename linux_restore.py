@@ -18,7 +18,9 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 
-VERSION = 2
+from linux_migrations import MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config
+
+VERSION = 3
 CHUNK = 1024 * 1024
 MAX_MEMBER_BYTES = 8 * 1024 ** 3
 MAX_EXPANDED_BYTES = 100 * 1024 ** 3
@@ -313,8 +315,79 @@ def write_private_json(path, obj):
         os.fsync(out.fileno())
 
 
+def stage_conversions(report, destination):
+    """Convert only explicit maps; keep conversion failures separate from A.
+
+    Count all mapped source records before reading any payload so quick/full
+    duplicates (even blocked members) cannot pick an archive-order winner.
+    """
+    stage = destination / 'home-staging'
+    sources = [e for e in report['entries']
+               if unicodedata.normalize('NFC', e.get('normalized_path') or '').casefold() in MIGRATION_MAP]
+    targets = Counter(MIGRATION_MAP[e['normalized_path'].casefold()]['target'] for e in sources)
+    for entry in sources:
+        mapping = MIGRATION_MAP[entry['normalized_path'].casefold()]
+        audit = {'adapter': mapping['adapter'], 'status': 'blocked', 'activation': 'not-performed'}
+        entry['migration'] = audit
+        out = stage / mapping['target']
+        temporary = out.with_name(out.name + '.convert-partial')
+        if targets[mapping['target']] != 1 or out.exists() or out.is_symlink():
+            audit['reason'] = 'conversion-target-conflict'
+            continue
+        if entry['normalized_path'] not in MIGRATION_MAP:
+            audit['reason'] = 'unsupported-source-layout'
+            continue
+        if entry['is_dir'] or entry['status'] != 'bytes-preserved':
+            audit['reason'] = 'source-not-verified-regular-file'
+            continue
+        if entry['size'] > MAX_CONFIG_BYTES:
+            audit['reason'] = 'config-size-limit'
+            continue
+        source = destination / 'recovered' / entry['archive'] / entry['normalized_path']
+        temporary_created = False
+        try:
+            with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as stream:
+                payload = stream.read(MAX_CONFIG_BYTES + 1)
+            if hashlib.sha256(payload).hexdigest() != entry['sha256']:
+                audit['reason'] = 'source-verification-failed'
+                continue
+            output, audit = convert_git_config(payload)
+            entry['migration'] = audit
+            if output is None:
+                continue
+            make_private_dirs(out.parent)
+            # Verify a private temporary first, then publish without overwrite.
+            with private_file(temporary) as stream:
+                temporary_created = True
+                stream.write(output)
+                stream.flush()
+                os.fsync(stream.fileno())
+            digest = hashlib.sha256(output).hexdigest()
+            if file_hash(temporary) != digest:
+                raise ValueError('Output verification failed')
+            directory = secure_directory(out.parent)
+            try:
+                os.link(temporary.name, out.name, src_dir_fd=directory,
+                        dst_dir_fd=directory, follow_symlinks=False)
+            finally:
+                os.close(directory)
+            audit.update(target=str(out.relative_to(destination)), sha256=digest,
+                         size=len(output))
+        except (OSError, ValueError):
+            # Do not expose parser/input values or remove preserved originals.
+            audit.update(status='blocked', reason='conversion-write-or-read-failed')
+        finally:
+            try:
+                if temporary_created and temporary.is_file() and not temporary.is_symlink():
+                    temporary.unlink()
+            except OSError:
+                audit.update(status='blocked', reason='conversion-temporary-cleanup-failed')
+    report['conversion_counts'] = dict(Counter(e['migration']['status'] for e in sources))
+
+
 def copy_recovery(root, destination, apply_portable=False, manifest_path=None, mode='full',
-                  max_member_bytes=MAX_MEMBER_BYTES, max_expanded_bytes=MAX_EXPANDED_BYTES):
+                  max_member_bytes=MAX_MEMBER_BYTES, max_expanded_bytes=MAX_EXPANDED_BYTES,
+                  convert_portable=False):
     root = Path(root)
     archives, entries, errors = inventory(root, manifest_path, mode)
     expanded = sum(e['size'] for e in entries if not e.get('materialization_blocked'))
@@ -325,11 +398,15 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
     if errors:
         raise ValueError('Input preflight failed: ' + '; '.join(errors))
     needed = sum(a['size'] for a in archives) + expanded * (2 if apply_portable else 1)
+    if convert_portable:
+        needed += MAX_CONFIG_BYTES * 2  # generated subset plus private publication temporary
     if Path(destination).parent.is_dir() and shutil.disk_usage(Path(destination).parent).free < needed:
         raise ValueError('Insufficient free space for verified raw archives and offline materialization.')
     destination = safe_dest(destination, root)
     report = {'version': VERSION, 'mode': mode, 'archives': archives, 'entries': entries, 'errors': [],
               'data_preservation_status': 'in-progress', 'operational_status': 'incomplete', 'complete': False,
+              'conversion_status': 'requested' if convert_portable else 'not-requested',
+              'activation_status': 'not-performed',
               'action_blockers': ACTION_BLOCKERS,
               'limitations': ['Every original ZIP is retained byte-for-byte; unsafe/encrypted members remain in that raw ZIP.',
                               'Native targets are OFFLINE export candidates only. No settings, tasks, services, packages, credentials, or global instructions are activated.']}
@@ -339,7 +416,7 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
         recovered = destination / 'recovered'
         recovered.mkdir(mode=0o700)
         stage = destination / 'home-staging'
-        if apply_portable:
+        if apply_portable or convert_portable:
             stage.mkdir(mode=0o700)
         for arc in archives:
             src = root / arc['name']
@@ -394,6 +471,9 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                         report['errors'].append('Member materialization failed; raw ZIP retained. See private entry status.')
         report['data_preservation_status'] = 'raw-archives-verified' if not report['errors'] else 'raw-verified-with-materialization-errors'
         report['preserved_raw_bytes'] = sum(a['size'] for a in archives)
+        if convert_portable:
+            stage_conversions(report, destination)
+            report['conversion_status'] = 'review-required'
     except (OSError, ValueError, RuntimeError, BadZipFile) as exc:
         report['errors'].append(type(exc).__name__ + ': ' + str(exc))
         report['data_preservation_status'] = 'failed'
@@ -415,10 +495,13 @@ def main(argv=None):
     group.add_argument('--recover', action='store_true', help='preserve ZIPs and materialize safe members in a NEW offline directory')
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--apply-portable', action='store_true', help='also export native-path candidates to offline home-staging, NOT live HOME')
+    parser.add_argument('--convert-portable', action='store_true', help='convert explicit allowlisted settings into offline home-staging; no activation')
     parser.add_argument('--manifest', type=Path, help='public path manifest; never a credential payload')
     parser.add_argument('--max-member-bytes', type=int, default=MAX_MEMBER_BYTES)
     parser.add_argument('--max-expanded-bytes', type=int, default=MAX_EXPANDED_BYTES)
     args = parser.parse_args(argv)
+    if args.convert_portable and not args.recover:
+        parser.error('--convert-portable requires --recover')
     if args.apply_portable and not args.recover:
         parser.error('--apply-portable requires --recover')
     if args.destination and not args.recover:
@@ -428,11 +511,11 @@ def main(argv=None):
             parser.error('--recover requires --destination')
         try:
             report = copy_recovery(args.backup, args.destination, args.apply_portable, args.manifest, args.mode,
-                                   args.max_member_bytes, args.max_expanded_bytes)
+                                   args.max_member_bytes, args.max_expanded_bytes, args.convert_portable)
         except (ValueError, OSError) as exc:
             print('BLOCKED: ' + str(exc), file=sys.stderr)
             return 2
-        print(json.dumps({k: report[k] for k in ('data_preservation_status', 'operational_status', 'category_counts')}, sort_keys=True))
+        print(json.dumps({k: report[k] for k in ('data_preservation_status', 'operational_status', 'category_counts', 'conversion_status', 'activation_status')}, sort_keys=True))
         return 2 if report['errors'] else 3
     archives, entries, errors = inventory(args.backup, args.manifest, args.mode)
     report = {'version': VERSION, 'mode': args.mode, 'archives': archives, 'entries': entries, 'errors': errors,
