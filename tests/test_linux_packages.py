@@ -1,6 +1,7 @@
 import json
 import contextlib
 import io
+import os
 import subprocess
 import sys
 import unittest
@@ -77,6 +78,51 @@ class LinuxPackagesTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "safe failed"): lp.execute(plan, runner=runner)
         self.assertEqual(len(calls), 2); self.assertFalse(calls[0][1]["shell"]); self.assertFalse(calls[1][1]["shell"])
         self.assertEqual(calls[1][0][:2], ["sudo", "-n"])
+        self.assertEqual(calls[0][1]["timeout"], 30); self.assertEqual(calls[1][1]["timeout"], 300)
+
+    def test_root_apt_action_does_not_require_sudo(self):
+        with patch.object(lp.os, "geteuid", return_value=0):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+        action = next(a for a in plan.actions if a.kind == "apt" and a.status == "planned")
+        self.assertEqual(action.command[:3], ["apt-get", "install", "-y"])
+
+    def test_non_root_apt_action_uses_noninteractive_sudo(self):
+        with patch.object(lp.os, "geteuid", return_value=1000):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+        action = next(a for a in plan.actions if a.kind == "apt" and a.status == "planned")
+        self.assertEqual(action.command[:3], ["sudo", "-n", "apt-get"])
+
+    def test_winget_ids_must_be_nonempty_strings(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            for filename, key, value in (
+                ("scoop-allowed.json", "apps", ["curl"]),
+                ("winget-allowed.json", "packages", [{"id": []}, {"id": "  "}, None, 42, {"id": "Vendor.Valid"}]),
+                ("pnpm-allowed.json", "packages", ["tool"]),
+                ("uv-allowed.json", "packages", [{"name": "tool"}]),
+                ("go-allowed.json", "packages", ["example.com/tool"]),
+            ):
+                (root / filename).write_text(json.dumps({key: value}))
+            plan = lp.build_plan(root, distro="ubuntu", architecture="x86_64")
+        invalid = [a for a in plan.actions if a.kind == "winget" and a.status == "blocked"]
+        self.assertEqual(len(invalid), 5)
+        self.assertTrue(all("Invalid WinGet package ID" in a.reason for a in invalid[:4]))
+        self.assertIsInstance(next(a for a in invalid if a.name == "Vendor.Valid").name, str)
+
+    def test_install_timeout_is_reported_and_never_shells(self):
+        plan = lp.Plan(True, "ubuntu", "x86_64", [lp.Action("pnpm", "tool", ["pnpm", "add", "--global", "--", "tool"])])
+        def runner(command, **kwargs):
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            lp.execute(plan, runner=runner)
+
+    def test_cli_returns_json_for_timeout(self):
+        output = io.StringIO()
+        timeout = subprocess.TimeoutExpired(["pnpm"], 300)
+        with patch.object(lp, "execute", side_effect=timeout), contextlib.redirect_stdout(output):
+            self.assertEqual(lp.main(["--repo", str(ROOT), "--execute", "--select", "@googleworkspace/cli", "--distro", "ubuntu", "--arch", "x86_64"]), 1)
+        self.assertIn("timed out", json.loads(output.getvalue())["error"])
 
     def test_existing_venv_is_never_overwritten(self):
         from tempfile import TemporaryDirectory

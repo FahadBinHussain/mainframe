@@ -86,15 +86,23 @@ try {
     Invoke-MainframeBootstrap
     Assert-True ($script:dispatches[-1].Path -eq (Join-Path $fixtureDirectory 'boot.ps1')) 'local paths with spaces preserved'
 
-    # Exercise native exit checking using an inert .ps1, never the real child.
+    # Exercise an inert native child on Windows, never the real bootstrap.
     $fakeChild = Join-Path $fixtureDirectory 'inert-child.ps1'
-    Set-Content -LiteralPath $fakeChild -Value '$global:LASTEXITCODE = 37'
-    & {
-        function Join-Path { param($Path, $ChildPath) return $fakeChild }
-        Assert-Throws { & $nativeDispatch -Platform Windows -Path 'never-executed' } '*failed (exit 37)*'
-        Set-Content -LiteralPath $fakeChild -Value '$global:LASTEXITCODE = 0'
-        & $nativeDispatch -Platform Windows -Path 'never-executed'
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeChild -Value 'exit 37'
+        Assert-Throws { & $nativeDispatch -Platform Windows -Path $fakeChild } '*failed (exit 37)*'
+        Set-Content -LiteralPath $fakeChild -Value 'exit 0'
+        & $nativeDispatch -Platform Windows -Path $fakeChild
         Assert-True ($LASTEXITCODE -eq 0) 'inert native child success'
+    } else {
+        Set-Content -LiteralPath $fakeChild -Value '$global:LASTEXITCODE = 37'
+        & {
+            function Join-Path { param($Path, $ChildPath) return $fakeChild }
+            Assert-Throws { & $nativeDispatch -Platform Windows -Path 'never-executed' } '*failed (exit 37)*'
+            Set-Content -LiteralPath $fakeChild -Value '$global:LASTEXITCODE = 0'
+            & $nativeDispatch -Platform Windows -Path 'never-executed'
+            Assert-True ($LASTEXITCODE -eq 0) 'inert native child success'
+        }
     }
 } finally {
     Remove-Item -LiteralPath $fixtureDirectory -Recurse -Force

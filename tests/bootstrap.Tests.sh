@@ -29,12 +29,14 @@ reset_doubles() {
     dispatches=0
     dispatch_path=''
     dispatch_status=0
+    rm -f "$TEST_ROOT/dispatch.path"
 }
 curl() { downloads=$((downloads + 1)); return 99; }
 uname() { printf '%s\n' "$test_platform"; }
 mainframe_dispatch() {
     dispatches=$((dispatches + 1))
     dispatch_path=$1
+    printf '%s' "$1" > "$TEST_ROOT/dispatch.path"
     return "$dispatch_status"
 }
 
@@ -72,7 +74,8 @@ reset_doubles
 caller_exit_trap=$(trap -p EXIT)
 mainframe_run >"$TEST_ROOT/local-run.txt" 2>&1; status=$?
 assert_true "$((status == 0))" 'local route succeeds'
-assert_true "$((dispatches == 1))" 'local route dispatches once'
+assert_true "$([[ -f "$TEST_ROOT/dispatch.path" ]] && echo 1 || echo 0)" 'local route dispatches once'
+dispatch_path=$(cat "$TEST_ROOT/dispatch.path")
 assert_true "$(assert_contains "$dispatch_path" 'local fixture with spaces/boot.sh')" 'local route preserves spaces'
 assert_true "$((downloads == 0))" 'local route does not download'
 assert_true "$([[ "$(trap -p EXIT)" == "$caller_exit_trap" ]] && echo 1 || echo 0)" 'local dispatch preserves caller cleanup trap'
@@ -92,6 +95,26 @@ assert_true "$((status != 0))" 'unsupported OS fails'
 assert_true "$((dispatches == 0))" 'unsupported OS does not dispatch'
 assert_true "$((downloads == 0))" 'unsupported OS does not download'
 
+# Sourced remote calls must restore all caller traps on every return path.
+saved_remote_source=$(declare -f mainframe_remote_source)
+mainframe_remote_source() { return "$download_status"; }
+MAINFRAME_SOURCE_FILE=''
+trap ':' HUP INT TERM
+before_traps=$(trap -p EXIT HUP INT TERM)
+for outcome in success download-failure child-failure; do
+    reset_doubles
+    download_status=0
+    case "$outcome" in
+        download-failure) download_status=7 ;;
+        child-failure) dispatch_status=23 ;;
+    esac
+    mainframe_run >"$TEST_ROOT/traps-$outcome.txt" 2>&1; status=$?
+    assert_true "$([[ "$(trap -p EXIT HUP INT TERM)" == "$before_traps" ]] && echo 1 || echo 0)" "remote $outcome restores all caller traps"
+    assert_true "$([[ -z "$MAINFRAME_TEMPORARY_DIRECTORY" ]] && echo 1 || echo 0)" "remote $outcome cleans temporary directory"
+done
+trap - HUP INT TERM
+eval "$saved_remote_source"
+
 # External command doubles used by actual `bash -c "$payload" --` integration tests.
 MOCK_BIN="$TEST_ROOT/mock-bin"
 mkdir -p "$MOCK_BIN"
@@ -99,7 +122,7 @@ MOCK_UNAME_LOG="$TEST_ROOT/uname.log"
 MOCK_CURL_LOG="$TEST_ROOT/curl.args"
 MOCK_CURL_FIXTURE="$TEST_ROOT/remote-boot.sh"
 MOCK_BOOT_MARKER="$TEST_ROOT/boot-ran.marker"
-printf '# inert downloaded fixture\nprintf %%s remote > "$MOCK_BOOT_MARKER"\nexit "${MOCK_BOOT_STATUS:-0}"\n' > "$MOCK_CURL_FIXTURE"
+printf '# inert downloaded fixture\nprintf %%s remote > "$MOCK_BOOT_MARKER"\nif [[ ${MOCK_BOOT_WAIT:-0} == 1 ]]; then trap '\''printf %%s term > "$MOCK_BOOT_TERM_MARKER"; exit 143'\'' TERM; while :; do sleep 1; done; fi\nexit "${MOCK_BOOT_STATUS:-0}"\n' > "$MOCK_CURL_FIXTURE"
 cat > "$MOCK_BIN/uname" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' Linux
@@ -182,6 +205,20 @@ signal_temp=$(cat "$MOCK_CURL_LOG.output")
 assert_true "$((signal_status != 0))" 'TERM exits nonzero'
 assert_true "$([[ ! -e "$(dirname -- "$signal_temp")" ]] && echo 1 || echo 0)" 'TERM cleans remote temp'
 assert_true "$([[ ! -e "$MOCK_BOOT_MARKER" ]] && echo 1 || echo 0)" 'TERM does not dispatch downloaded fixture'
+
+# TERM while an inert child is running must reach the child before cleanup.
+rm -f "$MOCK_CURL_LOG" "$MOCK_CURL_LOG.output" "$MOCK_BOOT_MARKER" "$TEST_ROOT/term-child.marker"
+PATH="$mock_path" MOCK_CURL_LOG="$MOCK_CURL_LOG" MOCK_CURL_FIXTURE="$MOCK_CURL_FIXTURE" \
+    MOCK_BOOT_MARKER="$MOCK_BOOT_MARKER" MOCK_BOOT_TERM_MARKER="$TEST_ROOT/term-child.marker" \
+    MOCK_BOOT_WAIT=1 bash -c "$payload" -- >"$TEST_ROOT/child-signal.txt" 2>&1 &
+child_signal_pid=$!
+for _ in {1..50}; do [[ -s "$MOCK_BOOT_MARKER" ]] && break; sleep 0.02; done
+kill -TERM "$child_signal_pid" 2>/dev/null || true
+wait "$child_signal_pid"; child_signal_status=$?
+assert_true "$((child_signal_status != 0))" 'TERM during child exits nonzero'
+assert_true "$([[ -f "$TEST_ROOT/term-child.marker" ]] && echo 1 || echo 0)" 'TERM is forwarded to running child'
+child_signal_temp=$(cat "$MOCK_CURL_LOG.output")
+assert_true "$([[ ! -e "$(dirname -- "$child_signal_temp")" ]] && echo 1 || echo 0)" 'child TERM waits before cleaning remote temp'
 
 launcher_text=$(cat "$LAUNCHER")
 assert_true "$(assert_contains "$launcher_text" 'mainframe_signal_exit')" 'signal handler is installed'

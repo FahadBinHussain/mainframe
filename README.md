@@ -126,6 +126,8 @@ bootstrap="$(curl --fail --show-error --silent --location https://raw.githubuser
 
 `--setup-tools` supports Debian/Ubuntu-family systems with `apt-get`, requires root
 or `sudo`, and rejects an existing `~/Downloads/mainframe` before package changes.
+It validates Python 3.10+ after prerequisite installation; an older distribution
+Python fails clearly before cloning and requires a separate compatible runtime.
 Restore/package modes require their sibling files in a reviewed local checkout;
 the single-file remote child does not silently fetch them. A bare Linux bootstrap
 now fails without changes instead of misleadingly doing setup as a restore.

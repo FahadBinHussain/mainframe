@@ -86,6 +86,21 @@ class GitAdapterTests(unittest.TestCase):
             self.assertEqual(result['blocked_settings'], 1)
             self.assertNotIn('SYNTHETIC_VALUE', json.dumps(result))
 
+    def test_multiple_arbitrary_preference_values_never_enter_decisions(self):
+        marker_values = {
+            key: f'SYNTHETIC_PRIVATE_PREFERENCE_{index}_\\nnext'
+            for index, key in enumerate(lm.RULES, 1)
+        }
+        config = ''.join(f'[{section}]\n {option} = "{value}"\n'
+                         for (section, option), value in
+                         ((key.split('.'), value) for key, value in marker_values.items()))
+        output, result = self.convert(config)
+        self.assertIsNone(output)
+        serialized = json.dumps(result)
+        for value in marker_values.values():
+            self.assertNotIn(value.split('\\n', 1)[0], serialized)
+        self.assertEqual(result['blocked_settings'], len(marker_values))
+
     def test_unknown_empty_and_bare_values_produce_no_output(self):
         for config in ('', '[user]\n email = example@example.invalid\n', '[core]\n autocrlf\n'):
             output, result = self.convert(config)

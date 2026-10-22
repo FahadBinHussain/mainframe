@@ -181,6 +181,86 @@ class LinuxRestoreTests(unittest.TestCase):
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/persist/mpv/config').read_bytes(), b'one')
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/persist/mpv-git/config').read_bytes(), b'two')
 
+    def test_staging_failure_keeps_verified_member_and_removes_partial_export(self):
+        payload = b'arbitrary-user-fixture'
+        self.archive([('UserProfile/.ssh/id_fixture', payload)])
+        original = lr.stream_copy
+
+        def fail_only_staging(source, target, limit=None):
+            if 'home-staging' in target.parts:
+                class FailingReader:
+                    def __init__(self, wrapped):
+                        self.wrapped = wrapped
+                        self.reads = 0
+
+                    def read(self, size=-1):
+                        self.reads += 1
+                        if self.reads > 1:
+                            raise OSError('synthetic staging failure')
+                        return self.wrapped.read(size)
+
+                return original(FailingReader(source), target, limit)
+            return original(source, target, limit)
+
+        with patch.object(lr, 'stream_copy', side_effect=fail_only_staging):
+            report = self.recover(True)
+        entry = report['entries'][0]
+        recovered = self.dest / 'recovered/mainframe-quick.zip/UserProfile/.ssh/id_fixture'
+        staged = self.dest / 'home-staging/.ssh/id_fixture'
+        self.assertEqual(recovered.read_bytes(), payload)
+        self.assertFalse(staged.exists())
+        self.assertEqual(entry['status'], 'bytes-preserved')
+        self.assertEqual(entry['staging_error'], 'OSError')
+        self.assertNotIn('synthetic staging failure', json.dumps(report))
+
+    def test_staging_race_does_not_delete_raced_in_file(self):
+        payload = b'arbitrary-user-fixture'
+        self.archive([('UserProfile/.ssh/id_fixture', payload)])
+        original = lr.stream_copy
+        raced = self.dest / 'home-staging/.ssh/id_fixture'
+
+        def race_on_staging(source, target, limit=None):
+            if target == raced:
+                target.write_bytes(b'preexisting-race-fixture')
+            return original(source, target, limit)
+
+        with patch.object(lr, 'stream_copy', side_effect=race_on_staging):
+            report = self.recover(True)
+        entry = report['entries'][0]
+        self.assertEqual(entry['status'], 'bytes-preserved')
+        self.assertEqual(entry['staging_error'], 'FileExistsError')
+        self.assertEqual(raced.read_bytes(), b'preexisting-race-fixture')
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/UserProfile/.ssh/id_fixture').read_bytes(), payload)
+
+    def test_stream_cleanup_failure_preserves_original_error(self):
+        import io
+        target = self.root / 'owned-partial'
+        original = Path.unlink
+
+        def refuse_cleanup(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError('synthetic cleanup failure')
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, 'unlink', refuse_cleanup):
+            with self.assertRaisesRegex(ValueError, 'limit'):
+                lr.stream_copy(io.BytesIO(b'payload'), target, limit=1)
+        self.assertTrue(target.exists())
+
+    def test_staging_hash_mismatch_removes_unverified_output(self):
+        self.archive([('UserProfile/.ssh/id_fixture', b'synthetic-original')])
+        original = lr.stream_copy
+        def mismatch(source, target, limit=None):
+            digest, size = original(source, target, limit)
+            return ('0' * 64 if 'home-staging' in target.parts else digest), size
+        with patch.object(lr, 'stream_copy', side_effect=mismatch):
+            report = self.recover(True)
+        entry = report['entries'][0]
+        self.assertEqual(entry['status'], 'bytes-preserved')
+        self.assertEqual(entry['staging_error'], 'ValueError')
+        self.assertFalse((self.dest / 'home-staging/.ssh/id_fixture').exists())
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/UserProfile/.ssh/id_fixture').read_bytes(), b'synthetic-original')
+
     def test_public_secret_manifest_all_items_accounted(self):
         self.manifest.write_text(json.dumps({'items': [{'archivePath': 'UserProfile/.ssh'}, {'archivePath': 'UserProfile/.local/share/opencode', 'disabled': True}]}))
         self.archive([('mainframe-secrets.zip', b'opaque')])

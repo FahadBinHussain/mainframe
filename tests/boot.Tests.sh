@@ -61,4 +61,22 @@ expect_fail --setup-tools
 rmdir "$HOME/Downloads/mainframe"
 ln -s "$root/nonexistent" "$HOME/Downloads/mainframe"
 expect_fail --setup-tools
+rm "$HOME/Downloads/mainframe"
+# Even an apparently successful apt install must not hide an old Python runtime.
+cat > "$root/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' python3 "$@" >> "$MOCK_LOG"
+exit "${MOCK_PYTHON_STATUS:-0}"
+EOF
+chmod +x "$root/bin/python3"
+if MOCK_PYTHON_STATUS=1 bash "$root/checkout/boot.sh" --setup-tools > "$root/output" 2>&1; then
+    printf 'FAIL: incompatible Python accepted\n' >&2; exit 1
+fi
+grep -Fq 'Python 3.10+' "$root/output"; pass
+! grep -Fxq git "$MOCK_LOG"; pass
+rm "$MOCK_LOG"
+bash "$root/checkout/boot.sh" --setup-tools > "$root/output" 2>&1
+grep -Fq "$HOME/Downloads/mainframe/docs/linux-restore-coverage.md" "$root/output"; pass
+grep -Fq "bash $HOME/Downloads/mainframe/restore.sh --help" "$root/output"; pass
+grep -Fq 'sys.version_info >= (3, 10)' "$MOCK_LOG"; pass
 printf 'PASS: %s offline boot checks; no package installation or restore executed.\n' "$checks"

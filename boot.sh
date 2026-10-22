@@ -53,6 +53,8 @@ else
 fi
 "${elevate[@]}" apt-get update
 "${elevate[@]}" apt-get install -y git curl ca-certificates python3
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || fail 'Python 3.10+ is required. The distribution python3 package is too old or unavailable; provide a compatible runtime separately. Source preparation is incomplete.'
 mkdir -p "$(dirname "$mainframe_dir")"
 git clone https://github.com/FahadBinHussain/mainframe.git "$mainframe_dir"
-printf 'mainframe: source ready. Review docs/linux-restore-coverage.md, then run restore.sh --help. No backup has been restored.\n'
+printf 'mainframe: source ready. Review %s/docs/linux-restore-coverage.md\n' "$mainframe_dir"
+printf 'Then run: bash %q --help\nNo backup has been restored.\n' "$mainframe_dir/restore.sh"
