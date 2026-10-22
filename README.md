@@ -124,6 +124,37 @@ python3 ./linux_packages.py
 # partial reviewed subset. Neither flag is needed for inspection.
 ```
 
+**Android: same toolkit on both systems.** Scoop's `android-clt` is the Android
+SDK Command-Line Tools package; `sdkmanager` is one tool inside that package.
+Linux uses Google's corresponding Linux ZIP, not `adb` or the separate Android
+CLI. The planner reads the current Scoop manifest, then matches its build to the
+Linux archive and SHA-256 on [Google's official page](https://developer.android.com/studio).
+Missing/mismatched metadata blocks the action rather than guessing a release.
+Planning reads public metadata only; it never downloads or runs the SDK.
+This archive adapter supports x86_64; aarch64 remains explicitly blocked.
+
+After personally reading and accepting the [Google SDK terms](https://developer.android.com/studio/terms.html),
+an explicitly selected install into a **new** directory is:
+
+```bash
+python3 ./linux_packages.py --execute --select android-clt \
+  --android-sdk-root /path/to/new/android-sdk --android-sdk-terms-accepted
+```
+
+The installer verifies SHA-256 before extraction and creates
+`cmdline-tools/latest/bin/sdkmanager` under that SDK root. It never invokes
+`sdkmanager --licenses`, writes license acceptance files, installs Java or extra
+SDK packages, or changes shell profiles. Set `ANDROID_HOME` to the SDK root and
+add `$ANDROID_HOME/cmdline-tools/latest/bin` and `$ANDROID_HOME/platform-tools`
+to `PATH` yourself. `platform-tools` starts empty; this does not install `adb`.
+Matching the toolkit build does not prove Java/runtime compatibility or full
+Windows SDK-state restoration.
+
+Selected package installs are sequential, not transactional. Terms, destination,
+and APT metadata checks happen before installs, but a later download or install
+can still fail after an earlier package changed the machine. Error JSON includes
+the executed actions and failed action; there is no automatic package rollback.
+
 For source preparation only, the remote command requires `curl` and HTTPS CA
 certificates. It installs four prerequisites and clones source, **not a backup**:
 
