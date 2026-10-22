@@ -69,6 +69,25 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertNotIn("7zip19.00-helper", report["skipped"])
         self.assertTrue(report["partial"])
 
+    def test_helper_selection_does_not_select_same_named_other_manager_action(self):
+        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
+        plan.actions.append(lp.Action("pnpm", "7zip", ["pnpm", "add", "--global", "--", "7zip"]))
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        report = lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        self.assertEqual(runner.call_count, 2)
+        self.assertTrue(all(call.args[0][0] != "pnpm" for call in runner.call_args_list))
+        self.assertEqual(report["executed"], ["7zip"])
+        self.assertEqual(report["covered"], {"7zip19.00-helper": "7zip"})
+
+    def test_non_apt_name_collision_cannot_satisfy_native_coverage(self):
+        plan = self.helper_plan(["7zip19.00-helper"])
+        plan.actions = [a for a in plan.actions if a.name != "7zip"]
+        plan.actions.append(lp.Action("pnpm", "7zip", ["pnpm", "add", "--global", "--", "7zip"]))
+        runner = Mock()
+        with self.assertRaisesRegex(RuntimeError, "Missing planned native coverage target"):
+            lp.execute(plan, ["7zip19.00-helper"], runner=runner)
+        runner.assert_not_called()
+
     def test_selecting_native_target_also_reports_helper_coverage(self):
         plan = self.helper_plan(["7zip19.00-helper", "7zip"])
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
