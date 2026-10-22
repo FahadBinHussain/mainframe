@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: production metadata baseline plus fixture-tested Git subset conversion.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: offline fixture-tested recovery and Git subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -20,14 +20,14 @@ The Linux path is deliberately **offline and non-destructive**:
 |---|---|
 | `boot.sh --restore [args]` | Forwards all remaining arguments verbatim to the checked-out `restore.sh`, which invokes `linux_restore.py`. |
 | `boot.sh --packages [args]` | Requires `python3` and forwards all remaining arguments verbatim to `linux_packages.py`. |
-| `boot.sh --setup-tools` | The only setup mode: validates Linux and Debian/Ubuntu-family support, requires `apt-get`, installs exactly four prerequisites (`git`, `curl`, `ca-certificates`, `python3`), then clones source to `$HOME/Downloads/mainframe` if that target does not exist. It does not restore a backup. |
+| `boot.sh --setup-tools` | The only setup mode: validates Linux and Debian/Ubuntu-family support, requires `apt-get`, installs exactly four prerequisites (`git`, `curl`, `ca-certificates`, `python3`), validates that the installed Python is 3.10+, then clones source to `$HOME/Downloads/mainframe` if that target does not exist. An older distribution Python is an explicit setup failure requiring a separate compatible runtime. It does not restore a backup. |
 | no arguments or an unknown mode | Fails without changing the system. |
 
 The setup clone is source preparation only. It is not package restoration, account restoration, browser restoration, service activation, or a 100% runtime conversion.
 
 ## Persisted application inventory
 
-The following is the complete persist-app metadata inventory requested for this release. Each row states the exact current implementation: either the relative offline staging target in `home-staging/` or the current blocker. **“Candidate” always means layout only; operational compatibility is unconfirmed.** There is no blanket `%APPDATA%`/`%LOCALAPPDATA%` to XDG mapping.
+The following describes application schemas recognized by the classifier, not a required set of installed applications or a particular user’s configuration. Each row states the exact current implementation: either the relative offline staging target in `home-staging/` or the current blocker. **“Candidate” always means layout only; operational compatibility is unconfirmed.** There is no blanket `%APPDATA%`/`%LOCALAPPDATA%` to XDG mapping.
 
 | Persist app | Current implementation | Staging candidate or blocker |
 |---|---|---|
@@ -129,35 +129,33 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Pinned opencode v2 | Windows restore recognizes `opencode2` as the pinned v2 install and refuses to run the v1 fork patcher against it because that would overwrite v2; it only runs the v1 patcher when v1 is installed and v2 is absent. Linux stages opencode config/skills/plugins only, excludes `node_modules`, and does not install or activate the v2 runtime. |
 | Shortcuts and running processes | Windows package-manager hooks may create shell integration. The restore explicitly launches Edge during extension recovery, stops AnyDesk/Directory Opus processes for persist copying, and restarts processes that were previously running. Linux does not activate `.lnk`, launch browsers, stop/restart apps, or infer startup services; deliberate desktop/service integration remains unimplemented. |
 | Scheduled tasks | Windows exports only explicitly selected task XML (the default selection is empty). Linux preserves selected XML as documentation; no trigger, credential, SID, timezone, or action is converted to systemd/cron. |
-| Registry and associations | Windows exports user environment/PATH, mpv context-menu, qBittorrent, VLC, and 7-Zip association `.reg` files. The verified production release contains **102 association `.reg` files** (not 49), plus the environment/context exports. Linux retains them as text/reference only; it does not import registry keys or shell verbs. |
+| Registry and associations | Windows exports user environment/PATH, mpv context-menu, qBittorrent, VLC, and 7-Zip association `.reg` files. The number and contents of association exports are determined from each supplied archive, not a release-specific baseline. Linux retains them as text/reference only; it does not import registry keys or shell verbs. |
 | OBS and qBittorrent | Windows copies scenes/profiles/config while excluding caches/logs/crashes and qBittorrent downloads/cache/logs. Linux exposes only the explicit candidate targets above; source paths, devices, encoders, WebUI credentials, and client versions need review. |
 | Browser and account state | Edge/profile and account material may be preserved as opaque bytes or metadata, but DPAPI/app-bound encryption, Secure Preferences, credentials, and Windows identity are not activated. SSH gets a candidate `.ssh` relative export with permission remediation; auth still requires review/re-authentication. |
 | Short-lived setup | `boot.sh --setup-tools` installs only the four prerequisites and clones the public source checkout. It does not run any restore action. |
 
-## Archive metadata (sanitized)
+## Dynamic inventory and validation
 
-The production release was verified from archive metadata only; no backup payload contents were inspected, decrypted, or uploaded. Do not include a machine hostname or full production folder path in documentation.
+Archive sizes, member counts, application presence, user preferences, account names,
+and host paths are input data, never migration constants. Inventory derives archive
+metadata from the supplied ZIP central directories. No production payload is needed
+to develop or test the rules; the offline suites construct synthetic archives.
+Application names and relative staging paths above describe app/platform schemas,
+not user-specific values. Unknown applications and settings remain preserved with
+explicit blockers rather than being replaced by a known user's preferences.
 
-| Archive | Recorded inventory |
-|---|---|
-| `mainframe-quick.zip` | **241,217,664 bytes; 3,686 entries.** Quick/control archive containing manifests, native/reference exports, scripts, browser/agent metadata, and **102 association `.reg` files**. |
-| `mainframe-persist.zip` | **2,097,889,681 bytes; 55,868 entries.** Persist application tree and retained app data, subject to the backup exclusions. |
+Package action counts are derived from the checked-in public allowlists, not a
+private release. A planned action is not a successful installation. Supplied backup
+metadata, host package availability, runtime versions, build dependencies, and
+authentication require separate destination validation.
 
-Archive entry totals are not totals of usable Linux applications. Directory entries, excluded data, blocked files, and Windows-only bytes are not operational restores.
-
-The metadata-only classifier accounts for **59,554 physical entries**. File-only categories are 26,876 native-path staging candidates, 7,307 blocked files, 33 opaque archives, one review-required Git config, and 11 package/control metadata files. No unsafe materialization paths were found in this release. These are classifier labels, not application-level validation; the production payloads were not extracted or restored during development. The current public secret manifest adds six enabled-but-unverified coverage records and two disabled/excluded records; this does not establish the contents of the encrypted backup manifest.
-
-The repository allowlists produce **82 package actions: 40 planned native actions (36 APT, two pnpm, one uv, one Go) and 42 explicit blockers**. This is static command coverage, not 40 successful installs. Supplying an extracted backup root adds pip-manifest validation/rebuild actions; a missing or incompatible `pip-freeze.txt` blocks that rebuild. APT availability, runtime versions, CGO/build prerequisites, plugin dependencies, and authentication still require validation on the destination.
-
-The Git adapter does **not** change these production metadata labels or package
-counts. Its evidence is deterministic synthetic fixtures only, not conversion
-of the production config, an operational restore, or live Windows validation.
-Validation: 63 Python tests (including 24 new migration fixtures); Bash dispatch,
-forwarding, and offline boot suites (43 / 3 / 12 checks); mocked PowerShell
-dispatch (33 checks); six Bash syntax checks; Python compilation; clean diff
-whitespace check. Fixtures cover private-value exclusion, includes disabled,
-unknown/duplicate values, parser failures, config size, collisions, no-overwrite,
-symlink refusal, cleanup failure, private permissions, and original-byte hashes.
+Run the complete offline Python, Bash, and mocked PowerShell suites listed in the
+README. They cover original-byte hashes, arbitrary synthetic values, private-value
+exclusion, disabled includes, unknown/duplicate settings, parser failures, size
+limits, conflicts, private permissions, staging failure cleanup, package guards,
+subprocess timeouts, cancellation, and caller-trap preservation. Mocked Windows
+fixtures do not constitute live Windows validation. No production restore,
+installation, secret decryption, or live settings change is part of these checks.
 
 ## Secret and credential boundaries
 

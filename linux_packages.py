@@ -8,6 +8,7 @@ secret archive payloads.
 from __future__ import annotations
 import argparse
 import json
+import os
 import platform
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -178,12 +179,20 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                 packages.append('python3.12-venv')
             if name == 'go':
                 packages.extend(['build-essential', 'libsqlite3-dev'])
-            actions.append(Action("apt", name, ["sudo", "-n", "apt-get", "install", "-y", *packages], source="scoop"))
+            elevate = [] if os.geteuid() == 0 else ["sudo", "-n"]
+            actions.append(Action("apt", name, [*elevate, "apt-get", "install", "-y", *packages], source="scoop"))
         else:
             reason = f"No explicit native equivalent for Scoop package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
     for pkg in winget.get("packages", []):
-        ident = pkg.get("id", "") if isinstance(pkg, dict) else str(pkg)
-        reason = f"Windows WinGet declaration has no validated native package/state adapter: {ident}"; blockers.append(reason); actions.append(_blocked("winget", ident, reason, "winget"))
+        ident = pkg.get("id", "") if isinstance(pkg, dict) else pkg
+        if not isinstance(ident, str) or not ident.strip():
+            reason = f"Invalid WinGet package ID: {ident!r}"
+            blockers.append(reason)
+            actions.append(_blocked("winget", str(ident), reason, "winget"))
+        else:
+            reason = f"Windows WinGet declaration has no validated native package/state adapter: {ident}"
+            blockers.append(reason)
+            actions.append(_blocked("winget", ident, reason, "winget"))
     for name in pnpm.get("packages", []):
         reason = f"Invalid pnpm package name: {name!r}"
         if not _safe_arg(name): blockers.append(reason); actions.append(_blocked("pnpm", str(name), reason, "pnpm"))
@@ -212,7 +221,11 @@ def _apt_preflight(actions: list[Action], runner: Any) -> None:
     for action in actions:
         packages = action.command[action.command.index('install') + 1:] if action.command else []
         for package in (p for p in packages if not p.startswith('-')):
-            result = runner(["apt-cache", "policy", package], check=False, shell=False, capture_output=True, text=True)
+            try:
+                result = runner(["apt-cache", "policy", package], check=False, shell=False,
+                                capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"apt package metadata lookup timed out: {package}") from exc
             if getattr(result, "returncode", 1) != 0:
                 raise RuntimeError(f"apt package metadata lookup failed: {package}")
             output = getattr(result, "stdout", "") or ""
@@ -239,7 +252,11 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
     report = {"executed": [], "failed": None, "skipped": [a.name for a in plan.actions if a not in chosen], "partial": bool(selected_set), "note": "Explicit selection is a partial restore; it does not claim full parity." if selected_set else "Full planned restore."}
     for action in chosen:
-        try: result = runner(action.command, check=False, shell=False)
+        try:
+            result = runner(action.command, check=False, shell=False, timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            report["failed"] = {"name": action.name, "error": f"timed out after {exc.timeout}s"}
+            raise RuntimeError(f"{action.name} timed out") from exc
         except OSError as exc: report["failed"] = {"name": action.name, "error": str(exc)}; raise
         code = getattr(result, "returncode", result if isinstance(result, int) else 0)
         if code != 0:
@@ -260,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         if plan.blockers and not args.select:
             print(json.dumps({"plan": plan.to_dict(), "error": "blockers present; use --select for an explicitly partial restore"}, indent=2)); return 2
         try: report = execute(plan, args.select); output = {"plan": plan.to_dict(), "report": report}
+        except subprocess.TimeoutExpired as exc:
+            detail = f"command timed out after {exc.timeout}s"
+            print(json.dumps({"plan": plan.to_dict(), "error": detail}, indent=2)); return 1
         except (RuntimeError, OSError) as exc: print(json.dumps({"plan": plan.to_dict(), "error": str(exc)}, indent=2)); return 1
     else:
         output = plan.to_dict()

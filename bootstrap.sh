@@ -4,6 +4,12 @@
 # Capture the load context before any caller environment can influence routing.
 MAINFRAME_SOURCE_FILE=${BASH_SOURCE[0]:-}
 MAINFRAME_TEMPORARY_DIRECTORY=''
+MAINFRAME_CHILD_PID=''
+MAINFRAME_SAVED_EXIT_TRAP=''
+MAINFRAME_SAVED_HUP_TRAP=''
+MAINFRAME_SAVED_INT_TRAP=''
+MAINFRAME_SAVED_TERM_TRAP=''
+MAINFRAME_TRAPS_INSTALLED=0
 
 mainframe_usage() {
     cat <<'EOF'
@@ -22,7 +28,7 @@ mainframe_platform() {
 mainframe_dispatch() {
     local path=$1
     shift
-    bash "$path" "$@"
+    exec bash "$path" "$@"
 }
 
 mainframe_remote_source() {
@@ -39,6 +45,25 @@ cleanup_mainframe_remote() {
     fi
 }
 
+mainframe_save_traps() {
+    MAINFRAME_SAVED_EXIT_TRAP=$(trap -p EXIT)
+    MAINFRAME_SAVED_HUP_TRAP=$(trap -p HUP)
+    MAINFRAME_SAVED_INT_TRAP=$(trap -p INT)
+    MAINFRAME_SAVED_TERM_TRAP=$(trap -p TERM)
+}
+
+mainframe_restore_traps() {
+    if [[ -n "$MAINFRAME_SAVED_EXIT_TRAP" ]]; then eval "$MAINFRAME_SAVED_EXIT_TRAP"; else trap - EXIT; fi
+    if [[ -n "$MAINFRAME_SAVED_HUP_TRAP" ]]; then eval "$MAINFRAME_SAVED_HUP_TRAP"; else trap - HUP; fi
+    if [[ -n "$MAINFRAME_SAVED_INT_TRAP" ]]; then eval "$MAINFRAME_SAVED_INT_TRAP"; else trap - INT; fi
+    if [[ -n "$MAINFRAME_SAVED_TERM_TRAP" ]]; then eval "$MAINFRAME_SAVED_TERM_TRAP"; else trap - TERM; fi
+}
+
+mainframe_cleanup_on_exit() {
+    cleanup_mainframe_remote
+    mainframe_restore_traps
+}
+
 mainframe_signal_exit() {
     local signal=$1
     local status=143
@@ -47,9 +72,32 @@ mainframe_signal_exit() {
         INT) status=130 ;;
         TERM) status=143 ;;
     esac
+    if [[ -n "$MAINFRAME_CHILD_PID" ]]; then
+        kill -TERM "$MAINFRAME_CHILD_PID" 2>/dev/null || true
+        wait "$MAINFRAME_CHILD_PID" 2>/dev/null || true
+        MAINFRAME_CHILD_PID=''
+    fi
     cleanup_mainframe_remote
-    trap - EXIT HUP INT TERM
+    mainframe_restore_traps
     exit "$status"
+}
+
+mainframe_install_traps() {
+    if ((MAINFRAME_TRAPS_INSTALLED)); then return; fi
+    mainframe_save_traps
+    MAINFRAME_TRAPS_INSTALLED=1
+    trap mainframe_cleanup_on_exit EXIT
+    trap 'mainframe_signal_exit HUP' HUP
+    trap 'mainframe_signal_exit INT' INT
+    trap 'mainframe_signal_exit TERM' TERM
+}
+
+mainframe_finish() {
+    local status=$1
+    cleanup_mainframe_remote
+    mainframe_restore_traps
+    MAINFRAME_TRAPS_INSTALLED=0
+    return "$status"
 }
 
 mainframe_run() {
@@ -89,34 +137,31 @@ mainframe_run() {
     else
         temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/mainframe-launch.XXXXXX") || return
         MAINFRAME_TEMPORARY_DIRECTORY=$temporary_directory
-        trap cleanup_mainframe_remote EXIT
-        trap 'mainframe_signal_exit HUP' HUP
-        trap 'mainframe_signal_exit INT' INT
-        trap 'mainframe_signal_exit TERM' TERM
+        mainframe_install_traps
         if ! mainframe_remote_source "$temporary_directory"; then
             printf 'mainframe: failed to download selected bootstrap.\n' >&2
-            cleanup_mainframe_remote
-            trap - EXIT HUP INT TERM
+            mainframe_finish 1
             return 1
         fi
         source_path="$temporary_directory/boot.sh"
     fi
 
-    if mainframe_dispatch "$source_path" "${boot_arguments[@]}"; then
-        if [[ -n "$temporary_directory" ]]; then
-            cleanup_mainframe_remote || return
-            trap - EXIT HUP INT TERM
-        fi
-        return 0
+    # Keep the launcher responsive to signals while the child is running.
+    mainframe_install_traps
+    mainframe_dispatch "$source_path" "${boot_arguments[@]}" &
+    MAINFRAME_CHILD_PID=$!
+    local status=0
+    if wait "$MAINFRAME_CHILD_PID"; then
+        status=0
     else
-        local status=$?
-        printf 'mainframe: Linux bootstrap failed (exit %s).\n' "$status" >&2
-        if [[ -n "$temporary_directory" ]]; then
-            cleanup_mainframe_remote || return
-            trap - EXIT HUP INT TERM
-        fi
-        return "$status"
+        status=$?
     fi
+    MAINFRAME_CHILD_PID=''
+    if ((status != 0)); then
+        printf 'mainframe: Linux bootstrap failed (exit %s).\n' "$status" >&2
+    fi
+    mainframe_finish "$status"
+    return "$status"
 }
 
 # A Bash -c payload has no source file, regardless of its chosen $0.

@@ -284,18 +284,32 @@ def make_private_dirs(path):
 def stream_copy(source, target, limit=None):
     digest = hashlib.sha256()
     size = 0
-    with private_file(target) as out:
-        while True:
-            block = source.read(CHUNK)
-            if not block:
-                break
-            if limit is not None and size + len(block) > limit:
-                raise ValueError('Stream exceeds its declared/safety size limit.')
-            out.write(block)
-            digest.update(block)
-            size += len(block)
-        out.flush()
-        os.fsync(out.fileno())
+    opened = False
+    try:
+        with private_file(target) as out:
+            # O_EXCL means that reaching this point is proof that this call
+            # owns the path.  A failed open must never remove a raced-in file.
+            opened = True
+            while True:
+                block = source.read(CHUNK)
+                if not block:
+                    break
+                if limit is not None and size + len(block) > limit:
+                    raise ValueError('Stream exceeds its declared/safety size limit.')
+                out.write(block)
+                digest.update(block)
+                size += len(block)
+            out.flush()
+            os.fsync(out.fileno())
+    except BaseException:
+        if opened:
+            try:
+                if target.is_file() and not target.is_symlink():
+                    target.unlink()
+            except OSError:
+                # Preserve the copy's original failure; cleanup is best effort.
+                pass
+        raise
     return digest.hexdigest(), size
 
 
@@ -455,15 +469,30 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                         e.update(sha256=digest, status='bytes-preserved')
                         if apply_portable and e.get('native_target'):
                             out = stage / e['native_target']
-                            make_private_dirs(out.parent)
-                            if out.exists() or out.is_symlink():
-                                e.update(status='staging-conflict', reason='Native export collision; both originals retained separately in recovered/.')
-                                continue
-                            with target.open('rb') as stream:
-                                staged_hash, _ = stream_copy(stream, out, e['size'])
-                            if staged_hash != digest:
-                                raise ValueError('Native staging copy failed verification.')
-                            e.update(status='native-staged-unverified', portable_target=str(out.relative_to(destination)))
+                            staging_created = False
+                            try:
+                                make_private_dirs(out.parent)
+                                if out.exists() or out.is_symlink():
+                                    e.update(status='staging-conflict', reason='Native export collision; both originals retained separately in recovered/.')
+                                    continue
+                                with target.open('rb') as stream:
+                                    staged_hash, _ = stream_copy(stream, out, e['size'])
+                                staging_created = True
+                                if staged_hash != digest:
+                                    raise ValueError('Native staging copy failed verification.')
+                                e.update(status='native-staged-unverified', portable_target=str(out.relative_to(destination)))
+                            except (OSError, ValueError, RuntimeError, NotImplementedError) as exc:
+                                # The recovered member is already verified. Keep it and
+                                # report staging separately; only remove this attempt's
+                                # regular output, never a pre-existing path or symlink.
+                                e.update(status='bytes-preserved', staging_error=type(exc).__name__)
+                                report['errors'].append('Native staging failed; recovered member retained.')
+                                if staging_created:
+                                    try:
+                                        if out.is_file() and not out.is_symlink():
+                                            out.unlink()
+                                    except OSError:
+                                        e['staging_cleanup_error'] = 'OSError'
                     except (OSError, ValueError, RuntimeError, NotImplementedError, BadZipFile) as exc:
                         e.update(status='raw-only-error', error=type(exc).__name__)
                         if target.is_file() and not target.is_symlink():
