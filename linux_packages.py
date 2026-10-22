@@ -259,15 +259,15 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     covered = [a for a in plan.actions if a.status == "covered" and
                (not selected_set or a.name in selected_set or a.covered_by in selected_set)]
     for action in covered:
-        if not any(a.name == action.covered_by and a.status == "planned" and a.command for a in plan.actions):
+        if not any(a.kind == "apt" and a.name == action.covered_by and a.status == "planned" and a.command for a in plan.actions):
             raise RuntimeError(f"Missing planned native coverage target for: {action.name}")
-        if selected_set:
-            selected_set.add(action.covered_by)
+    coverage_targets = {a.covered_by for a in covered}
     if not selected_set and plan.blockers:
         raise RuntimeError('Plan contains unresolved manifest or package blockers; no full execution is permitted.')
     unresolved = [a for a in plan.actions if a.status == "blocked" and (not selected_set or a.name in selected_set)]
     if unresolved: raise RuntimeError("Unresolved blockers prevent full restore: " + "; ".join(a.reason for a in unresolved))
-    chosen = [a for a in plan.actions if a.status == "planned" and (not selected_set or a.name in selected_set)]
+    chosen = [a for a in plan.actions if a.status == "planned" and
+              (not selected_set or a.name in selected_set or (a.kind == "apt" and a.name in coverage_targets))]
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
