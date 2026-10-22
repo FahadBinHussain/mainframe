@@ -110,6 +110,13 @@ unvalidated vendor sources, and variant/version drift are explicit blockers.
 APT candidates are checked before executing any selected install. Python rebuilds
 use the supplied `pip-freeze.txt` and a new virtualenv, never system Python.
 
+Scoop's `7zip19.00-helper` is explicitly reported as `covered` by native `7zip`,
+with `covered_by: "7zip"` and no separate install command. This maps the extractor
+role, not the Windows 19.00 version pin, Scoop hooks, or GUI/registry settings.
+The planner emits one native `7zip` action even for a helper-only allowlist;
+explicitly selecting the helper selects that native action and its APT candidate
+check. Other blockers still prevent an unqualified full execution.
+
 ```bash
 python3 ./linux_packages.py
 # Add --backup-root /path/to/recovered/quick-root to include pip-freeze.txt.
