@@ -1650,3 +1650,12 @@ catch it by comparing `git diff --cached --stat` with `git diff --cached --ignor
 `while ($c.Contains("`r`n")) { $c = $c.Replace("`r`n","`n") }` (the loop also eats a leftover
 CR CR LF), re-`git add`, re-scan (32480be). append with `[IO.File]::AppendAllText` rather
 than `Add-Content`, which writes platform CRLF.
+
+## cross-platform bootstrap entry point
+
+- `bootstrap.ps1` is the shared Windows/Linux launcher; it requires PowerShell 7 on both platforms. It prints the selected native script before any download or execution. Use `-DryRun` to inspect routing without downloads, bootstrap execution, or machine changes.
+- Windows delegates to the existing `boot.ps1` unchanged. Linux delegates to `boot.sh`, which supports Debian/Ubuntu-derived distributions with apt-get, installs only git/curl/ca-certificates, and clones source into `~/Downloads/mainframe`. An existing destination is rejected before package changes. Other operating systems/distributions must fail loudly.
+- Linux is intentionally minimal setup, NOT Windows machine-state restoration. Never send `mainframe-production` archives through the Linux path. Do not imply that Windows account helpers, browser profiles, tasks, or services have been ported.
+- Local checkout execution uses sibling native scripts and refuses missing files; remote scriptblock execution downloads only the selected native script from the source repository. The old short link remains Windows-only.
+- Validate routing with `pwsh -NoProfile -File tests/bootstrap.Tests.ps1` and Linux syntax with `bash -n boot.sh`. The tests replace HTTP and native dispatch with inert fixtures, covering both platforms, unsupported OS, preview, missing files, failures, and cleanup. Never execute the real native bootstraps on a working machine just to test dispatch.
+- Before publishing, inspect the complete diff for secrets, real account identifiers, machine-specific data, and disallowed adult content. Keep project notes generic and preserve existing LF formatting.

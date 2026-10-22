@@ -6,6 +6,43 @@ Strict Scoop backup and restore for Windows machines.
 
 It can also restore native Windows apps that should not be Scoop-owned. These are service-style exceptions for apps where Scoop's portable package loses important behavior.
 
+## One bootstrap command (Windows or Linux)
+
+With **PowerShell 7 (`pwsh`) already installed**, paste this same command into
+PowerShell on Windows or a POSIX shell on Linux:
+
+```text
+pwsh -NoProfile -Command "& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/bootstrap.ps1')))"
+```
+
+The launcher prints its selected platform and script **before** downloading or
+running the native bootstrap. Windows runs the existing `boot.ps1` restore
+(including its elevation and vault prompts). Linux runs `boot.sh`: a minimal
+Debian/Ubuntu (or Debian/Ubuntu-derived) setup that installs `git`, `curl`, and
+`ca-certificates` via `apt-get`, then clones the source to `~/Downloads/mainframe`.
+Linux requires root or `sudo`; an existing destination is rejected before changes.
+It does **not** restore Windows apps, browser state, accounts, services, or tasks
+from `mainframe-production`. Other operating systems and Linux distributions fail
+loudly rather than attempting a Windows restore. This is a shared entry point,
+not identical machine restoration on both platforms.
+
+The command trusts scripts on this repository's `main` branch. Review them first;
+the URL becomes available when the launcher change is merged. The existing
+`da.gd/f85Bj` short link still targets the Windows-only `boot.ps1`; it is unchanged.
+PowerShell 7 is a prerequisite on **both** platforms, not installed by the launcher.
+
+From a reviewed checkout, preview the route without downloads or execution:
+
+```text
+pwsh -NoProfile -File ./bootstrap.ps1 -DryRun
+```
+
+Remove `-DryRun` to run it. Offline routing tests (native bootstraps are mocked):
+
+```text
+pwsh -NoProfile -File ./tests/bootstrap.Tests.ps1
+```
+
 ## What It Saves
 
 - Scoop buckets and config from `scoop export --config`
