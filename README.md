@@ -150,6 +150,35 @@ to `PATH` yourself. `platform-tools` starts empty; this does not install `adb`.
 Matching the toolkit build does not prove Java/runtime compatibility or full
 Windows SDK-state restoration.
 
+**AnyDesk: official Linux package, not Windows state.** On Debian/Ubuntu x86_64,
+the planner resolves the current AnyDesk DEB version, URL, size and SHA-256 from
+the [official vendor index](https://deb.anydesk.com/dists/all/main/binary-amd64/Packages).
+Planning downloads metadata only. Missing, conflicting or unsafe metadata and
+unsupported architectures remain blockers. Linux and Windows versions have
+independent release numbering; no Windows-version equivalence is claimed.
+`AnyDesk.AnyDesk` WinGet package intent is explicitly covered by the single
+native `anydesk` action, even when only the WinGet declaration exists.
+
+Only after accepting the vendor terms and reviewing the service implications,
+a future, explicitly authorized system install can use:
+
+```bash
+python3 ./linux_packages.py --execute --select anydesk \
+  --anydesk-terms-accepted --anydesk-service-allowed
+```
+
+Both AnyDesk-specific flags are required before any selected changes. They are
+not inferred from `--execute`, another product's consent, or a previous backup.
+The installer checks the downloaded DEB's SHA-256 and size before passing it to
+APT; it adds no repository or signing key. **The vendor DEB installs its service
+and may automatically start it**, which is why service permission is separate.
+Do not execute this command during a dry restore review. No Windows AnyDesk ID,
+credentials, unattended password or service settings are imported. According to
+[vendor requirements](https://support.anydesk.com/docs/supported-operating-systems),
+incoming Linux sessions need Xorg; Wayland supports outgoing sessions only.
+Package resolution and offline tests do not validate GUI, networking or
+unattended-access behavior, and this adapter does not purchase a license.
+
 Selected package installs are sequential, not transactional. Terms, destination,
 and APT metadata checks happen before installs, but a later download or install
 can still fail after an earlier package changed the machine. Error JSON includes
