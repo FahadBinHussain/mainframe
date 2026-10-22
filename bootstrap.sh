@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux launcher for the native bootstrap only; Windows restore is not in scope.
+# Linux launcher for explicit native restore, package, and setup modes.
 
 # Capture the load context before any caller environment can influence routing.
 MAINFRAME_SOURCE_FILE=${BASH_SOURCE[0]:-}
@@ -7,9 +7,11 @@ MAINFRAME_TEMPORARY_DIRECTORY=''
 
 mainframe_usage() {
     cat <<'EOF'
-Usage: bootstrap.sh [--dry-run] [--help]
+Usage: bootstrap.sh [--dry-run] [--help] [-- BOOT_ARGUMENTS...]
 
 Select and run the Linux boot.sh bootstrap. --dry-run only reports the route.
+Use -- --restore ... or -- --packages ... from a reviewed checkout.
+Use -- --setup-tools for prerequisite setup only (not a restore).
 EOF
 }
 
@@ -19,7 +21,8 @@ mainframe_platform() {
 
 mainframe_dispatch() {
     local path=$1
-    bash "$path"
+    shift
+    bash "$path" "$@"
 }
 
 mainframe_remote_source() {
@@ -51,13 +54,13 @@ mainframe_signal_exit() {
 
 mainframe_run() {
     local dry_run=0
-    local arg
-    for arg in "$@"; do
-        case "$arg" in
-            --dry-run) dry_run=1 ;;
+    local -a boot_arguments=()
+    while (($#)); do
+        case "$1" in
+            --dry-run) dry_run=1; shift ;;
             --help|-h) mainframe_usage; return 0 ;;
-            '') printf 'mainframe: unknown argument: %s\n' "$arg" >&2; return 2 ;;
-            *) printf 'mainframe: unknown argument: %s\n' "$arg" >&2; return 2 ;;
+            --) shift; boot_arguments=("$@"); break ;;
+            *) printf 'mainframe: unknown argument: %s\n' "$1" >&2; return 2 ;;
         esac
     done
 
@@ -99,7 +102,7 @@ mainframe_run() {
         source_path="$temporary_directory/boot.sh"
     fi
 
-    if mainframe_dispatch "$source_path"; then
+    if mainframe_dispatch "$source_path" "${boot_arguments[@]}"; then
         if [[ -n "$temporary_directory" ]]; then
             cleanup_mainframe_remote || return
             trap - EXIT HUP INT TERM

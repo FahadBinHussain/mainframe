@@ -1,6 +1,6 @@
 # mainframe
 
-Strict Scoop backup and restore for Windows machines.
+Windows machine-state backup/restore, with Linux-native offline recovery and package planning.
 
 `mainframe` captures a Scoop app snapshot plus persisted Scoop settings, then restores them on another machine. It defaults to latest bucket versions on restore.
 
@@ -33,22 +33,77 @@ Bash on Linux; it no longer dispatches Bash from PowerShell.
 
 ### Linux: Bash (no PowerShell dependency)
 
-Run this in Bash. `curl` and working HTTPS CA certificates must already be
-available to fetch the entry point and child; neither PowerShell nor Git is
-required beforehand. The `&&` prevents execution if fetching the entry point fails:
+**Linux now has a lossless archive-recovery path, explicit native export targets,
+and a package planner, not a complete operational Windows-to-Linux restore.**
+See the [item-by-item coverage inventory](docs/linux-restore-coverage.md) for every
+persist app, Windows restore action, secret boundary, and remaining blocker.
+Windows DPAPI/browser logins, Windows-only apps, services, task XML, registry,
+private build patchers, and live account-helper activation are not ported. No
+global agent instructions are changed. No unqualified “100% working” claim is made.
+
+From a **reviewed checkout**, Bash and Python **3.10+** can inspect existing quick
+and persist ZIPs without reading member payloads, decrypting anything, installing
+packages, or changing settings:
 
 ```bash
-bootstrap="$(curl --fail --show-error --silent --location https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/bootstrap.sh)" && bash -c "$bootstrap" --
+bash ./restore.sh /path/to/backup-directory --inventory
+# Equivalent launcher route:
+bash ./bootstrap.sh -- --restore /path/to/backup-directory --inventory
 ```
 
-It prints `mainframe: selected Linux -> boot.sh`. `boot.sh` supports Debian/Ubuntu
-and their derivatives with `apt-get`; it installs `git`, `curl`, and
-`ca-certificates`, then clones the source to `~/Downloads/mainframe`. Root or
-`sudo` is required. An existing destination is rejected before package changes.
-This is tools + clone only: it does **not** restore Windows archives, apps,
-accounts, browser state, services, or tasks from `mainframe-production`, nor port
-the Windows account helpers. Other Linux distributions fail explicitly in
-`boot.sh`; non-Linux operating systems fail in the Bash launcher.
+Full mode requires both `mainframe-quick.zip` and `mainframe-persist.zip` (or the
+legacy combined `mainframe-backup.zip`). `--mode quick` explicitly excludes the
+persist ZIP and is not a full restore. Use an input directory containing ZIPs only;
+unexpected loose data fails preflight rather than being silently omitted.
+
+Explicit recovery writes a **new offline directory**, never the live home:
+
+```bash
+bash ./restore.sh /path/to/backup-directory --recover \
+  --destination /path/to/new-offline-export --apply-portable
+```
+
+The export retains verified original ZIPs in `raw-archives/`, materializes safe
+members in archive-separated `recovered/` trees, optionally exports native-path
+candidates into `home-staging/`, and writes a private `restore-manifest.json`.
+Encrypted nested secrets remain opaque; unsafe paths, special entries, and
+collisions remain preserved in the raw ZIP rather than being activated. Outputs
+use restrictive permissions; existing/symlink destinations are rejected. Recovery
+streams and verifies bytes, checks free space, and limits expanded data to 100 GiB
+and any one member to 8 GiB by default. Limits can be raised explicitly with
+`--max-expanded-bytes` and `--max-member-bytes` after reviewing metadata.
+
+Exit **3** means a usable inventory/export exists but operational restore remains
+incomplete. Exit **2** means invalid input, preflight, or recovery failure. A
+verified raw copy is not an installed app, usable login, or activated setting.
+Do not automatically activate `home-staging/`: paths, layouts, plugins, and
+identities still need application-specific review. Source ZIPs are never modified.
+
+The package planner is dry by default and supports **Debian/Ubuntu x86_64 or
+aarch64** only. It accounts for every allowlisted item; unsupported software,
+unvalidated vendor sources, and variant/version drift are explicit blockers.
+APT candidates are checked before executing any selected install. Python rebuilds
+use the supplied `pip-freeze.txt` and a new virtualenv, never system Python.
+
+```bash
+python3 ./linux_packages.py
+# Add --backup-root /path/to/recovered/quick-root to include pip-freeze.txt.
+# --execute changes the machine; --select NAME permits only an explicitly
+# partial reviewed subset. Neither flag is needed for inspection.
+```
+
+For source preparation only, the remote command requires `curl` and HTTPS CA
+certificates. It installs four prerequisites and clones source, **not a backup**:
+
+```bash
+bootstrap="$(curl --fail --show-error --silent --location https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/bootstrap.sh)" && bash -c "$bootstrap" -- -- --setup-tools
+```
+
+`--setup-tools` supports Debian/Ubuntu-family systems with `apt-get`, requires root
+or `sudo`, and rejects an existing `~/Downloads/mainframe` before package changes.
+Restore/package modes require their sibling files in a reviewed local checkout;
+the single-file remote child does not silently fetch them. A bare Linux bootstrap
+now fails without changes instead of misleadingly doing setup as a restore.
 
 ### Review and preview
 
@@ -74,7 +129,7 @@ bash ./bootstrap.sh --dry-run
 
 Preview checks platform selection only; it does not validate restore prerequisites,
 Linux distribution support, privileges, or the destination. Remove the preview
-flag to run setup. For remote preview, append `-DryRun` to the Windows scriptblock
+flag and select an explicit Linux mode to run it. For remote preview, append `-DryRun` to the Windows scriptblock
 invocation, or `--dry-run` after `--` in the Linux command above.
 
 Offline tests replace HTTP and child execution with inert fixtures:
@@ -82,8 +137,12 @@ Offline tests replace HTTP and child execution with inert fixtures:
 ```text
 pwsh -NoProfile -File ./tests/bootstrap.Tests.ps1
 bash ./tests/bootstrap.Tests.sh
+bash ./tests/bootstrap-forward.Tests.sh
+bash ./tests/boot.Tests.sh
+python3 -m unittest discover -s tests -p 'test_linux_*.py'
 bash -n bootstrap.sh
 bash -n boot.sh
+bash -n restore.sh
 bash -n tests/bootstrap.Tests.sh
 ```
 
@@ -507,4 +566,3 @@ To support another tool later, add its natural config/auth path to `tool-secrets
 <a href="https://github.com/FahadBinHussain/mainframe/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=FahadBinHussain/mainframe" alt="Contributors" />
 </a>
-
