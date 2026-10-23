@@ -1335,36 +1335,17 @@ exists — if it doesn't the script throws instead of printing `done`.
 diagnostic to reuse: release count == `$Keep` exactly AND the newest tag stops moving
 while the log keeps saying DONE = prune is eating the new releases.
 
-### site-packages is not shipped; pip-freeze.txt is the manifest (2026-10-03)
-
-`persist\python312\Lib\site-packages` was **428 MB of the 491 MB persist zip** and held
-**no user data**: across all 173 `dist-info` dirs there were **0 `direct_url.json`** (no
-editable/local/git installs — every package is PyPI-reproducible), the only `.pth` files
-are pip's own (`distutils-precedence.pth`, `pywin32.pth`), no `sitecustomize` /
-`usercustomize`, and the 9.7 MB of data-ish files are package-shipped test fixtures
-(`pywt/tests`, `scipy/tests`, auditok demo wavs). `VapourSynth 79` looks hand-placed but
-is a normal pip package.
-
-- **backup** (`backup.ps1`, `python312` robocopy branch): copies `python312` with
-  `/XD site-packages`; `Scripts` (87 files, 13.9 MB, incl. `pip.exe`) stays because the
-  restore pip step needs it.
-- **backup** (pip export): writes `pip-freeze.txt` at the zip root = one
-  `--extra-index-url https://download.pytorch.org/whl/cpu` line (torch/torchvision are
-  `+cpu` builds, PyPI alone can't satisfy them) + `pip list --format=freeze` for every
-  package, versions pinned. throws if the freeze comes back empty — an empty manifest
-  with no shipped bytes = 150+ packages silently missing after a restore.
-- **restore** (`restore.ps1`): `pip install -r <backup>\pip-freeze.txt` in ONE call and
-  **throws** on a missing file, zero package lines, or non-zero pip exit. no skip loop.
-- **`pip-allowed.json` is deleted.** it listed **1 package while 157 were installed**, and
-  the backup's `pip-packages.json` recorded that same 1 — the only reason old restores
-  worked was that the site-packages bytes shipped alongside. if pip restore ever looks
-  thin, check `pip-freeze.txt` first, not an allowlist.
-- **measured 2026-10-03**: persist 505 → **63 MB**, core 257 → 234 MB (Edge-profile churn,
-  unrelated), total **762 → 297 MB/day** (`site-packages` entries in the new zip: 0).
-
-**diagnostic to reuse**: `pip list --format=freeze` count vs the number of package lines
-in `pip-freeze.txt` — they must match; a mismatch means the export filter broke.
-
+### Python tooling retained; automatic frozen snapshot retired
+- `backup.ps1` still excludes installed `site-packages` from Python persistence
+  and retains `Scripts` and Python/pip tooling for explicit future installs.
+- Backup no longer runs `pip list --format=freeze` or creates `pip-freeze.txt`.
+  Windows Full no longer requires or installs that automatic frozen snapshot.
+- Existing archives stay untouched. Legacy `pip-freeze.txt` remains inert restore
+  control metadata, never a user-data staging target or a Linux action/blocker.
+- Linux retains planning of explicit repository `requirements.txt` and
+  `requirements-linux.txt`, including when `--backup-root` is supplied. It never
+  consumes requirements from the backup root. Generic execution remains blocked
+  pending interpreter/dependency/integrity and isolated-destination preflight.
 ### compression level + why daily size jumps around (measured 2026-10-03)
 
 - **`-mx=9` (was `-mx=5`)** on both 7z calls. controlled A/B on identical content:
@@ -1419,7 +1400,7 @@ every release now carries TWO assets, and boot dies loudly when one is missing:
 
 | asset | contents | built by |
 |---|---|---|
-| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `pip-freeze.txt`, `quick-persist\ditto` (Ditto settings + starred-only `Ditto.db` so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
+| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `quick-persist\ditto` (Ditto settings + starred-only `Ditto.db` so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
 | `mainframe-persist.zip` | scoop persist dirs (incl. the same starred-only `Ditto.db` under `persist\ditto`) | `backup.ps1` |
 
 the encrypted blob rides INSIDE quick on purpose: quick mode = 1 download, full mode = 2,
