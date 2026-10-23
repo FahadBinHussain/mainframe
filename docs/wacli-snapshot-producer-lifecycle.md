@@ -2,6 +2,8 @@
 
 **Capture remains disabled. Fully usable Linux restoration is not implemented.** The investigation found two dependency-level shutdown counterexamples in addition to the accepted-delegate gap from PR #34. Joining delegate handlers alone would not fix capture. This change adds diagnostics, preservation tests and documentation only; it changes no runtime capture, backup or restore code.
 
+The [shutdown-only follow-up](wacli-snapshot-shutdown-boundary.md) adds real-SQL close/error counterexamples and a real offline CLI media writer under a held store lock. Neither successful database close nor daemon shutdown supplies the missing completed-work and media-ownership boundary.
+
 ## The new reproducible failures
 
 The [dependency diagnostic patch](../patches/wacli/0003-synthetic-dependency-boundary-probes.patch) runs the real pinned whatsmeow producer paths with in-memory fake stores. It opens no database or socket and uses no account, credentials, chats or personal media. Its deprecated `DangerousInternals` calls are test injection points, not a proposed production API.
