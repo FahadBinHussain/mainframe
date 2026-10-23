@@ -1053,10 +1053,10 @@ index 7b373bd..fad7440 100644
 +	return &OwnedDB{db: a.db, app: a, quote: a.db, archive: a.db}, nil
 diff --git a/internal/app/owned_message_reads.go b/internal/app/owned_message_reads.go
 new file mode 100644
-index 0000000..e0af658
+index 0000000..c60a8fb
 --- /dev/null
 +++ b/internal/app/owned_message_reads.go
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,368 @@
 +package app
 +
 +import (
@@ -1283,11 +1283,18 @@ index 0000000..e0af658
 +	if err != nil {
 +		return msgs
 +	}
++	cache := make(map[string]string)
 +	for i := range msgs {
 +		if msgs[i].FromMe || strings.TrimSpace(msgs[i].SenderName) != "" {
 +			continue
 +		}
-+		jid, e := types.ParseJID(strings.TrimSpace(msgs[i].SenderJID))
++		sender := strings.TrimSpace(msgs[i].SenderJID)
++		if name, ok := cache[sender]; ok {
++			msgs[i].SenderName = name
++			continue
++		}
++		cache[sender] = ""
++		jid, e := types.ParseJID(sender)
 +		if e != nil || jid.Server != types.HiddenUserServer {
 +			continue
 +		}
@@ -1308,6 +1315,7 @@ index 0000000..e0af658
 +		if msgs[i].SenderName == "" {
 +			msgs[i].SenderName = pn.String()
 +		}
++		cache[sender] = msgs[i].SenderName
 +	}
 +	return msgs
 +}
@@ -1419,10 +1427,10 @@ index 0000000..e0af658
 +}
 diff --git a/internal/app/owned_message_reads_test.go b/internal/app/owned_message_reads_test.go
 new file mode 100644
-index 0000000..7a2b054
+index 0000000..9a8de19
 --- /dev/null
 +++ b/internal/app/owned_message_reads_test.go
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,310 @@
 +package app
 +
 +import (
@@ -1431,10 +1439,14 @@ index 0000000..7a2b054
 +	"go/ast"
 +	"go/parser"
 +	"go/token"
++	"os"
++	"path/filepath"
++	"sync/atomic"
 +	"testing"
 +	"time"
 +
 +	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
 +)
 +
 +func TestOwnedMessageReadsRefuseAfterScopeFinish(t *testing.T) {
@@ -1668,5 +1680,64 @@ index 0000000..7a2b054
 +	page, err := reads.Changes(ctx, "", true, 1)
 +	if err != nil || page.NextCheckpoint == "" {
 +		t.Fatalf("synthetic checkpoint = %+v, %v", page, err)
++	}
++}
++
++type ownedSenderCacheProbe struct {
++	WAClient
++	calls  atomic.Int32
++	target types.JID
++}
++
++func (p *ownedSenderCacheProbe) ResolveLIDToPN(context.Context, types.JID) types.JID {
++	p.calls.Add(1)
++	return p.target
++}
++
++func TestOwnedMessageReadsCachesRepeatedSenderAndUnresolvedResult(t *testing.T) {
++	for _, resolved := range []bool{false, true} {
++		name := "unresolved"
++		if resolved {
++			name = "resolved"
++		}
++		t.Run(name, func(t *testing.T) {
++			a, _, ctx, finish := ownedMessageTestApp(t)
++			defer finish(nil)
++			// Only an inert marker enables the pre-existing resolver route. The fake
++			// in-memory WA is already installed, so no session DB/client is opened.
++			if err := os.WriteFile(filepath.Join(a.opts.StoreDir, "session.db"), []byte("synthetic marker"), 0600); err != nil {
++				t.Fatal(err)
++			}
++			p := &ownedSenderCacheProbe{}
++			expected := ""
++			if resolved {
++				p.target = types.NewJID("15550001111", types.DefaultUserServer)
++				if err := a.db.UpsertContact(p.target.String(), "15550001111", "", "", "", ""); err != nil {
++					t.Fatal(err)
++				}
++				if err := a.db.SetAlias([]string{p.target.String()}, "Synthetic Alias"); err != nil {
++					t.Fatal(err)
++				}
++				expected = "Synthetic Alias"
++			}
++			a.wa = p
++			a.sessionState = &sessionObservation{}
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			lid := types.NewJID("12345", types.HiddenUserServer).String()
++			msgs := []store.Message{{SenderJID: lid}, {SenderJID: " " + lid + " "}, {SenderJID: lid, FromMe: true}, {SenderJID: lid, SenderName: "Existing"}}
++			out, err := reads.ResolveMessageSenderNames(ctx, msgs)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if p.calls.Load() != 1 {
++				t.Fatalf("repeated sender made %d resolver calls", p.calls.Load())
++			}
++			if out[0].SenderName != expected || out[1].SenderName != expected || out[2].SenderName != "" || out[3].SenderName != "Existing" {
++				t.Fatalf("cache changed names: %+v", out)
++			}
++		})
 +	}
 +}
