@@ -107,8 +107,10 @@ identities still need application-specific review. Source ZIPs are never modifie
 The package planner is dry by default and supports **Debian/Ubuntu x86_64 or
 aarch64** only. It accounts for every allowlisted item; unsupported software,
 unvalidated vendor sources, and variant/version drift are explicit blockers.
-APT candidates are checked before executing any selected install. Python rebuilds
-use the supplied `pip-freeze.txt` and a new virtualenv, never system Python.
+APT executables and candidates are checked before executing any selected install.
+Global pnpm/uv/Go installs and Python rebuilds remain blocked until runtime/build,
+install-script policy and isolated-destination preflights are validated. Original
+package declarations and `pip-freeze.txt` remain intact.
 
 Scoop's `7zip19.00-helper` is explicitly reported as `covered` by native `7zip`,
 with `covered_by: "7zip"` and no separate install command. This maps the extractor
@@ -228,6 +230,20 @@ or profiles, imports Windows state or credentials, or installs dependencies.
 Mixed global-manager commands without isolated runtime/destination preflight
 are rejected before mutation. Checksums are not independent release signatures,
 and synthetic tests do not establish actual Bun runtime compatibility.
+
+**Other same-product native tools.** The planner now resolves official Linux
+artifacts for `bun`, `cloudflared`, `deno`, `nodejs-lts`, `opencode2`, `pnpm`,
+`uv`, and `yq`, conservatively on glibc x86_64. Versions and checksums come
+from current authoritative manifests and official release metadata, not a
+user-specific backup or a guessed latest download. Source drift stays blocked.
+See the [native package review](docs/linux-native-package-review.md) for exact
+variant, checksum, platform and remaining-blocker contracts. A separately
+authorized future partial install requires `--execute --select NAME` and an
+explicit new `--native-root NAME=/absolute/new/directory` for each product.
+Supplying roots alone is still a dry run. No PATH/profile, service, account,
+Windows-state, npm postinstall or automatic runtime activation is included.
+
+Bun also retains `--bun-root` as a compatible alias for `--native-root bun=PATH`.
 
 Selected package installs are sequential, not transactional. Terms, destination,
 and APT metadata checks happen before installs, but a later download or install

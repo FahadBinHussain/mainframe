@@ -141,7 +141,7 @@ class BunPlannerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             for filename, key, values in (
-                ("scoop-allowed.json", "apps", names or ["bulk-crap-uninstaller", "bun", "cloudflared"]),
+                ("scoop-allowed.json", "apps", names or ["bulk-crap-uninstaller", "bun", "ditto"]),
                 ("winget-allowed.json", "packages", [{"id": "Vendor.Unknown"}]),
                 ("pnpm-allowed.json", "packages", ["pnpm-fixture"]),
                 ("uv-allowed.json", "packages", ["uv-fixture"]),
@@ -151,13 +151,13 @@ class BunPlannerTests(unittest.TestCase):
             with patch.object(bun, "resolve_release", return_value={"version": "1.2.3"}, side_effect=resolver_error):
                 return self.lp.build_plan(root)
 
-    def test_bun_resolved_without_unblocking_bcu_or_cloudflared(self):
+    def test_bun_resolved_without_unblocking_bcu_or_ditto(self):
         plan = self.plan(); actions = {a.name: a for a in plan.actions}
         self.assertEqual((actions["bun"].kind, actions["bun"].status), ("bun-archive", "planned"))
         self.assertIsNone(actions["bun"].command)
         self.assertEqual(actions["bulk-crap-uninstaller"].reason, "Windows-only package: bulk-crap-uninstaller")
-        self.assertEqual(actions["cloudflared"].status, "blocked")
-        self.assertEqual(plan.blockers[:2], [actions["bulk-crap-uninstaller"].reason, actions["cloudflared"].reason])
+        self.assertEqual(actions["ditto"].status, "blocked")
+        self.assertEqual(plan.blockers[:2], [actions["bulk-crap-uninstaller"].reason, actions["ditto"].reason])
 
     def test_missing_metadata_stays_named_blocker(self):
         plan = self.plan(resolver_error=RuntimeError("Missing SHA256"))
@@ -185,7 +185,7 @@ class BunPlannerTests(unittest.TestCase):
     def test_mixed_global_selection_is_rejected_before_bun_publication(self):
         from unittest.mock import Mock
         plan = self.plan(); runner = Mock()
-        with patch.object(bun, "validate_install"), patch.object(bun, "install_release") as install, self.assertRaisesRegex(RuntimeError, "isolated runtime/destination"):
+        with patch.object(bun, "validate_install"), patch.object(bun, "install_release") as install, self.assertRaisesRegex(RuntimeError, "isolated"):
             self.lp.execute(plan, ["bun", "pnpm-fixture"], runner=runner, bun_root=Path("/synthetic/bun"))
         install.assert_not_called(); runner.assert_not_called()
 

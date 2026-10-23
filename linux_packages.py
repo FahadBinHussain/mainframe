@@ -12,6 +12,8 @@ import os
 import platform
 import subprocess
 import zipfile
+import tarfile
+import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -20,6 +22,26 @@ import android_commandline_tools as android_tools
 import anydesk_linux as anydesk_tools
 import bitwarden_cli_linux as bitwarden_tools
 import bun_linux as bun_tools
+import github_native_linux as github_native_tools
+import node_lts_linux as node_lts_tools
+import opencode2_linux as opencode2_tools
+
+NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
+
+
+def _native_adapter(name: str) -> Any:
+    if name not in NATIVE_PACKAGES:
+        raise RuntimeError(f"Unknown native package: {name}")
+    return {"bun": bun_tools, "nodejs-lts": node_lts_tools,
+            "opencode2": opencode2_tools}.get(name, github_native_tools)
+
+
+def _native_release(name: str, architecture: str) -> dict[str, str]:
+    adapter = _native_adapter(name)
+    if adapter is github_native_tools:
+        return adapter.resolve_release(name, architecture)
+    return adapter.resolve_release(architecture)
+
 APT_MAP = {
     "7zip": "7zip", "cacert": "ca-certificates", "cmake": "cmake",
     "coreutils": "coreutils", "curl": "curl", "fd": "fd-find", "ffmpeg": "ffmpeg",
@@ -46,11 +68,30 @@ WINDOWS_ONLY = {
 # A Linux package may exist, but this adapter deliberately has no validated,
 # pinned source/translation for it.
 UNVALIDATED_NATIVE = {
-    "alist", "gcloud", "cloudflared",
-    "deno", "bun", "ngrok", "yq", "parsec", "pwsh", "steam",
-    "tor-browser", "discord", "opencode2", "nuget",
+    "alist", "gcloud", "ngrok", "parsec", "pwsh", "steam",
+    "tor-browser", "discord", "nuget",
 }
-VARIANT_DRIFT = {"nodejs-lts", "mpv-git"}
+NATIVE_REVIEW_REASONS = {
+    "discord": "Official Linux desktop exists, but no validated version-pinned vendor checksum/install adapter; no Snap/Flatpak substitution.",
+    "gcloud": "Official Linux CLI exists, but matching bundled-runtime archive/checksum and non-mutating installer are not validated; no initialization or credential migration.",
+    "herdr": "Repo-local Windows manifest selects a preview fork/channel; upstream stable Linux is not a verified same-variant replacement.",
+    "mpv-git": "Requested git variant is not distro stable mpv; no validated matching commit/build/checksum adapter.",
+    "ngrok": "Official Linux agent exists, but no validated pinned vendor checksum/install adapter; no repository, service, or account setup inferred.",
+    "nuget": "Requested nuget.exe has no equivalent native Linux command surface; Mono and dotnet nuget are not silent substitutes.",
+    "parsec": "Official Linux app is client-only, without hosting; Windows role/state and a pinned checksum/install adapter are unresolved.",
+    "pwsh": "Official Linux PowerShell exists, but supported distro/runtime dependencies and pinned package/checksum installation are not validated; Windows modules are not ported.",
+    "steam": "Official Linux client exists, but pinned vendor package integrity, bootstrap dependencies, and installer side effects are not validated.",
+    "tor-browser": "Official Linux Tor Browser exists, but release signature/trust verification and safe version-pinned installation are not implemented.",
+    "vscode": "Official Microsoft Linux VS Code exists with checksums, but download/use requires separately scoped vendor terms acceptance and a validated native adapter; consent is not inferred.",
+}
+WINGET_REVIEW_REASONS = {
+    "GPSoftware.DirectoryOpus": "Windows-only Directory Opus; no same-product native Linux build or Windows-state adapter.",
+    "Windscribe.Windscribe": "Official Linux VPN exists, but pinned signed package verification, service/network side effects, and Windows-state handling are not validated.",
+    "StartIsBack.StartAllBack": "Windows shell/Explorer customization; no same-product native Linux equivalent.",
+    "Tonec.InternetDownloadManager": "Vendor explicitly does not support Linux; no same-product native Linux build.",
+    "Wakatime.DesktopWakatime": "Official Linux desktop exists, but exact product release/checksum installation and Windows-state handling are not validated; CLI is not a substitute.",
+}
+VARIANT_DRIFT = {"mpv-git"}
 WINDOWS_WINGET = {
     "AnyDesk.AnyDesk", "AutoHotkey.AutoHotkey", "GPSoftware.DirectoryOpus",
     "Windscribe.Windscribe", "StartIsBack.StartAllBack", "Tonec.InternetDownloadManager",
@@ -136,8 +177,10 @@ def _requirements_actions(root: Path, blockers: list[str], require_pip_freeze: b
             blockers.append(reason)
             out.append(Action("pip-venv", req.name, status="blocked", reason=reason, source=str(req)))
         else:
-            out.append(Action("pip-venv", req.name, ["python3.12", "-m", "venv", ".linux-restore-venv"], source=str(req)))
-            out.append(Action("pip-install", req.name, [".linux-restore-venv/bin/python", "-m", "pip", "install", "--requirement", str(req)], source=str(req)))
+            reason = f"{req.name}: Python interpreter, dependency compatibility and explicit isolated venv destination preflight are not validated; original manifest is preserved."
+            blockers.append(reason)
+            out.append(Action("pip-venv", req.name, ["python3.12", "-m", "venv", ".linux-restore-venv"], status="blocked", reason=reason, source=str(req)))
+            out.append(Action("pip-install", req.name, [".linux-restore-venv/bin/python", "-m", "pip", "install", "--requirement", str(req)], status="blocked", reason=reason, source=str(req)))
     return out
 
 def _manifest(repo: Path, filename: str, blockers: list[str]) -> dict[str, Any]:
@@ -235,17 +278,22 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                           reason="Official Bitwarden CLI Linux x86_64 OSS archive. Install requires explicit "
                                                  "--bitwarden-cli-root pointing to a new directory; no profile, PATH, or "
                                                  "credential state is migrated. The native binary is not executed during install."))
-        elif name == "bun":
+        elif name in NATIVE_PACKAGES:
+            kind = "bun-archive" if name == "bun" else "native-archive"
             try:
-                release = bun_tools.resolve_release(architecture)
+                release = _native_release(name, architecture)
             except (RuntimeError, OSError, ValueError) as exc:
-                reason = f"Cannot resolve official Linux Bun: {exc}"
-                blockers.append(reason); actions.append(_blocked("bun-archive", name, reason, "scoop"))
+                reason = f"Cannot resolve official native Linux {name}: {exc}"
+                blockers.append(reason); actions.append(_blocked(kind, name, reason, "scoop"))
             else:
-                actions.append(Action("bun-archive", name, version=release["version"], source="scoop", archive=release,
-                                      reason="Official Bun Linux x64 baseline archive matching current Scoop Bun version; "
-                                             "requires explicit new --bun-root. No profile, PATH, package installation, "
-                                             "Windows state migration or native binary execution. Source mapping is not runtime validation."))
+                actions.append(Action(kind, name, version=release["version"], source="scoop",
+                                      archive=release,
+                                      reason="Same-product official Linux artifact matched to the Windows manifest version/variant. "
+                                             "Future install requires an explicit new --native-root NAME=PATH; no PATH/profile, "
+                                             "service, credentials, or Windows state migration. Metadata/fixture validation is not runtime validation."))
+        elif name in NATIVE_REVIEW_REASONS:
+            reason = f"{name}: {NATIVE_REVIEW_REASONS[name]}"
+            blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
         elif name in UNVALIDATED_NATIVE:
             reason = f"No validated Linux source/adapter for package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
         elif name in VARIANT_DRIFT:
@@ -279,20 +327,27 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                   reason="Duplicate AnyDesk package intent covered by official Linux AnyDesk; "
                                          "Windows identity and service state remain preserved, not migrated."))
         else:
-            reason = f"Windows WinGet declaration has no validated native package/state adapter: {ident}"
+            reason = (f"{ident}: {WINGET_REVIEW_REASONS[ident]}" if ident in WINGET_REVIEW_REASONS else
+                      f"Windows WinGet declaration has no validated native package/state adapter: {ident}")
             blockers.append(reason)
             actions.append(_blocked("winget", ident, reason, "winget"))
     for name in pnpm.get("packages", []):
         reason = f"Invalid pnpm package name: {name!r}"
         if not _safe_arg(name): blockers.append(reason); actions.append(_blocked("pnpm", str(name), reason, "pnpm"))
-        else: actions.append(Action("pnpm", name, ["pnpm", "add", "--global", "--", name], source="pnpm"))
+        else:
+            reason = f"{name}: pnpm/Node runtime, required install-script policy and explicit isolated global destination preflight are not validated; no live-home global install."
+            blockers.append(reason)
+            actions.append(Action("pnpm", name, ["pnpm", "add", "--global", "--", name], status="blocked", reason=reason, source="pnpm"))
     for item in uv.get("packages", []):
         name = item.get("name") if isinstance(item, dict) else item
         version = item.get("version") if isinstance(item, dict) else None
         spec = f"{name}=={version}" if version else name
         if not _safe_arg(name) or (version is not None and not _safe_arg(version)):
             reason = f"Invalid uv package or version: {item!r}"; blockers.append(reason); actions.append(_blocked("uv", str(name), reason, "uv"))
-        else: actions.append(Action("uv", name, ["uv", "tool", "install", "--", spec], version=version, source="uv"))
+        else:
+            reason = f"{name}: Python/runtime dependencies and explicit isolated uv tool/cache destination preflight are not validated; no live-home tool install."
+            blockers.append(reason)
+            actions.append(Action("uv", name, ["uv", "tool", "install", "--", spec], version=version, status="blocked", reason=reason, source="uv"))
     for item in go.get("packages", []):
         if isinstance(item, dict): path, version, tags = item.get("path", ""), item.get("version") or 'latest', item.get("tags", []) or []
         else: path, version, tags = item, 'latest', []
@@ -301,13 +356,19 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
         cmd = ["go", "install"]
         if tags: cmd.extend(["-tags", ",".join(tags)])
         cmd.append(f"{path}@{version}" if version else path)
-        actions.append(Action("go", path, cmd, version=version, tags=tags, source="go"))
+        reason = f"{path}: pinned Go toolchain, CGO/native build prerequisites and explicit isolated GOBIN/cache destination preflight are not validated; no live-home build/install."
+        blockers.append(reason)
+        actions.append(Action("go", path, cmd, version=version, tags=tags, status="blocked", reason=reason, source="go"))
     root = backup_root or repo
     actions.extend(_requirements_actions(root, blockers, require_pip_freeze=backup_root is not None))
     return Plan(True, distro, architecture, actions, blockers)
 
 def _apt_preflight(actions: list[Action], runner: Any) -> None:
     for action in actions:
+        if action.command:
+            for executable in (action.command[0], "apt-get", "apt-cache"):
+                if shutil.which(executable) is None:
+                    raise RuntimeError(f"Required package command is unavailable: {executable}")
         packages = action.command[action.command.index('install') + 1:] if action.command else []
         for package in (p for p in packages if not p.startswith('-')):
             try:
@@ -330,7 +391,8 @@ class PackageExecutionError(RuntimeError):
 def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess.run,
             *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False,
             anydesk_terms_accepted: bool = False, anydesk_service_allowed: bool = False,
-            bitwarden_cli_root: Path | None = None, bun_root: Path | None = None) -> dict[str, Any]:
+            bitwarden_cli_root: Path | None = None,
+            native_roots: dict[str, Path] | None = None, bun_root: Path | None = None) -> dict[str, Any]:
     if not plan.supported: raise RuntimeError("Unsupported host; no restore commands are permitted")
     actual = host_info()
     if actual != (plan.distro, plan.architecture):
@@ -366,21 +428,33 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
         if bitwarden_cli_root is None:
             raise RuntimeError("Bitwarden CLI installation requires --bitwarden-cli-root pointing to a new directory")
         bitwarden_tools.validate_install(action.archive, bitwarden_cli_root)
-    for action in (a for a in chosen if a.kind == "bun-archive"):
-        if bun_root is None:
-            raise RuntimeError("Bun installation requires --bun-root pointing to a new directory")
-        bun_tools.validate_install(action.archive, bun_root)
-    if any(a.kind == "bun-archive" for a in chosen):
-        allowed = {"apt", "bun-archive", "bitwarden-cli", "anydesk-deb", "android-sdk-archive"}
-        if any(a.kind not in allowed for a in chosen):
-            raise RuntimeError("Bun cannot be combined with commands lacking isolated runtime/destination preflight")
-        roots = [Path(root).expanduser().resolve(strict=False) for root in
-                 (bun_root, bitwarden_cli_root if any(a.kind == "bitwarden-cli" for a in chosen) else None,
-                  android_sdk_root if any(a.kind == "android-sdk-archive" for a in chosen) else None) if root is not None]
-        if len(roots) != len(set(roots)):
-            raise RuntimeError("Bun and other selected archives require distinct installation roots")
+    native_roots = dict(native_roots or {})
+    if bun_root is not None:
+        if "bun" in native_roots and Path(native_roots["bun"]) != Path(bun_root):
+            raise RuntimeError("Conflicting --bun-root and --native-root bun=PATH")
+        native_roots["bun"] = Path(bun_root)
+    native_destinations = {os.path.normpath(str(Path(root).expanduser())) for root in (
+        bitwarden_cli_root if any(a.kind == "bitwarden-cli" for a in chosen) else None,
+        android_sdk_root if any(a.kind == "android-sdk-archive" for a in chosen) else None) if root is not None}
+    for action in (a for a in chosen if a.kind in {"native-archive", "bun-archive"}):
+        if action.name not in native_roots:
+            alias = "--bun-root or " if action.name == "bun" else ""
+            raise RuntimeError(f"{action.name} installation requires {alias}--native-root {action.name}=PATH pointing to a new directory")
+        root = Path(native_roots[action.name])
+        normalized = os.path.normpath(str(root.expanduser()))
+        if normalized in native_destinations:
+            raise RuntimeError("Native packages must use distinct installation roots")
+        native_destinations.add(normalized)
+        if (_native_adapter(action.name) is github_native_tools and
+                (not isinstance(action.archive, dict) or action.archive.get("name") != action.name)):
+            raise RuntimeError(f"Native artifact product does not match selected package: {action.name}")
+        _native_adapter(action.name).validate_install(action.archive, root)
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
+    unsupported_commands = [a.name for a in chosen if a.kind not in {
+        "apt", "native-archive", "bun-archive", "bitwarden-cli", "anydesk-deb", "android-sdk-archive"}]
+    if unsupported_commands:
+        raise RuntimeError("Unvalidated command/runtime/destination preflight prevents changes: " + "; ".join(unsupported_commands))
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
     report = {"executed": [], "failed": None, "covered": {a.name: a.covered_by for a in covered}, "skipped": [a.name for a in plan.actions if a not in chosen and a not in covered], "partial": bool(selected_set), "note": "Explicit selection is a partial restore; it does not claim full parity." if selected_set else "Full planned restore."}
     for action in chosen:
@@ -392,8 +466,8 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
                                               allow_service=anydesk_service_allowed, runner=runner)
             elif action.kind == "bitwarden-cli":
                 bitwarden_tools.install_release(action.archive, bitwarden_cli_root)
-            elif action.kind == "bun-archive":
-                bun_tools.install_release(action.archive, bun_root)
+            elif action.kind in {"native-archive", "bun-archive"}:
+                _native_adapter(action.name).install_release(action.archive, native_roots[action.name])
             else:
                 result = runner(action.command, check=False, shell=False, timeout=300)
                 code = getattr(result, "returncode", result if isinstance(result, int) else 0)
@@ -402,7 +476,7 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
         except subprocess.TimeoutExpired as exc:
             report["failed"] = {"name": action.name, "error": f"timed out after {exc.timeout}s"}
             raise PackageExecutionError(f"{action.name} timed out", report) from exc
-        except (RuntimeError, OSError, ValueError, zipfile.BadZipFile) as exc:
+        except (RuntimeError, OSError, ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
             report["failed"] = {"name": action.name, "error": str(exc)}
             raise PackageExecutionError(str(exc), report) from exc
         report["executed"].append(action.name)
@@ -424,9 +498,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bitwarden-cli-root", type=Path,
                     help="new explicit Bitwarden CLI directory; no default home location or overwrite")
     ap.add_argument("--bun-root", type=Path,
-                    help="new explicit Bun directory; no default home location, PATH edit or binary execution")
+                    help="new explicit Bun directory; compatible alias for --native-root bun=PATH")
+    ap.add_argument("--native-root", action="append", default=[], metavar="NAME=PATH",
+                    help="explicit new root for one native package; repeat per product; no default home or PATH edits")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
+    native_roots = {}
+    for entry in args.native_root:
+        name, separator, path = entry.partition("=")
+        if not separator or name not in NATIVE_PACKAGES or not path or name in native_roots:
+            ap.error("--native-root requires a unique supported NAME=PATH")
+        native_roots[name] = Path(path)
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture)
     if args.execute:
         if plan.blockers and not args.select:
@@ -436,14 +518,15 @@ def main(argv: list[str] | None = None) -> int:
                              android_sdk_terms_accepted=args.android_sdk_terms_accepted,
                              anydesk_terms_accepted=args.anydesk_terms_accepted,
                              anydesk_service_allowed=args.anydesk_service_allowed,
-                             bitwarden_cli_root=args.bitwarden_cli_root, bun_root=args.bun_root)
+                             bitwarden_cli_root=args.bitwarden_cli_root,
+                             native_roots=native_roots, bun_root=args.bun_root)
             output = {"plan": plan.to_dict(), "report": report}
         except PackageExecutionError as exc:
             print(json.dumps({"plan": plan.to_dict(), "error": str(exc), "report": exc.report}, indent=2)); return 1
         except subprocess.TimeoutExpired as exc:
             detail = f"command timed out after {exc.timeout}s"
             print(json.dumps({"plan": plan.to_dict(), "error": detail}, indent=2)); return 1
-        except (RuntimeError, OSError, ValueError, zipfile.BadZipFile) as exc:
+        except (RuntimeError, OSError, ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
             print(json.dumps({"plan": plan.to_dict(), "error": str(exc)}, indent=2)); return 1
     else:
         output = plan.to_dict()
