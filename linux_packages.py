@@ -25,6 +25,7 @@ import bun_linux as bun_tools
 import github_native_linux as github_native_tools
 import node_lts_linux as node_lts_tools
 import opencode2_linux as opencode2_tools
+import pnpm_global_plan as pnpm_global_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
 
@@ -113,6 +114,7 @@ class Action:
     archive: dict[str, str] | None = None
     sdk_layout: str | None = None
     acceptance_required: bool = False
+    dry_plan: dict[str, Any] | None = None
 
 @dataclass
 class Plan:
@@ -221,7 +223,8 @@ def _anydesk_action(architecture: str, blockers: list[str], source: str) -> Acti
                          "sessions; Wayland supports outgoing only. No Windows identity, credentials, "
                          "unattended password or service configuration is imported. Runtime is untested.")
 
-def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None = None, architecture: str | None = None) -> Plan:
+def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None = None, architecture: str | None = None,
+               *, pnpm_plan_config: dict[str, Any] | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
     supported = distro in {"debian", "ubuntu"} and architecture in {"x86_64", "aarch64"}
@@ -334,8 +337,26 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
     for name in pnpm.get("packages", []):
         reason = f"Invalid pnpm package name: {name!r}"
         if not _safe_arg(name): blockers.append(reason); actions.append(_blocked("pnpm", str(name), reason, "pnpm"))
+        elif name == "vercel" and pnpm_plan_config is not None:
+            runtime = {a.name: a.archive for a in actions if a.kind == "native-archive" and a.status == "planned"}
+            try:
+                detail = pnpm_global_tools.build_dry_plan(
+                    name, pnpm_plan_config, runtime.get("nodejs-lts"), runtime.get("pnpm"),
+                    architecture=architecture,
+                    protected=tuple(p.resolve() for p in (repo, backup_root) if p is not None))
+            except (RuntimeError, OSError, ValueError, TypeError) as exc:
+                reason = f"{name}: isolated dry-plan validation failed: {exc}"
+                blockers.append(reason)
+                actions.append(_blocked("pnpm", name, reason, "pnpm"))
+            else:
+                reason = f"{name}: isolated metadata dry plan ready; installation remains blocked: " + "; ".join(detail["execution_blockers"])
+                blockers.append(reason)
+                actions.append(Action("pnpm", name, version=detail["package"]["version"],
+                                      status="blocked", reason=reason, source="pnpm", dry_plan=detail))
         else:
             reason = f"{name}: pnpm/Node runtime, required install-script policy and explicit isolated global destination preflight are not validated; no live-home global install."
+            if name == "vercel":
+                reason += " Supply --pnpm-plan-config with explicit isolated roots for a metadata-only Node CLI plan."
             blockers.append(reason)
             actions.append(Action("pnpm", name, ["pnpm", "add", "--global", "--", name], status="blocked", reason=reason, source="pnpm"))
     for item in uv.get("packages", []):
@@ -501,15 +522,27 @@ def main(argv: list[str] | None = None) -> int:
                     help="new explicit Bun directory; compatible alias for --native-root bun=PATH")
     ap.add_argument("--native-root", action="append", default=[], metavar="NAME=PATH",
                     help="explicit new root for one native package; repeat per product; no default home or PATH edits")
+    ap.add_argument("--pnpm-plan-config", type=Path,
+                    help="JSON containing explicit isolated roots for Vercel metadata-only planning; never enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
+    if args.pnpm_plan_config and args.execute:
+        ap.error("--pnpm-plan-config is dry-only and cannot be combined with --execute")
     native_roots = {}
     for entry in args.native_root:
         name, separator, path = entry.partition("=")
         if not separator or name not in NATIVE_PACKAGES or not path or name in native_roots:
             ap.error("--native-root requires a unique supported NAME=PATH")
         native_roots[name] = Path(path)
-    plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture)
+    options = {}
+    if args.pnpm_plan_config:
+        try:
+            options["pnpm_plan_config"] = json.loads(args.pnpm_plan_config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            ap.error(f"Cannot read pnpm dry-plan config: {exc}")
+        if not isinstance(options["pnpm_plan_config"], dict):
+            ap.error("pnpm dry-plan config must be a JSON object")
+    plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, **options)
     if args.execute:
         if plan.blockers and not args.select:
             print(json.dumps({"plan": plan.to_dict(), "error": "blockers present; use --select for an explicitly partial restore"}, indent=2)); return 2
