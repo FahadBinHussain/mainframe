@@ -18,6 +18,7 @@ from typing import Any, Iterable
 
 import android_commandline_tools as android_tools
 import anydesk_linux as anydesk_tools
+import bitwarden_cli_linux as bitwarden_tools
 
 APT_MAP = {
     "7zip": "7zip", "cacert": "ca-certificates", "cmake": "cmake",
@@ -45,7 +46,7 @@ WINDOWS_ONLY = {
 # A Linux package may exist, but this adapter deliberately has no validated,
 # pinned source/translation for it.
 UNVALIDATED_NATIVE = {
-    "alist", "bitwarden-cli", "gcloud", "cloudflared",
+    "alist", "gcloud", "cloudflared",
     "deno", "bun", "ngrok", "yq", "parsec", "pwsh", "steam",
     "tor-browser", "discord", "opencode2", "nuget",
 }
@@ -218,6 +219,22 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                              "Requires explicit SDK root and user acceptance of Google SDK terms before download/use. "
                                              "Set ANDROID_HOME to that root and add cmdline-tools/latest/bin and platform-tools to PATH manually. "
                                              "No adb/platform packages, licenses, Java runtime, or shell configuration are installed."))
+        elif name == "bitwarden-cli":
+            if architecture != "x86_64":
+                reason = f"Bitwarden CLI adapter conservatively supports x86_64 only, not {architecture}"
+                blockers.append(reason); actions.append(_blocked("bitwarden-cli", name, reason, "scoop"))
+            else:
+                try:
+                    release = bitwarden_tools.resolve_release(architecture)
+                except (RuntimeError, OSError, ValueError) as exc:
+                    reason = f"Cannot resolve official Linux Bitwarden CLI: {exc}"
+                    blockers.append(reason); actions.append(_blocked("bitwarden-cli", name, reason, "scoop"))
+                else:
+                    actions.append(Action("bitwarden-cli", name, version=release["version"], source="scoop",
+                                          archive=release,
+                                          reason="Official Bitwarden CLI Linux x86_64 OSS archive. Install requires explicit "
+                                                 "--bitwarden-cli-root pointing to a new directory; no profile, PATH, or "
+                                                 "credential state is migrated. The native binary is not executed during install."))
         elif name in UNVALIDATED_NATIVE:
             reason = f"No validated Linux source/adapter for package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
         elif name in VARIANT_DRIFT:
@@ -301,7 +318,8 @@ class PackageExecutionError(RuntimeError):
 
 def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess.run,
             *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False,
-            anydesk_terms_accepted: bool = False, anydesk_service_allowed: bool = False) -> dict[str, Any]:
+            anydesk_terms_accepted: bool = False, anydesk_service_allowed: bool = False,
+            bitwarden_cli_root: Path | None = None) -> dict[str, Any]:
     if not plan.supported: raise RuntimeError("Unsupported host; no restore commands are permitted")
     actual = host_info()
     if actual != (plan.distro, plan.architecture):
@@ -333,6 +351,10 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
         if android_sdk_root is None:
             raise RuntimeError("Android SDK installation requires --android-sdk-root pointing to a new directory")
         android_tools.validate_install(action.archive, android_sdk_root, accepted_terms=android_sdk_terms_accepted)
+    for action in (a for a in chosen if a.kind == "bitwarden-cli"):
+        if bitwarden_cli_root is None:
+            raise RuntimeError("Bitwarden CLI installation requires --bitwarden-cli-root pointing to a new directory")
+        bitwarden_tools.validate_install(action.archive, bitwarden_cli_root)
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
@@ -344,6 +366,8 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
             elif action.kind == "anydesk-deb":
                 anydesk_tools.install_release(action.archive, accepted_terms=anydesk_terms_accepted,
                                               allow_service=anydesk_service_allowed, runner=runner)
+            elif action.kind == "bitwarden-cli":
+                bitwarden_tools.install_release(action.archive, bitwarden_cli_root)
             else:
                 result = runner(action.command, check=False, shell=False, timeout=300)
                 code = getattr(result, "returncode", result if isinstance(result, int) else 0)
@@ -371,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="user attests acceptance of AnyDesk terms for this download/use, not other products")
     ap.add_argument("--anydesk-service-allowed", action="store_true",
                     help="explicitly permit vendor DEB installation including its service and possible automatic start")
+    ap.add_argument("--bitwarden-cli-root", type=Path,
+                    help="new explicit Bitwarden CLI directory; no default home location or overwrite")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture)
@@ -381,7 +407,8 @@ def main(argv: list[str] | None = None) -> int:
             report = execute(plan, args.select, android_sdk_root=args.android_sdk_root,
                              android_sdk_terms_accepted=args.android_sdk_terms_accepted,
                              anydesk_terms_accepted=args.anydesk_terms_accepted,
-                             anydesk_service_allowed=args.anydesk_service_allowed)
+                             anydesk_service_allowed=args.anydesk_service_allowed,
+                             bitwarden_cli_root=args.bitwarden_cli_root)
             output = {"plan": plan.to_dict(), "report": report}
         except PackageExecutionError as exc:
             print(json.dumps({"plan": plan.to_dict(), "error": str(exc), "report": exc.report}, indent=2)); return 1
