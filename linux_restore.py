@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 
 from linux_migrations import MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config
+from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 VERSION = 3
 CHUNK = 1024 * 1024
@@ -90,6 +91,8 @@ def classify(path, archive=''):
     p = PurePosixPath(path)
     if low.startswith('nativestate/wacli/'):
         return 'blocked', 'Sensitive native WACLI bytes retained without activation; use explicit wacli_state.py restore-unlocked into a NEW offline directory. Windows account profiles are not migrated.', None
+    if low.startswith((WINDOWS_PREFIX.lower(), 'secrets/' + WINDOWS_PREFIX.lower(), 'userprofile/.wacli/')):
+        return 'blocked', 'Windows WACLI candidate retained, not migrated: producing versions/schemas and consistent SQLite snapshot are unproven; profile/config/media paths and activation remain unresolved. See docs/linux-wacli-windows-parity.md.', None
     if low.endswith(('.zip', '.7z')):
         return 'opaque-archive', 'Nested archive preserved unopened; encrypted secrets require a separately authorized export/unlock workflow.', None
     if low.endswith(('.dpapi', '.enc')) or p.name == '.encryption_key':
@@ -423,6 +426,7 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
               'data_preservation_status': 'in-progress', 'operational_status': 'incomplete', 'complete': False,
               'conversion_status': 'requested' if convert_portable else 'not-requested',
               'activation_status': 'not-performed',
+              'wacli_restoration': restoration_status(),
               'action_blockers': ACTION_BLOCKERS,
               'limitations': ['Every original ZIP is retained byte-for-byte; unsafe/encrypted members remain in that raw ZIP.',
                               'Native targets are OFFLINE export candidates only. No settings, tasks, services, packages, credentials, or global instructions are activated.']}
@@ -501,6 +505,7 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                             target.unlink()
                         report['errors'].append('Member materialization failed; raw ZIP retained. See private entry status.')
         report['data_preservation_status'] = 'raw-archives-verified' if not report['errors'] else 'raw-verified-with-materialization-errors'
+        report['wacli_restoration'] = restoration_status('containing-raw-archives-verified; WACLI coverage unverified')
         report['preserved_raw_bytes'] = sum(a['size'] for a in archives)
         if convert_portable:
             stage_conversions(report, destination)
@@ -546,10 +551,11 @@ def main(argv=None):
         except (ValueError, OSError) as exc:
             print('BLOCKED: ' + str(exc), file=sys.stderr)
             return 2
-        print(json.dumps({k: report[k] for k in ('data_preservation_status', 'operational_status', 'category_counts', 'conversion_status', 'activation_status')}, sort_keys=True))
+        print(json.dumps({k: report[k] for k in ('data_preservation_status', 'operational_status', 'category_counts', 'conversion_status', 'activation_status', 'wacli_restoration')}, sort_keys=True))
         return 2 if report['errors'] else 3
     archives, entries, errors = inventory(args.backup, args.manifest, args.mode)
     report = {'version': VERSION, 'mode': args.mode, 'archives': archives, 'entries': entries, 'errors': errors,
+              'wacli_restoration': restoration_status(),
               'operational_status': 'incomplete', 'action_blockers': ACTION_BLOCKERS,
               'category_counts': dict(Counter(e['category'] for e in entries)),
               'notice': 'Metadata only. No payload was read, extracted, hashed, or decrypted. Full operational parity is NOT implemented.'}
