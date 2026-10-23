@@ -1,0 +1,222 @@
+From a46c1511744a943ffb8da700f954093de5b6c1b9 Mon Sep 17 00:00:00 2001
+From: Fahad Bin Hussain <75292632+FahadBinHussain@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 13:12:40 +0600
+Subject: [PATCH] feat: add fail-closed snapshot capability plan
+
+---
+ cmd/wacli/store.go               |  1 +
+ cmd/wacli/store_snapshot.go      | 77 ++++++++++++++++++++++++++++++++
+ cmd/wacli/store_snapshot_test.go | 63 ++++++++++++++++++++++++++
+ docs/store.md                    | 44 ++++++++++++++++++
+ 4 files changed, 185 insertions(+)
+ create mode 100644 cmd/wacli/store_snapshot.go
+ create mode 100644 cmd/wacli/store_snapshot_test.go
+
+diff --git a/cmd/wacli/store.go b/cmd/wacli/store.go
+index 0dd7e72..3f1ca97 100644
+--- a/cmd/wacli/store.go
++++ b/cmd/wacli/store.go
+@@ -11,0 +12 @@ func newStoreCmd(flags *rootFlags) *cobra.Command {
++	cmd.AddCommand(newStoreSnapshotCmd(flags))
+diff --git a/cmd/wacli/store_snapshot.go b/cmd/wacli/store_snapshot.go
+new file mode 100644
+index 0000000..52e35a1
+--- /dev/null
++++ b/cmd/wacli/store_snapshot.go
+@@ -0,0 +1,77 @@
++package main
++
++import (
++	"encoding/json"
++	"errors"
++	"fmt"
++
++	"github.com/spf13/cobra"
++)
++
++const (
++	snapshotProtocol                 = "wacli-coordinated-snapshot-v1"
++	snapshotStatus                   = "blocked"
++	snapshotBoundary                 = "UNVERIFIED"
++	snapshotCrossDatabaseConsistency = "NOT_CERTIFIED"
++)
++
++var errSnapshotCreateBlocked = errors.New("snapshot create is blocked: no supported writer-fencing backend is available; no source discovery, source read, or snapshot creation was attempted")
++
++type snapshotPlan struct {
++	Protocol                 string `json:"protocol"`
++	Status                   string `json:"status"`
++	CaptureEnabled           bool   `json:"capture_enabled"`
++	Complete                 bool   `json:"complete"`
++	Publishable              bool   `json:"publishable"`
++	Boundary                 string `json:"boundary"`
++	CrossDatabaseConsistency string `json:"cross_database_consistency"`
++	WindowsValidated         bool   `json:"windows_validated"`
++}
++
++func coordinatedSnapshotPlan() snapshotPlan {
++	var plan snapshotPlan
++	plan.Protocol = snapshotProtocol
++	plan.Status = snapshotStatus
++	plan.Boundary = snapshotBoundary
++	plan.CrossDatabaseConsistency = snapshotCrossDatabaseConsistency
++	return plan
++}
++
++func newStoreSnapshotCmd(flags *rootFlags) *cobra.Command {
++	cmd := &cobra.Command{
++		Use:   "snapshot",
++		Short: "Describe or create a coordinated store snapshot",
++	}
++	cmd.AddCommand(newStoreSnapshotPlanCmd(flags))
++	cmd.AddCommand(newStoreSnapshotCreateCmd(flags))
++	return cmd
++}
++
++func newStoreSnapshotPlanCmd(_ *rootFlags) *cobra.Command {
++	return &cobra.Command{
++		Use:   "plan",
++		Short: "Print the machine-readable snapshot capability contract",
++		Args:  cobra.NoArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			// This deliberately does not resolve --store, inspect a store, acquire a
++			// lock, or open either database. It is a static producer capability.
++			return json.NewEncoder(cmd.OutOrStdout()).Encode(coordinatedSnapshotPlan())
++		},
++	}
++}
++
++func newStoreSnapshotCreateCmd(flags *rootFlags) *cobra.Command {
++	return &cobra.Command{
++		Use:   "create",
++		Short: "Create a coordinated snapshot (currently unavailable)",
++		Args:  cobra.NoArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			// Keep this refusal before requireWritable, store resolution, locking,
++			// app construction, and all source discovery/read/create operations.
++			if flags != nil && flags.isReadOnly() {
++				return fmt.Errorf("%w (read-only mode is also enabled)", errSnapshotCreateBlocked)
++			}
++			return errSnapshotCreateBlocked
++		},
++	}
++}
+diff --git a/cmd/wacli/store_snapshot_test.go b/cmd/wacli/store_snapshot_test.go
+new file mode 100644
+index 0000000..00aaf56
+--- /dev/null
++++ b/cmd/wacli/store_snapshot_test.go
+@@ -0,0 +1,63 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"strings"
++	"testing"
++)
++
++func TestStoreSnapshotPlanIsFixedOfflineContract(t *testing.T) {
++	var got bytes.Buffer
++	cmd := newStoreSnapshotPlanCmd(&rootFlags{storeDir: "/this/path-must-not-be-read"})
++	cmd.SetOut(&got)
++	if err := cmd.Execute(); err != nil {
++		t.Fatal(err)
++	}
++	var plan snapshotPlan
++	if err := json.Unmarshal(got.Bytes(), &plan); err != nil {
++		t.Fatalf("plan is not one JSON object: %v; output=%q", err, got.String())
++	}
++	if plan.Protocol != snapshotProtocol || plan.Status != "blocked" {
++		t.Fatalf("protocol/status = %q/%q", plan.Protocol, plan.Status)
++	}
++	if plan.CaptureEnabled || plan.Complete || plan.Publishable || plan.WindowsValidated {
++		t.Fatalf("plan enables an unsupported operation: %+v", plan)
++	}
++	if plan.Boundary != "UNVERIFIED" || plan.CrossDatabaseConsistency != "NOT_CERTIFIED" {
++		t.Fatalf("boundary/consistency = %q/%q", plan.Boundary, plan.CrossDatabaseConsistency)
++	}
++}
++
++func TestStoreSnapshotCreateRefusesBeforeSourceIO(t *testing.T) {
++	for _, flags := range []*rootFlags{
++		nil,
++		{},
++		{storeDir: "/path/that-must-not-be-discovered"},
++		{account: "invalid-account"},
++		{storeDir: "/invalid", account: "also-invalid"},
++		{readOnly: true},
++	} {
++		cmd := newStoreSnapshotCreateCmd(flags)
++		err := cmd.Execute()
++		if err == nil || !strings.Contains(err.Error(), "no source discovery, source read, or snapshot creation was attempted") {
++			t.Fatalf("flags=%+v error = %v, want explicit fail-closed refusal", flags, err)
++		}
++		if !errors.Is(err, errSnapshotCreateBlocked) {
++			t.Fatalf("flags=%+v error = %v, want errSnapshotCreateBlocked", flags, err)
++		}
++	}
++}
++
++func TestStoreSnapshotCommandIsWired(t *testing.T) {
++	store := newStoreCmd(&rootFlags{})
++	cmd, _, err := store.Find([]string{"snapshot", "plan"})
++	if err != nil || cmd == nil {
++		t.Fatalf("snapshot plan is not wired: cmd=%v err=%v", cmd, err)
++	}
++	cmd, _, err = store.Find([]string{"snapshot", "create"})
++	if err != nil || cmd == nil {
++		t.Fatalf("snapshot create is not wired: cmd=%v err=%v", cmd, err)
++	}
++}
+diff --git a/docs/store.md b/docs/store.md
+index 78a8b05..15c34ee 100644
+--- a/docs/store.md
++++ b/docs/store.md
+@@ -11,0 +12,2 @@ wacli store cleanup [--days N] [--dry-run] [--confirm]
++wacli store snapshot plan
++wacli store snapshot create
+@@ -37,0 +40,42 @@ wacli groups prune [--days N] [--left-only=false|--include-active] [--dry-run] [
++## Coordinated snapshot producer contract
++
++`wacli store snapshot plan` is an offline, source-only capability query. It emits
++one plain JSON object (one newline-terminated record; no success/data envelope)
++and does not resolve configuration, discover a store, acquire `LOCK`, or open
++either database. The current fixed contract is:
++
++```json
++{
++  "protocol": "wacli-coordinated-snapshot-v1",
++  "status": "blocked",
++  "capture_enabled": false,
++  "complete": false,
++  "publishable": false,
++  "boundary": "UNVERIFIED",
++  "cross_database_consistency": "NOT_CERTIFIED",
++  "windows_validated": false
++}
++```
++
++The eight fields above are the complete producer capability contract. The
++`status`, `capture_enabled`, `complete`, `publishable`, boundary, consistency,
++and validation fields are all negative until the required backend exists.
++`wacli store snapshot create` is deliberately fail-closed and exits with an
++explicit error before source discovery, source reads, locking, or artifact
++creation. Mainframe must match the protocol and all false/negative fields above;
++receipt acceptance is not enabled, and an arbitrary user-supplied receipt cannot
++certify a snapshot.
++
++A future implementation must fence **all writers** (including a running sync
++and its delegated send/state writers), drain them, and establish a validated
++capture window before it can claim completion. The snapshot must include both
++`session.db` and `wacli.db` plus the media paths referenced by the database;
++partial media membership cannot be published as a complete snapshot. SQLite
++backup or file copying alone is not an all-writer consistency proof.
++
++On Linux, restoring a complete snapshot can restore local databases and files,
++subject to the usual filesystem ownership/permission requirements. Restoration
++does not prove that the linked-device credentials remain usable: WhatsApp may
++invalidate or require re-pairing of session credentials, so credential
++usability must be checked separately and is never implied by a restored store.
++
