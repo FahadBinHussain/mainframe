@@ -1,0 +1,1644 @@
+Subject: LOCAL UNIMPLEMENTED-UPSTREAM PROPOSAL: causal producer admission (wacli)
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/cmd/wacli/history.go b/cmd/wacli/history.go
+index d68f522..142bfeb 100644
+--- a/cmd/wacli/history.go
++++ b/cmd/wacli/history.go
+@@ -153,0 +154,7 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			// History callbacks write through the app store before the
++			// backfill returns; keep the store live until that frontier joins.
++			defer finish(nil)
+diff --git a/cmd/wacli/media.go b/cmd/wacli/media.go
+index 863123d..6cc5480 100644
+--- a/cmd/wacli/media.go
++++ b/cmd/wacli/media.go
+@@ -70,0 +71,6 @@ func newMediaRetryCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			// Keep callbacks and media worker descendants inside the app frontier.
++			defer finish(nil)
+@@ -172,0 +179,6 @@ func newMediaBackfillCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			// Keep callbacks and media worker descendants inside the app frontier.
++			defer finish(nil)
+diff --git a/cmd/wacli/messages_delete.go b/cmd/wacli/messages_delete.go
+index c7dbeee..95a76b3 100644
+--- a/cmd/wacli/messages_delete.go
++++ b/cmd/wacli/messages_delete.go
+@@ -73 +73 @@ func newMessagesDeleteCmd(flags *rootFlags) *cobra.Command {
+-				if _, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (struct{}, error) {
++				if _, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (struct{}, error) {
+@@ -112 +112 @@ func newMessagesDeleteCmd(flags *rootFlags) *cobra.Command {
+-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+@@ -191 +191 @@ func newMessagesRevokeCmd(flags *rootFlags) *cobra.Command {
+-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/messages_edit.go b/cmd/wacli/messages_edit.go
+index d2a0931..1162560 100644
+--- a/cmd/wacli/messages_edit.go
++++ b/cmd/wacli/messages_edit.go
+@@ -82 +82 @@ func newMessagesEditCmd(flags *rootFlags) *cobra.Command {
+-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/messages_forward.go b/cmd/wacli/messages_forward.go
+index 20d12f4..f8b7434 100644
+--- a/cmd/wacli/messages_forward.go
++++ b/cmd/wacli/messages_forward.go
+@@ -82 +82 @@ func newMessagesForwardCmd(flags *rootFlags) *cobra.Command {
+-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/poll_cmd.go b/cmd/wacli/poll_cmd.go
+index b5b95a8..2fbb612 100644
+--- a/cmd/wacli/poll_cmd.go
++++ b/cmd/wacli/poll_cmd.go
+@@ -121 +121 @@ func newPollVoteCmd(flags *rootFlags) *cobra.Command {
+-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+@@ -400 +400 @@ func executeDelegatedPollVote(ctx context.Context, a *app.App, req sendDelegateR
+-	sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++	sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/presence.go b/cmd/wacli/presence.go
+index 8e40e02..6a13a1b 100644
+--- a/cmd/wacli/presence.go
++++ b/cmd/wacli/presence.go
+@@ -221 +221 @@ func runPresence(flags *rootFlags, to string, state types.ChatPresence, media st
+-	if err := sendPresenceWithRetry(ctx, reconnectForSend(a), func(ctx context.Context) error {
++	if err := sendOwnedPresenceWithRetry(ctx, a, reconnectForSend(a), func(ctx context.Context) error {
+@@ -281,0 +282,11 @@ func sendPresenceWithRetry(ctx context.Context, reconnect func(context.Context)
++
++// A bounded attempt may return while its registered worker is still running.
++// The command scope alone is not its lifetime; runSendAttempt owns a child.
++func sendOwnedPresenceWithRetry(ctx context.Context, a *app.App, reconnect func(context.Context) error, send func(context.Context) error) (err error) {
++	ctx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return err
++	}
++	defer func() { finish(err) }()
++	return sendPresenceWithRetry(ctx, reconnect, send)
++}
+diff --git a/cmd/wacli/presence_test.go b/cmd/wacli/presence_test.go
+index 6f4bfce..597800e 100644
+--- a/cmd/wacli/presence_test.go
++++ b/cmd/wacli/presence_test.go
+@@ -252,0 +253 @@ func TestSendPresenceWithRetryReconnectsOnNotConnected(t *testing.T) {
++	owner := &app.App{}
+@@ -255 +256 @@ func TestSendPresenceWithRetryReconnectsOnNotConnected(t *testing.T) {
+-	err := sendPresenceWithRetry(contextWithTestTimeout(t), func(context.Context) error {
++	err := sendOwnedPresenceWithRetry(contextWithTestTimeout(t), owner, func(context.Context) error {
+diff --git a/cmd/wacli/producer_inventory_test.go b/cmd/wacli/producer_inventory_test.go
+new file mode 100644
+index 0000000..a73051d
+--- /dev/null
++++ b/cmd/wacli/producer_inventory_test.go
+@@ -0,0 +1,88 @@
++package main
++
++import (
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"io/fs"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++// These are review obligations, not capture receipts. Synchronous group joins,
++// individual operation scopes, and retained errors are tested separately.
++func TestDrainSourceProducerInventory(t *testing.T) {
++	reviewed := map[string]int{
++		"cmd/wacli/send_helpers.go:runSendAttempt":               1,
++		"cmd/wacli/send_ipc.go:startSendDelegateServerForStore":  2,
++		"cmd/wacli/send_ipc.go:handleSendDelegateConn":           1,
++		"cmd/wacli/signal.go:signalContextForChannel":            1,
++		"internal/app/app_state.go:drainThrough":                 1,
++		"internal/app/media.go:runMediaWorkers":                  1,
++		"internal/app/media_backfill.go:BackfillMedia":           1,
++		"internal/app/presence.go:renewPresenceWatches":          1,
++		"internal/app/sync_idle.go:reconnectWhileWatchingLogout": 1,
++		"internal/app/webhook.go:runSyncWebhookWorker":           1,
++	}
++	seen := map[string]int{}
++	err := filepath.WalkDir("../..", func(path string, entry fs.DirEntry, err error) error {
++		if err != nil {
++			return err
++		}
++		if entry.IsDir() {
++			if entry.Name() == ".git" || entry.Name() == "node_modules" || entry.Name() == "vendor" {
++				return filepath.SkipDir
++			}
++			return nil
++		}
++		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
++			return nil
++		}
++		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
++		if err != nil {
++			return err
++		}
++		rel, err := filepath.Rel("../..", path)
++		if err != nil {
++			return err
++		}
++		for _, decl := range file.Decls {
++			fn, ok := decl.(*ast.FuncDecl)
++			if !ok || fn.Body == nil {
++				continue
++			}
++			key := filepath.ToSlash(rel) + ":" + fn.Name.Name
++			ast.Inspect(fn.Body, func(node ast.Node) bool {
++				if _, ok := node.(*ast.GoStmt); ok {
++					seen[key]++
++				}
++				if call, ok := node.(*ast.CallExpr); ok {
++					if name, ok := call.Fun.(*ast.Ident); ok {
++						if (name.Name == "runSendOperation" || name.Name == "runSendAttempt") && filepath.ToSlash(rel) != "cmd/wacli/send_helpers.go" {
++							t.Errorf("unscoped bounded send at %s", key)
++						}
++						if name.Name == "sendPresenceWithRetry" && fn.Name.Name != "sendOwnedPresenceWithRetry" {
++							t.Errorf("unscoped bounded presence at %s", key)
++						}
++					}
++				}
++				return true
++			})
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	for key, count := range seen {
++		if reviewed[key] != count {
++			t.Errorf("unreviewed worker %s count=%d expected=%d", key, count, reviewed[key])
++		}
++	}
++	for key, count := range reviewed {
++		if seen[key] != count {
++			t.Errorf("stale worker inventory %s count=%d expected=%d", key, seen[key], count)
++		}
++	}
++}
+diff --git a/cmd/wacli/retry_uncertainty_test.go b/cmd/wacli/retry_uncertainty_test.go
+index b643a49..f5a2299 100644
+--- a/cmd/wacli/retry_uncertainty_test.go
++++ b/cmd/wacli/retry_uncertainty_test.go
+@@ -8,0 +9 @@ import (
++	"github.com/openclaw/wacli/internal/app"
+@@ -51,0 +53,6 @@ func runRetryReview(t *testing.T, sender *retryReviewSender) (types.MessageID, e
++	a := &app.App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(err)
+@@ -53 +60 @@ func runRetryReview(t *testing.T, sender *retryReviewSender) (types.MessageID, e
+-	id, err := runSendOperation(context.Background(), func(context.Context) error {
++	id, err := runSendOperation(ctx, func(context.Context) error {
+diff --git a/cmd/wacli/send_file_cmd.go b/cmd/wacli/send_file_cmd.go
+index df5f052..44ede31 100644
+--- a/cmd/wacli/send_file_cmd.go
++++ b/cmd/wacli/send_file_cmd.go
+@@ -76,0 +77,5 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer finish(nil)
+@@ -94 +99 @@ func newSendFileCmd(flags *rootFlags) *cobra.Command {
+-			res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
++			res, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
+diff --git a/cmd/wacli/send_file_store_test.go b/cmd/wacli/send_file_store_test.go
+index e498de9..2344355 100644
+--- a/cmd/wacli/send_file_store_test.go
++++ b/cmd/wacli/send_file_store_test.go
+@@ -62,2 +62,3 @@ type fakeSendFileApp struct {
+-	wa app.WAClient
+-	db *store.DB
++	wa    app.WAClient
++	db    *store.DB
++	scope *app.App
+@@ -67,0 +69,6 @@ func (f *fakeSendFileApp) DB() *store.DB    { return f.db }
++func (f *fakeSendFileApp) BeginScopedOperation(ctx context.Context) (context.Context, func(error), error) {
++	if f.scope == nil {
++		f.scope = &app.App{}
++	}
++	return f.scope.BeginScopedOperation(ctx)
++}
+diff --git a/cmd/wacli/send_helpers.go b/cmd/wacli/send_helpers.go
+index c708282..477052f 100644
+--- a/cmd/wacli/send_helpers.go
++++ b/cmd/wacli/send_helpers.go
+@@ -31,0 +32,23 @@ func runSendOperation[T any](
++// runOwnedSendOperation binds retries and their potentially long-lived
++// attempt workers to the application's operation scope. Missing scope
++// authority is a hard error: sending must not proceed unowned.
++func runOwnedSendOperation[T any](
++	ctx context.Context,
++	owner any,
++	reconnect func(context.Context) error,
++	op func(context.Context) (T, error),
++) (result T, err error) {
++	scoped, ok := owner.(interface {
++		BeginScopedOperation(context.Context) (context.Context, func(error), error)
++	})
++	if !ok {
++		return result, app.ErrOperationScopeMissing
++	}
++	ownedCtx, finish, beginErr := scoped.BeginScopedOperation(ctx)
++	if beginErr != nil {
++		return result, beginErr
++	}
++	defer func() { finish(err) }()
++	return runSendOperation(ownedCtx, reconnect, op)
++}
++
+@@ -57,0 +81,19 @@ func runSendAttempt[T any](ctx context.Context, timeout time.Duration, op func(c
++	// Register before launching the goroutine so a drain cannot miss the
++	// actual lifetime of an attempt that outlives its timeout. An attempt
++	// without a genuine application scope must never launch.
++	workerCtx, finishWorker, registerErr := app.RegisterOperationChild(attemptCtx)
++	if registerErr != nil {
++		var zero T
++		return zero, registerErr
++	}
++	if workerCtx == nil {
++		var zero T
++		return zero, app.ErrOperationScopeMissing
++	}
++	// Registration is deliberately retained until the worker returns, but a
++	// cancellation racing with admission must not start a fresh effect.
++	if err := attemptCtx.Err(); err != nil {
++		finishWorker(err)
++		var zero T
++		return zero, err
++	}
+@@ -65 +107,16 @@ func runSendAttempt[T any](ctx context.Context, timeout time.Duration, op func(c
+-		value, err := op(attemptCtx)
++		var workerErr error
++		defer func() {
++			if recovered := recover(); recovered != nil {
++				workerErr = fmt.Errorf("send attempt panicked: %v", recovered)
++				if finishWorker != nil {
++					finishWorker(workerErr)
++				}
++				ch <- result{err: workerErr}
++				return
++			}
++			if finishWorker != nil {
++				finishWorker(workerErr)
++			}
++		}()
++		value, err := op(workerCtx)
++		workerErr = err
+diff --git a/cmd/wacli/send_helpers_test.go b/cmd/wacli/send_helpers_test.go
+index a9c5770..6091c58 100644
+--- a/cmd/wacli/send_helpers_test.go
++++ b/cmd/wacli/send_helpers_test.go
+@@ -13,0 +14 @@ import (
++	"github.com/openclaw/wacli/internal/app"
+@@ -19,0 +21,6 @@ func TestRunSendOperationRetriesRetryableError(t *testing.T) {
++	a := &app.App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
+@@ -23 +30 @@ func TestRunSendOperationRetriesRetryableError(t *testing.T) {
+-	got, err := runSendOperation(context.Background(), func(ctx context.Context) error {
++	got, err := runSendOperation(ctx, func(ctx context.Context) error {
+@@ -44,0 +52,6 @@ func TestRunSendOperationDoesNotRetryValidationError(t *testing.T) {
++	a := &app.App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
+@@ -47 +60 @@ func TestRunSendOperationDoesNotRetryValidationError(t *testing.T) {
+-	_, err := runSendOperation(context.Background(), func(ctx context.Context) error {
++	_, err = runSendOperation(ctx, func(ctx context.Context) error {
+@@ -62 +75,7 @@ func TestRunSendAttemptTimesOut(t *testing.T) {
+-	_, err := runSendAttempt(context.Background(), 20*time.Millisecond, func(ctx context.Context) (string, error) {
++	a := &app.App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
++	_, err = runSendAttempt(ctx, 20*time.Millisecond, func(ctx context.Context) (string, error) {
+diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
+index 26ec532..07c08ec 100644
+--- a/cmd/wacli/send_ipc.go
++++ b/cmd/wacli/send_ipc.go
+@@ -288 +288,10 @@ func handleSendDelegateConn(ctx context.Context, conn net.Conn, execute sendDele
+-		go func() { _, _ = io.Copy(io.Discard, conn); cancel() }()
++		readerDone := make(chan struct{})
++		go func() {
++			defer close(readerDone)
++			_, _ = io.Copy(io.Discard, conn)
++			cancel()
++		}()
++		defer func() {
++			_ = conn.Close()
++			<-readerDone
++		}()
+@@ -545 +554 @@ func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateR
+-	if err := sendPresenceWithRetry(ctx, reconnectForSend(a), func(ctx context.Context) error {
++	if err := sendOwnedPresenceWithRetry(ctx, a, reconnectForSend(a), func(ctx context.Context) error {
+@@ -583 +592 @@ func executeDelegatedEdit(ctx context.Context, a *app.App, req sendDelegateReque
+-	sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++	sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+@@ -649 +658 @@ func executeDelegatedFile(ctx context.Context, a *app.App, req sendDelegateReque
+-	res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendDelegateResponse, error) {
++	res, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (sendDelegateResponse, error) {
+@@ -684 +693 @@ func executeDelegatedSticker(ctx context.Context, a *app.App, req sendDelegateRe
+-	res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendDelegateResponse, error) {
++	res, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (sendDelegateResponse, error) {
+@@ -714 +723 @@ func executeDelegatedReact(ctx context.Context, a *app.App, req sendDelegateRequ
+-	sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++	sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_lifecycle_test.go b/cmd/wacli/send_lifecycle_test.go
+new file mode 100644
+index 0000000..5a7bf2b
+--- /dev/null
++++ b/cmd/wacli/send_lifecycle_test.go
+@@ -0,0 +1,152 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/app"
++)
++
++type unscopedSendOwner struct {
++	finished bool
++}
++
++func (o *unscopedSendOwner) BeginScopedOperation(ctx context.Context) (context.Context, func(error), error) {
++	return ctx, func(error) { o.finished = true }, nil
++}
++
++func TestDrainOwnedSendMissingOwnerRefusesBeforeEffects(t *testing.T) {
++	var operations, reconnects int
++	_, err := runOwnedSendOperation(context.Background(), struct{}{}, func(context.Context) error {
++		reconnects++
++		return nil
++	}, func(context.Context) (int, error) {
++		operations++
++		return 1, nil
++	})
++	if !errors.Is(err, app.ErrOperationScopeMissing) {
++		t.Fatalf("missing owner error = %v, want %v", err, app.ErrOperationScopeMissing)
++	}
++	if operations != 0 || reconnects != 0 {
++		t.Fatalf("unowned send had effects: operations=%d reconnects=%d", operations, reconnects)
++	}
++}
++
++func TestDrainOwnedSendUnscopedOwnerRefusesBeforeEffects(t *testing.T) {
++	owner := &unscopedSendOwner{}
++	var operations, reconnects int
++	_, err := runOwnedSendOperation(context.Background(), owner, func(context.Context) error {
++		reconnects++
++		return nil
++	}, func(context.Context) (int, error) {
++		operations++
++		return 1, nil
++	})
++	if !errors.Is(err, app.ErrOperationScopeMissing) {
++		t.Fatalf("unscoped owner error = %v, want %v", err, app.ErrOperationScopeMissing)
++	}
++	if !owner.finished {
++		t.Fatal("owner scope was not finished")
++	}
++	if operations != 0 || reconnects != 0 {
++		t.Fatalf("unscoped send had effects: operations=%d reconnects=%d", operations, reconnects)
++	}
++}
++
++func TestDrainSendAttemptOutlivesTimeoutAndRetainsFailure(t *testing.T) {
++	a := &app.App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
++	entered, release := make(chan struct{}), make(chan struct{})
++	var once sync.Once
++	unblock := func() { once.Do(func() { close(release) }) }
++	t.Cleanup(unblock)
++	failure := errors.New("synthetic final send persistence failure")
++	result := make(chan error, 1)
++	go func() {
++		_, err := runSendAttempt(ctx, 20*time.Millisecond, func(context.Context) (int, error) { close(entered); <-release; return 0, failure })
++		result <- err
++	}()
++	<-entered
++	select {
++	case err := <-result:
++		if err == nil {
++			t.Fatal("timeout reported success")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("caller did not time out")
++	}
++	finish(nil)
++	wait, stop := context.WithTimeout(context.Background(), 20*time.Millisecond)
++	defer stop()
++	held, err := a.BeginDrain(wait)
++	if held != nil || !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("drain escaped actual send worker: %v %v", held, err)
++	}
++	unblock()
++	held, err = a.BeginDrain(context.Background())
++	if held != nil || !errors.Is(err, failure) || !errors.Is(err, app.ErrDrainCoverageIncomplete) {
++		t.Fatalf("send worker error lost: %v %v", held, err)
++	}
++}
++
++func TestDrainOwnedSendPanicIsRetained(t *testing.T) {
++	a := &app.App{}
++	failure := errors.New("synthetic send worker panic")
++	_, err := runOwnedSendOperation(context.Background(), a, func(context.Context) error { return nil }, func(context.Context) (int, error) { panic(failure) })
++	if err == nil {
++		t.Fatal("panic reported success")
++	}
++	held, drainErr := a.BeginDrain(context.Background())
++	if held != nil || !errors.Is(drainErr, app.ErrDrainCoverageIncomplete) || drainErr == nil {
++		t.Fatalf("panic escaped refusal: %v %v", held, drainErr)
++	}
++}
++
++func TestDrainCanceledSendAttemptDoesNotLaunchEffects(t *testing.T) {
++	a := &app.App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
++	canceled, cancel := context.WithCancel(ctx)
++	cancel()
++	var effects int
++	_, err = runSendAttempt(canceled, time.Second, func(context.Context) (int, error) {
++		effects++
++		return 1, nil
++	})
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("canceled send attempt error = %v, want context canceled", err)
++	}
++	if effects != 0 {
++		t.Fatalf("canceled send attempt launched effects: %d", effects)
++	}
++}
++
++func TestDrainRetrySuccessDoesNotEraseAttemptFailure(t *testing.T) {
++	a := &app.App{}
++	failure := errors.New("failed to get device list: synthetic uncertain attempt")
++	attempts := 0
++	value, err := runOwnedSendOperation(context.Background(), a, func(context.Context) error { return nil }, func(context.Context) (int, error) {
++		attempts++
++		if attempts == 1 {
++			return 0, failure
++		}
++		return 7, nil
++	})
++	if err != nil || value != 7 || attempts != 2 {
++		t.Fatalf("retry result: value=%d attempts=%d err=%v", value, attempts, err)
++	}
++	held, drainErr := a.BeginDrain(context.Background())
++	if held != nil || !errors.Is(drainErr, failure) || !errors.Is(drainErr, app.ErrDrainCoverageIncomplete) {
++		t.Fatalf("successful retry erased failure evidence: held=%v err=%v", held, drainErr)
++	}
++}
+diff --git a/cmd/wacli/send_location_cmd.go b/cmd/wacli/send_location_cmd.go
+index 5c23a23..af45fd0 100644
+--- a/cmd/wacli/send_location_cmd.go
++++ b/cmd/wacli/send_location_cmd.go
+@@ -108 +108 @@ func newSendLocationCmd(flags *rootFlags) *cobra.Command {
+-			msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			msgID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+@@ -221 +221 @@ func executeDelegatedLocation(ctx context.Context, a *app.App, req sendDelegateR
+-	msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++	msgID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_poll_cmd.go b/cmd/wacli/send_poll_cmd.go
+index 471e170..4dd6064 100644
+--- a/cmd/wacli/send_poll_cmd.go
++++ b/cmd/wacli/send_poll_cmd.go
+@@ -97 +97 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
+-			msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			msgID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+@@ -239 +239 @@ func executeDelegatedPoll(ctx context.Context, a *app.App, req sendDelegateReque
+-	msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++	msgID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_react_cmd.go b/cmd/wacli/send_react_cmd.go
+index afdaf1d..d530d13 100644
+--- a/cmd/wacli/send_react_cmd.go
++++ b/cmd/wacli/send_react_cmd.go
+@@ -74 +74 @@ func newSendReactCmd(flags *rootFlags) *cobra.Command {
+-			sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_select_cmd.go b/cmd/wacli/send_select_cmd.go
+index 4dc0016..63c4fe5 100644
+--- a/cmd/wacli/send_select_cmd.go
++++ b/cmd/wacli/send_select_cmd.go
+@@ -201 +201 @@ func sendButtonListSelection(ctx context.Context, a *app.App, chat types.JID, ta
+-	sentID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++	sentID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_status_cmd.go b/cmd/wacli/send_status_cmd.go
+index d3b741d..d95112f 100644
+--- a/cmd/wacli/send_status_cmd.go
++++ b/cmd/wacli/send_status_cmd.go
+@@ -110 +110 @@ func newSendStatusCmd(flags *rootFlags) *cobra.Command {
+-			msgID, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
++			msgID, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_sticker_cmd.go b/cmd/wacli/send_sticker_cmd.go
+index a18e1f7..0b7f945 100644
+--- a/cmd/wacli/send_sticker_cmd.go
++++ b/cmd/wacli/send_sticker_cmd.go
+@@ -80 +80 @@ func newSendStickerCmd(flags *rootFlags) *cobra.Command {
+-			res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
++			res, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
+diff --git a/cmd/wacli/send_text_history.go b/cmd/wacli/send_text_history.go
+index 90df7bf..243b87a 100644
+--- a/cmd/wacli/send_text_history.go
++++ b/cmd/wacli/send_text_history.go
+@@ -18 +18 @@ func sendTextWithHistory(ctx context.Context, a sendTextApp, reconnect func(cont
+-	id, err := runSendOperation(ctx, reconnect, func(ctx context.Context) (types.MessageID, error) {
++	id, err := runOwnedSendOperation(ctx, a, reconnect, func(ctx context.Context) (types.MessageID, error) {
+diff --git a/cmd/wacli/send_voice_cmd.go b/cmd/wacli/send_voice_cmd.go
+index e1e4246..7b0379c 100644
+--- a/cmd/wacli/send_voice_cmd.go
++++ b/cmd/wacli/send_voice_cmd.go
+@@ -64,0 +65,5 @@ func newSendVoiceCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer finish(nil)
+@@ -82 +87 @@ func newSendVoiceCmd(flags *rootFlags) *cobra.Command {
+-			res, err := runSendOperation(ctx, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
++			res, err := runOwnedSendOperation(ctx, a, reconnectForSend(a), func(ctx context.Context) (sendFileOutcome, error) {
+diff --git a/internal/app/admission_race_test.go b/internal/app/admission_race_test.go
+new file mode 100644
+index 0000000..6a2e2a8
+--- /dev/null
++++ b/internal/app/admission_race_test.go
+@@ -0,0 +1,83 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestOperationAdmissionSealRaceHasNoLateAcceptance(t *testing.T) {
++	var admission operationAdmission
++	const callers = 64
++	start := make(chan struct{})
++	accepted := make(chan func(error), callers)
++	sealed := make(chan struct{}, callers)
++	var wg sync.WaitGroup
++	for i := 0; i < callers; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			<-start
++			finish, err := admission.begin(context.Background())
++			if errors.Is(err, ErrOperationSealed) {
++				sealed <- struct{}{}
++				return
++			}
++			if err != nil {
++				t.Errorf("begin: %v", err)
++				return
++			}
++			accepted <- finish
++		}()
++	}
++	close(start)
++	admission.cancelAccepted()
++	wg.Wait()
++	close(accepted)
++	for finish := range accepted {
++		finish(nil)
++	}
++	if _, err := admission.begin(context.Background()); !errors.Is(err, ErrOperationSealed) {
++		t.Fatalf("post-seal admission: %v", err)
++	}
++	if err := admission.drain(context.Background()); err != nil {
++		t.Fatalf("drain after race: %v", err)
++	}
++}
++
++func TestAcceptedOperationMayJoinDescendantBeforeDrain(t *testing.T) {
++	var admission operationAdmission
++	finish, err := admission.begin(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	childDone := make(chan struct{})
++	drainDone := make(chan error, 1)
++	go func() { drainDone <- admission.drain(context.Background()) }()
++	select {
++	case err := <-drainDone:
++		t.Fatalf("drain returned before accepted descendant joined: %v", err)
++	case <-time.After(10 * time.Millisecond):
++	}
++	go func() {
++		// A callback/worker descendant is covered by the parent's accepted
++		// operation until the owner finishes its frontier.
++		close(childDone)
++		finish(nil)
++	}()
++	select {
++	case <-childDone:
++	case <-time.After(time.Second):
++		t.Fatal("accepted descendant did not run")
++	}
++	select {
++	case err := <-drainDone:
++		if err != nil {
++			t.Fatalf("drain: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join accepted descendant")
++	}
++}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 9c61e9f..6a6adb7 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -26,0 +27,35 @@ import (
++// contextEventWA is optional so existing fakes and integrations remain
++// source-compatible. Real whatsmeow clients preserve the SDK callback lineage.
++type contextEventWA interface {
++	AddEventHandlerWithContext(func(context.Context, any) error) uint32
++}
++
++// addEventHandler prefers the context-aware SDK registration. The legacy
++// fallback keeps synchronous callback effects within the SDK callback; it cannot
++// manufacture lineage for SDKs that do not expose it.
++func (a *App) addEventHandler(ctx context.Context, handler func(context.Context, any)) uint32 {
++	invoke := func(callbackCtx context.Context, evt any) error {
++		ownedCtx, finish, err := a.BeginScopedOperation(callbackCtx)
++		if err != nil {
++			return err
++		}
++		defer func() {
++			if recovered := recover(); recovered != nil {
++				if cause, ok := recovered.(error); ok {
++					finish(fmt.Errorf("application callback panic: %w", cause))
++				} else {
++					finish(fmt.Errorf("application callback panic: %v", recovered))
++				}
++				panic(recovered)
++			}
++			finish(nil)
++		}()
++		handler(ownedCtx, evt)
++		return nil
++	}
++	if h, ok := a.wa.(contextEventWA); ok {
++		return h.AddEventHandlerWithContext(invoke)
++	}
++	return a.wa.AddEventHandler(func(evt any) { _ = invoke(ctx, evt) })
++}
++
+@@ -225 +260 @@ func (a *App) OpenWA() error {
+-		a.sessionHandler = a.wa.AddEventHandler(func(evt any) { a.observeSessionState(state, evt) })
++		a.sessionHandler = a.addEventHandler(context.Background(), func(_ context.Context, evt any) { a.observeSessionState(state, evt) })
+diff --git a/internal/app/backfill.go b/internal/app/backfill.go
+index 2a0f217..7e83a90 100644
+--- a/internal/app/backfill.go
++++ b/internal/app/backfill.go
+@@ -107 +107 @@ func (a *App) BackfillHistory(ctx context.Context, opts BackfillOptions) (Backfi
+-	handlerID := a.wa.AddEventHandler(func(evt any) {
++	handlerID := a.addEventHandler(ctx, func(callbackCtx context.Context, evt any) {
+diff --git a/internal/app/callback_context_test.go b/internal/app/callback_context_test.go
+new file mode 100644
+index 0000000..04c7216
+--- /dev/null
++++ b/internal/app/callback_context_test.go
+@@ -0,0 +1,68 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++)
++
++type contextCallbackFakeWA struct {
++	*fakeWA
++	handler func(context.Context, any) error
++}
++
++func (f *contextCallbackFakeWA) AddEventHandlerWithContext(handler func(context.Context, any) error) uint32 {
++	f.handler = handler
++	return 1
++}
++
++func TestAddEventHandlerPreservesSDKCallbackContext(t *testing.T) {
++	fake := &contextCallbackFakeWA{fakeWA: &fakeWA{}}
++	a := &App{wa: fake}
++	parent := context.WithValue(context.Background(), struct{}{}, "sdk-lineage")
++	var got context.Context
++	a.addEventHandler(context.Background(), func(callbackCtx context.Context, _ any) {
++		got = callbackCtx
++	})
++	if fake.handler == nil {
++		t.Fatal("context-aware registration was not selected")
++	}
++	if err := fake.handler(parent, struct{}{}); err != nil {
++		t.Fatal(err)
++	}
++	if got.Value(struct{}{}) != "sdk-lineage" || got.Value(operationScopeKey{}) == nil {
++		t.Fatalf("callback context = %v, want SDK lineage", got)
++	}
++}
++
++func TestDrainApplicationCallbackChildAfterSeal(t *testing.T) {
++	fake := &contextCallbackFakeWA{fakeWA: &fakeWA{}}
++	a := &App{wa: fake}
++	var childFinish func(error)
++	a.addEventHandler(context.Background(), func(callbackCtx context.Context, _ any) {
++		a.operations.cancelAccepted()
++		_, finish, err := RegisterOperationChild(callbackCtx)
++		if err != nil {
++			t.Fatalf("accepted callback child rejected after seal: %v", err)
++		}
++		childFinish = finish
++	})
++	if err := fake.handler(context.Background(), "synthetic event"); err != nil {
++		t.Fatal(err)
++	}
++	defer childFinish(nil)
++	wait, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
++	defer cancel()
++	if held, err := a.BeginDrain(wait); held != nil || !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("callback child escaped join: %v %v", held, err)
++	}
++	failure := errors.New("synthetic callback continuation failed")
++	childFinish(failure)
++	if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("callback error lost: %v %v", held, err)
++	}
++	if err := fake.handler(context.Background(), "late synthetic event"); !errors.Is(err, ErrOperationSealed) {
++		t.Fatalf("late callback not rejected before effects: %v", err)
++	}
++}
+diff --git a/internal/app/causal_scope_test.go b/internal/app/causal_scope_test.go
+new file mode 100644
+index 0000000..54668e3
+--- /dev/null
++++ b/internal/app/causal_scope_test.go
+@@ -0,0 +1,132 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestDrainCausalGrandchildSurvivesAncestorFinish(t *testing.T) {
++	a := &App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
++	canceled, cancel := context.WithCancel(context.Background())
++	cancel()
++	_, err = a.BeginDrain(canceled)
++	if !errors.Is(err, context.Canceled) {
++		t.Fatal(err)
++	}
++	childCtx, childFinish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer childFinish(nil)
++	finish(nil)
++	if _, _, err := RegisterOperationChild(ctx); !errors.Is(err, ErrOperationScopeDone) {
++		t.Fatalf("finished parent admitted: %v", err)
++	}
++	_, grandFinish, err := RegisterOperationChild(childCtx)
++	if err != nil {
++		t.Fatalf("live child could not register grandchild: %v", err)
++	}
++	defer grandFinish(nil)
++	childFinish(nil)
++	done := make(chan error, 1)
++	go func() {
++		held, err := a.BeginDrain(context.Background())
++		if held != nil {
++			done <- errors.New("incomplete app returned held boundary")
++			return
++		}
++		done <- err
++	}()
++	select {
++	case <-done:
++		t.Fatal("grandchild escaped app join")
++	default:
++	}
++	failure := errors.New("synthetic multi-store descendant failure")
++	grandFinish(failure)
++	if err := <-done; !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("failure lost: %v", err)
++	}
++	if _, _, err := a.BeginScopedOperation(context.Background()); !errors.Is(err, ErrOperationSealed) {
++		t.Fatal(err)
++	}
++}
++
++func TestDrainCloseCancelsChildAfterParentReturned(t *testing.T) {
++	a := &App{}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	childCtx, childFinish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer childFinish(nil)
++	finish(nil)
++	a.operations.cancelAccepted()
++	select {
++	case <-childCtx.Done():
++	case <-time.After(time.Second):
++		t.Fatal("returned parent's live descendant lost cancellation ownership")
++	}
++	done := make(chan error, 1)
++	go func() { done <- a.CloseWithError() }()
++	select {
++	case <-done:
++		t.Fatal("close escaped actual descendant lifetime")
++	default:
++	}
++	childFinish(context.Canceled)
++	select {
++	case err := <-done:
++		if !errors.Is(err, context.Canceled) {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("close did not join descendant")
++	}
++}
++
++func TestDrainOperationChildFinishRaceHasStableZero(t *testing.T) {
++	for range 100 {
++		a := &App{}
++		ctx, finish, err := a.BeginScopedOperation(context.Background())
++		if err != nil {
++			t.Fatal(err)
++		}
++		child := make(chan func(error), 1)
++		var wg sync.WaitGroup
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			_, end, err := RegisterOperationChild(ctx)
++			if err != nil && !errors.Is(err, ErrOperationScopeDone) {
++				t.Errorf("child admission: %v", err)
++			}
++			child <- end
++		}()
++		finish(nil)
++		wg.Wait()
++		if end := <-child; end != nil {
++			end(nil)
++		}
++		if err := a.operations.drain(context.Background()); err != nil {
++			t.Fatal(err)
++		}
++		a.operations.mu.Lock()
++		active := a.operations.active
++		a.operations.mu.Unlock()
++		if active != 0 {
++			t.Fatalf("unstable zero: %d", active)
++		}
++	}
++}
+diff --git a/internal/app/chat_state.go b/internal/app/chat_state.go
+index dd2e2a8..e3e9dad 100644
+--- a/internal/app/chat_state.go
++++ b/internal/app/chat_state.go
+@@ -44 +44 @@ func (a *App) AddChatStatePersistenceHandler(ctx context.Context) (func(), error
+-	handlerID := waClient.AddEventHandler(func(evt any) {
++	handlerID := a.addEventHandler(ctx, func(_ context.Context, evt any) {
+@@ -492 +492 @@ func (a *App) newAppStateRecoveryCapture(collection appstate.WAPatchName) *appSt
+-	c.handlerID = a.wa.AddEventHandler(c.handle)
++	c.handlerID = a.addEventHandler(context.Background(), func(_ context.Context, evt any) { c.handle(evt) })
+diff --git a/internal/app/drain.go b/internal/app/drain.go
+index d4cf8cd..c75daf4 100644
+--- a/internal/app/drain.go
++++ b/internal/app/drain.go
+@@ -13,0 +14,2 @@ var ErrOperationSealed = errors.New("WACLI operation admission is sealed")
++var ErrOperationScopeMissing = errors.New("WACLI operation scope is missing")
++var ErrOperationScopeDone = errors.New("WACLI operation scope is done")
+@@ -15,2 +16,0 @@ var ErrOperationSealed = errors.New("WACLI operation admission is sealed")
+-// DrainIncompleteError retains operational failures separately from the known
+-// coverage gap. Ordinary Close may report Cause without claiming a held boundary.
+@@ -27,2 +27 @@ func (e *DrainIncompleteError) Unwrap() []error { return []error{ErrDrainCoverag
+-// HeldBoundary is reserved for a complete application frontier. No current path
+-// constructs or returns one. Closing SQLite is not a substitute.
++// No production path constructs or returns application capture authority.
+@@ -30,0 +30,11 @@ type HeldBoundary struct{ _ struct{} }
++type operationScopeKey struct{}
++type operationGroup struct {
++	remaining int
++	id        uint64
++	cancels   []context.CancelFunc
++}
++type operationScope struct {
++	owner *operationAdmission
++	group *operationGroup
++	done  bool // protected by owner.mu, including child registration
++}
+@@ -43 +53 @@ func (o *operationAdmission) begin(ctx context.Context) (func(error), error) {
+-	_, finish, err := o.beginWithCancel(ctx, false)
++	_, finish, err := o.beginScoped(ctx, false, false)
+@@ -46 +55,0 @@ func (o *operationAdmission) begin(ctx context.Context) (func(error), error) {
+-
+@@ -48,2 +57,9 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-	if err := ctx.Err(); err != nil {
+-		return nil, nil, err
++	return o.beginScoped(ctx, cancelable, true)
++}
++
++// The same mutex linearizes root sealing, causal admission and parent finish.
++// Every child gets its own token: it can create grandchildren even after an
++// ancestor finishes, but can never register work after its own finish.
++func (o *operationAdmission) beginScoped(ctx context.Context, cancelable, cancelOnFinish bool) (context.Context, func(error), error) {
++	if ctx == nil {
++		ctx = context.Background()
+@@ -51,4 +67,3 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-	ownedCtx := ctx
+-	var cancel context.CancelFunc
+-	if cancelable {
+-		ownedCtx, cancel = context.WithCancel(ctx)
++	parent, _ := ctx.Value(operationScopeKey{}).(*operationScope)
++	if parent != nil && parent.owner != o {
++		parent = nil
+@@ -57,4 +72,13 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-	defer o.mu.Unlock()
+-	if o.sealed {
+-		if cancel != nil {
+-			cancel()
++	if parent != nil {
++		if parent.done {
++			o.mu.Unlock()
++			return nil, nil, ErrOperationScopeDone
++		}
++	} else {
++		if o.sealed {
++			o.mu.Unlock()
++			return nil, nil, ErrOperationSealed
++		}
++		if err := ctx.Err(); err != nil {
++			o.mu.Unlock()
++			return nil, nil, err
+@@ -62 +85,0 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-		return nil, nil, ErrOperationSealed
+@@ -63,0 +87,14 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
++	group := (*operationGroup)(nil)
++	if parent != nil {
++		group = parent.group
++	} else {
++		o.nextID++
++		group = &operationGroup{id: o.nextID}
++	}
++	owned := ctx
++	var localCancel context.CancelFunc
++	if cancelable {
++		owned, localCancel = context.WithCancel(ctx)
++		group.cancels = append(group.cancels, localCancel)
++	}
++	group.remaining++
+@@ -65,4 +102,12 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-	var id uint64
+-	if cancel != nil {
+-		if o.cancels == nil {
+-			o.cancels = make(map[uint64]context.CancelFunc)
++	scope := &operationScope{owner: o, group: group}
++	if o.cancels == nil {
++		o.cancels = make(map[uint64]context.CancelFunc)
++	}
++	// This closure copies cancellation functions while holding the owner lock;
++	// context cancellation itself always occurs outside it.
++	o.cancels[group.id] = func() {
++		o.mu.Lock()
++		cancels := append([]context.CancelFunc(nil), group.cancels...)
++		o.mu.Unlock()
++		for _, cancel := range cancels {
++			cancel()
+@@ -70,3 +114,0 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-		o.nextID++
+-		id = o.nextID
+-		o.cancels[id] = cancel
+@@ -74 +116,2 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-	var once sync.Once
++	o.mu.Unlock()
++	owned = context.WithValue(owned, operationScopeKey{}, scope)
+@@ -76,15 +119,24 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-		once.Do(func() {
+-			if cancel != nil {
+-				cancel()
+-			}
+-			o.mu.Lock()
+-			defer o.mu.Unlock()
+-			if cancel != nil {
+-				delete(o.cancels, id)
+-			}
+-			if o.err == nil && err != nil {
+-				o.err = err
+-			}
+-			o.active--
+-			o.completeLocked()
+-		})
++		o.mu.Lock()
++		if scope.done {
++			o.mu.Unlock()
++			return
++		}
++		scope.done = true
++		if o.err == nil && err != nil {
++			o.err = err
++		}
++		o.active--
++		group.remaining--
++		var cancels []context.CancelFunc
++		if cancelOnFinish && localCancel != nil {
++			cancels = append(cancels, localCancel)
++		}
++		if group.remaining == 0 {
++			delete(o.cancels, group.id)
++			cancels = append(cancels, group.cancels...)
++		}
++		o.completeLocked()
++		o.mu.Unlock()
++		for _, cancel := range cancels {
++			cancel()
++		}
+@@ -92 +144 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
+-	return ownedCtx, finish, nil
++	return owned, finish, nil
+@@ -94,0 +147,12 @@ func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable boo
++// RegisterOperationChild must run before launch; finish must run only after the
++// actual worker returns. Missing contexts are not silently treated as authority.
++func RegisterOperationChild(ctx context.Context) (context.Context, func(error), error) {
++	if ctx == nil {
++		return nil, nil, ErrOperationScopeMissing
++	}
++	parent, _ := ctx.Value(operationScopeKey{}).(*operationScope)
++	if parent == nil || parent.owner == nil {
++		return nil, nil, ErrOperationScopeMissing
++	}
++	return parent.owner.beginScoped(ctx, false, false)
++}
+@@ -104,0 +169 @@ func (o *operationAdmission) cancelAccepted() {
++	o.completeLocked()
+@@ -111,0 +177,3 @@ func (o *operationAdmission) completeLocked() {
++		if o.done == nil {
++			o.done = make(chan struct{})
++		}
+@@ -116,0 +185,3 @@ func (o *operationAdmission) drain(ctx context.Context) error {
++	if ctx == nil {
++		ctx = context.Background()
++	}
+@@ -138,3 +209 @@ func (o *operationAdmission) drain(ctx context.Context) error {
+-// BeginOperation tracks explicitly admitted CLI/delegate operations. The finish
+-// function must run after their synchronous effects and is safe to call twice.
+-// This does not track arbitrary goroutines launched by a borrowed DB/WA handle.
++// BeginOperation is the compatibility API for synchronous command ownership.
+@@ -142,3 +210,0 @@ func (a *App) BeginOperation(ctx context.Context) (func(error), error) {
+-	if ctx == nil {
+-		ctx = context.Background()
+-	}
+@@ -148,4 +214,5 @@ func (a *App) BeginOperation(ctx context.Context) (func(error), error) {
+-// BeginCancelableOperation tracks an admitted delegate and returns a context
+-// owned by the app. Close cancels this context after sealing admission, before
+-// waiting for the operation to finish. Unlike BeginOperation, cancellation is
+-// intentionally app-owned; callers still must invoke finish after all effects.
++// BeginScopedOperation propagates causal ownership and remains cancelable by
++// application close until the last accepted descendant actually returns.
++func (a *App) BeginScopedOperation(ctx context.Context) (context.Context, func(error), error) {
++	return a.operations.beginScoped(ctx, true, false)
++}
+@@ -153,3 +219,0 @@ func (a *App) BeginCancelableOperation(ctx context.Context) (context.Context, fu
+-	if ctx == nil {
+-		ctx = context.Background()
+-	}
+@@ -159,4 +223,2 @@ func (a *App) BeginCancelableOperation(ctx context.Context) (context.Context, fu
+-// BeginDrain seals explicit application operations and invokes the SDK drain
+-// while both stores remain open. It never returns a successful held boundary:
+-// the public DB/WA accessors and remaining application workers are not revoked.
+-// A canceled drain stays sealed; retrying may finish waiting but cannot certify.
++// BeginDrain is never a whole-client receipt; borrowed handles and arbitrary
++// callbacks are not revocable, and the SDK itself retains coverage refusal.
+diff --git a/internal/app/media.go b/internal/app/media.go
+index b5efecd..81a065a 100644
+--- a/internal/app/media.go
++++ b/internal/app/media.go
+@@ -173,2 +173,5 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-
+-	ctx, cancelWorkers := context.WithCancel(ctx)
++	owned, rootFinish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return nil, nil, err
++	}
++	workerCtx, cancelWorkers := context.WithCancel(owned)
+@@ -176,0 +180,7 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
++		child, finish, e := RegisterOperationChild(workerCtx)
++		if e != nil {
++			cancelWorkers()
++			wg.Wait()
++			rootFinish(e)
++			return nil, nil, e
++		}
+@@ -178,2 +188,9 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-		go func() {
+-			defer wg.Done()
++		go func(ctx context.Context, finish func(error)) {
++			var workerErr error
++			defer func() {
++				if r := recover(); r != nil {
++					workerErr = fmt.Errorf("media worker panic: %v", r)
++				}
++				finish(workerErr)
++				wg.Done()
++			}()
+@@ -182,0 +200,6 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
++					queue.mu.Lock()
++					pending := queue.pending
++					queue.mu.Unlock()
++					if pending != 0 {
++						workerErr = ctx.Err()
++					}
+@@ -184,3 +207,4 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-				case job := <-queue.jobs:
+-					// Recover per job so a panic fails one download
+-					// instead of killing the worker permanently (#52).
++				case job, ok := <-queue.jobs:
++					if !ok {
++						return
++					}
+@@ -199,2 +223 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-									fmt.Fprintf(os.Stderr, "media worker panic (recovered) for %s/%s: %v\n%s\n",
+-										job.chatJID, job.msgID, r, debug.Stack())
++									fmt.Fprintf(os.Stderr, "media worker panic (recovered) for %s/%s: %v\n%s\n", job.chatJID, job.msgID, r, debug.Stack())
+@@ -201,0 +225 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
++								workerErr = fmt.Errorf("media worker panic: %v", r)
+@@ -207,6 +231,5 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-						if _, err := a.downloadMediaJob(ctx, job); err != nil {
+-							a.emitWarning(
+-								"media_download_failed",
+-								fmt.Sprintf("media download failed for %s/%s: %v", job.chatJID, job.msgID, err),
+-								map[string]any{"chat_jid": job.chatJID, "msg_id": job.msgID, "error": err.Error()},
+-							)
++						if _, e := a.downloadMediaJob(ctx, job); e != nil {
++							if workerErr == nil {
++								workerErr = e
++							}
++							a.emitWarning("media_download_failed", fmt.Sprintf("media download failed for %s/%s: %v", job.chatJID, job.msgID, e), map[string]any{"chat_jid": job.chatJID, "msg_id": job.msgID, "error": e.Error()})
+@@ -217 +240 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-		}()
++		}(child, finish)
+@@ -219,2 +242,10 @@ func (a *App) runMediaWorkers(ctx context.Context, queue *mediaQueue, workers in
+-
+-	return wg.Wait, cancelWorkers, nil
++	rootFinish(nil)
++	var once sync.Once
++	wait = func() {
++		once.Do(func() {
++			wg.Wait()
++			cancelWorkers()
++		})
++	}
++	cancel = cancelWorkers
++	return wait, cancel, nil
+diff --git a/internal/app/media_backfill.go b/internal/app/media_backfill.go
+index 4bf3822..dff3f1e 100644
+--- a/internal/app/media_backfill.go
++++ b/internal/app/media_backfill.go
+@@ -47 +47 @@ type BackfillMediaResult struct {
+-func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (BackfillMediaResult, error) {
++func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (outResult BackfillMediaResult, operationErr error) {
+@@ -56,0 +57,6 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
++	owned, rootFinish, err := a.BeginCancelableOperation(ctx)
++	if err != nil {
++		return BackfillMediaResult{}, err
++	}
++	ctx = owned
++	defer func() { rootFinish(operationErr) }()
+@@ -99,0 +106,7 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
++		workerCtx, finish, admitErr := RegisterOperationChild(ctx)
++		if admitErr != nil {
++			close(jobCh)
++			wg.Wait()
++			rootFinish(admitErr)
++			return result, admitErr
++		}
+@@ -101,2 +114,3 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
+-		go func() {
+-			defer wg.Done()
++		go func(ctx context.Context, finish func(error)) {
++			var workerErr error
++			defer func() { finish(workerErr); wg.Done() }()
+@@ -104,0 +119 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
++					workerErr = ctx.Err()
+@@ -113,0 +129,3 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
++							if workerErr == nil {
++								workerErr = fmt.Errorf("backfill worker panic: %v", r)
++							}
+@@ -130,0 +149,3 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
++						if workerErr == nil {
++							workerErr = err
++						}
+@@ -144 +165 @@ func (a *App) BackfillMedia(ctx context.Context, opts BackfillMediaOptions) (Bac
+-		}()
++		}(workerCtx, finish)
+diff --git a/internal/app/media_panic_test.go b/internal/app/media_panic_test.go
+index 9e39a12..181b1f2 100644
+--- a/internal/app/media_panic_test.go
++++ b/internal/app/media_panic_test.go
+@@ -3,0 +4 @@ import (
++	"bytes"
+@@ -4,0 +6,2 @@ import (
++	"encoding/json"
++	"strings"
+@@ -8,0 +12 @@ import (
++	"github.com/openclaw/wacli/internal/out"
+@@ -33,0 +38,2 @@ func TestMediaWorkerSurvivesPanic(t *testing.T) {
++	var eventLog bytes.Buffer
++	a.opts.Events = out.NewEventWriter(&eventLog, true)
+@@ -103,0 +110,30 @@ func TestMediaWorkerSurvivesPanic(t *testing.T) {
++	if !queue.waitIdle(ctx) {
++		t.Fatal("media queue did not become idle")
++	}
++	cancelWorkers()
++	wait()
++
++	var panicEvent map[string]any
++	for line := range strings.SplitSeq(strings.TrimSpace(eventLog.String()), "\n") {
++		var event map[string]any
++		if err := json.Unmarshal([]byte(line), &event); err != nil {
++			t.Fatalf("invalid event JSON %q: %v", line, err)
++		}
++		if event["event"] == "media_worker_panic" {
++			panicEvent, _ = event["data"].(map[string]any)
++			break
++		}
++	}
++	if panicEvent == nil {
++		t.Fatalf("media panic event was not retained: %s", eventLog.String())
++	}
++	if panicEvent["chat_jid"] != chat || panicEvent["msg_id"] != "boom" || panicEvent["panic"] != "simulated bad media payload" {
++		t.Fatalf("unexpected media panic event: %#v", panicEvent)
++	}
++	if stack, _ := panicEvent["stack"].(string); !strings.Contains(stack, "panicFirstWA") {
++		t.Fatalf("panic event lost debug stack: %#v", panicEvent["stack"])
++	}
++	if err := a.CloseWithError(); err == nil || !strings.Contains(err.Error(), "media worker panic: simulated bad media payload") {
++		t.Fatalf("drain lost sticky worker panic: %v", err)
++	}
++
+diff --git a/internal/app/media_retry.go b/internal/app/media_retry.go
+index 26e1328..ef40113 100644
+--- a/internal/app/media_retry.go
++++ b/internal/app/media_retry.go
+@@ -172 +172 @@ func (a *App) retryMedia(ctx context.Context, opts RetryMediaOptions, exact *med
+-	handlerID := a.wa.AddEventHandler(func(evt any) {
++	handlerID := a.addEventHandler(ctx, func(callbackCtx context.Context, evt any) {
+diff --git a/internal/app/presence.go b/internal/app/presence.go
+index 383ff38..f7861aa 100644
+--- a/internal/app/presence.go
++++ b/internal/app/presence.go
+@@ -99 +99 @@ func (a *App) WatchPresence(ctx context.Context, jid types.JID, wait time.Durati
+-		handlerID := a.wa.AddEventHandler(func(evt any) {
++		handlerID := a.addEventHandler(ctx, func(callbackCtx context.Context, evt any) {
+@@ -142 +142,6 @@ func (a *App) renewPresenceWatches(ctx context.Context) {
+-	ctx, cancel := context.WithCancel(ctx)
++	ownedCtx, finish, err := a.BeginCancelableOperation(ctx)
++	if err != nil {
++		a.emitWarning("presence_renewal_admission_failed", err.Error(), nil)
++		return
++	}
++	ctx, cancel := context.WithCancel(ownedCtx)
+@@ -147,0 +153,2 @@ func (a *App) renewPresenceWatches(ctx context.Context) {
++		var workErr error
++		defer func() { finish(workErr) }()
+@@ -151,0 +159 @@ func (a *App) renewPresenceWatches(ctx context.Context) {
++				workErr = ctx.Err()
+@@ -156,0 +165,3 @@ func (a *App) renewPresenceWatches(ctx context.Context) {
++			if err != nil {
++				workErr = err
++			}
+diff --git a/internal/app/sync_events.go b/internal/app/sync_events.go
+index 68a076b..5d79e25 100644
+--- a/internal/app/sync_events.go
++++ b/internal/app/sync_events.go
+@@ -65 +65 @@ func (a *App) addSyncEventHandler(ctx context.Context, opts SyncOptions, message
+-	handlerID := a.wa.AddEventHandler(func(evt any) {
++	handlerID := a.addEventHandler(ctx, func(callbackCtx context.Context, evt any) {
+diff --git a/internal/app/sync_idle.go b/internal/app/sync_idle.go
+index 1e02b04..ec4364f 100644
+--- a/internal/app/sync_idle.go
++++ b/internal/app/sync_idle.go
+@@ -4,0 +5 @@ import (
++	"errors"
+@@ -150,0 +152,5 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++	owned, rootFinish, err := a.BeginCancelableOperation(ctx)
++	if err != nil {
++		return false, err
++	}
++	ctx = owned
+@@ -152,0 +159,5 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++	workerCtx, finish, err := RegisterOperationChild(reconnectCtx)
++	if err != nil {
++		rootFinish(err)
++		return false, err
++	}
+@@ -154,0 +166 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++	var logoutCancel atomic.Bool
+@@ -156 +168,7 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
+-		done <- a.reconnect(reconnectCtx, maxDuration, presenceMode)
++		e := a.reconnect(workerCtx, maxDuration, presenceMode)
++		if logoutCancel.Load() && errors.Is(e, context.Canceled) {
++			finish(nil)
++		} else {
++			finish(e)
++		}
++		done <- e
+@@ -160,0 +179 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++		logoutCancel.Store(true)
+@@ -162,0 +182 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++		rootFinish(nil)
+@@ -167,0 +188 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++			rootFinish(nil)
+@@ -169,0 +191 @@ func (a *App) reconnectWhileWatchingLogout(ctx context.Context, maxDuration time
++		rootFinish(err)
+diff --git a/internal/app/sync_logout_test.go b/internal/app/sync_logout_test.go
+index 7a01745..110264c 100644
+--- a/internal/app/sync_logout_test.go
++++ b/internal/app/sync_logout_test.go
+@@ -6,0 +7 @@ import (
++	"errors"
+@@ -15,0 +17,50 @@ import (
++func TestDrainReconnectLogoutRetainsOnlyUnexpectedFailure(t *testing.T) {
++	t.Run("logout cancellation is successful", func(t *testing.T) {
++		a := newTestApp(t)
++		f := newFakeWA()
++		f.connectDelay = time.Hour
++		f.connectStarted = make(chan struct{}, 1)
++		a.wa = f
++		loggedOut := make(chan struct{}, 1)
++		done := make(chan struct {
++			loggedOut bool
++			err       error
++		}, 1)
++		go func() {
++			ok, err := a.reconnectWhileWatchingLogout(context.Background(), time.Hour, SyncPresenceModeNormal, loggedOut)
++			done <- struct {
++				loggedOut bool
++				err       error
++			}{ok, err}
++		}()
++		select {
++		case <-f.connectStarted:
++		case <-time.After(2 * time.Second):
++			t.Fatal("reconnect did not start")
++		}
++		loggedOut <- struct{}{}
++		result := <-done
++		if !result.loggedOut || result.err != nil {
++			t.Fatalf("logout reconnect = %#v", result)
++		}
++		if err := a.CloseWithError(); err != nil {
++			t.Fatalf("expected successful logout drain, got %v", err)
++		}
++	})
++
++	t.Run("unexpected reconnect failure is retained", func(t *testing.T) {
++		a := newTestApp(t)
++		f := newFakeWA()
++		failure := errors.New("synthetic reconnect failure")
++		f.connectErrs = []error{failure}
++		a.wa = f
++		ok, err := a.reconnectWhileWatchingLogout(context.Background(), time.Second, SyncPresenceModeNormal, make(chan struct{}))
++		if ok || !errors.Is(err, failure) {
++			t.Fatalf("failed reconnect = %v, %v", ok, err)
++		}
++		if closeErr := a.CloseWithError(); !errors.Is(closeErr, failure) {
++			t.Fatalf("drain lost reconnect failure: %v", closeErr)
++		}
++	})
++}
++
+diff --git a/internal/app/webhook.go b/internal/app/webhook.go
+index 2be922f..0a1ae38 100644
+--- a/internal/app/webhook.go
++++ b/internal/app/webhook.go
+@@ -114 +114,11 @@ func (a *App) runSyncWebhookWorker(ctx context.Context, opts SyncOptions, jobs <
+-	ctx, cancel := context.WithCancel(ctx)
++	owned, rootFinish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return func() {}
++	}
++	ctx, cancel := context.WithCancel(owned)
++	workerCtx, finish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		cancel()
++		rootFinish(err)
++		return func() {}
++	}
+@@ -118 +128,2 @@ func (a *App) runSyncWebhookWorker(ctx context.Context, opts SyncOptions, jobs <
+-		defer wg.Done()
++		var workerErr error
++		defer func() { finish(workerErr); wg.Done() }()
+@@ -121 +132 @@ func (a *App) runSyncWebhookWorker(ctx context.Context, opts SyncOptions, jobs <
+-			case <-ctx.Done():
++			case <-workerCtx.Done():
+@@ -129,0 +141,3 @@ func (a *App) runSyncWebhookWorker(ctx context.Context, opts SyncOptions, jobs <
++							if workerErr == nil {
++								workerErr = fmt.Errorf("webhook worker panic: %v", r)
++							}
+@@ -141 +155,4 @@ func (a *App) runSyncWebhookWorker(ctx context.Context, opts SyncOptions, jobs <
+-					if err := a.postSyncWebhookEvent(ctx, opts, evt); err != nil {
++					if err := a.postSyncWebhookEvent(workerCtx, opts, evt); err != nil {
++						if workerErr == nil {
++							workerErr = err
++						}
+@@ -153,0 +171 @@ func (a *App) runSyncWebhookWorker(ctx context.Context, opts SyncOptions, jobs <
++	rootFinish(nil)
+diff --git a/internal/app/worker_lifecycle_test.go b/internal/app/worker_lifecycle_test.go
+new file mode 100644
+index 0000000..b91f391
+--- /dev/null
++++ b/internal/app/worker_lifecycle_test.go
+@@ -0,0 +1,105 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/wa"
++)
++
++func TestDrainWorkerLifecycleChildFinishesAfterReturn(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	ctx, rootFinish, err := a.BeginCancelableOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	childCtx, childFinish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var wg sync.WaitGroup
++	wg.Add(1)
++	returned := make(chan struct{})
++	go func() {
++		defer wg.Done()
++		defer childFinish(nil)
++		<-childCtx.Done()
++		close(returned)
++	}()
++	a.operations.cancelAccepted()
++	select {
++	case <-returned:
++	case <-t.Context().Done():
++		t.Fatal("worker did not observe cancellation")
++	}
++	wg.Wait()
++	rootFinish(nil)
++	if _, _, err := a.BeginCancelableOperation(context.Background()); !errors.Is(err, ErrOperationSealed) {
++		t.Fatalf("late admission = %v", err)
++	}
++}
++
++func TestDrainMediaWorkerRecoveredPanicIsFailure(t *testing.T) {
++	a := &App{}
++	queue := newMediaQueue(1)
++	wait, cancel, err := a.runMediaWorkers(context.Background(), queue, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer cancel()
++	// A nil synthetic database intentionally panics inside the real job path.
++	queue.enqueue(context.Background(), mediaJob{chatJID: "synthetic", msgID: "synthetic"})
++	ctx, stop := context.WithTimeout(context.Background(), time.Second)
++	defer stop()
++	if !queue.waitIdle(ctx) {
++		t.Fatal("synthetic job did not finish")
++	}
++	cancel()
++	wait()
++	held, err := a.BeginDrain(context.Background())
++	var incomplete *DrainIncompleteError
++	if held != nil || !errors.As(err, &incomplete) || incomplete.Cause == nil {
++		t.Fatalf("recovered media panic became success: %v %v", held, err)
++	}
++}
++
++func TestDrainWebhookFailuresAreNotLogOnly(t *testing.T) {
++	for _, panics := range []bool{false, true} {
++		t.Run(map[bool]string{false: "error", true: "panic"}[panics], func(t *testing.T) {
++			old := syncWebhookPrivateHTTPClient
++			defer func() { syncWebhookPrivateHTTPClient = old }()
++			entered := make(chan struct{}, 1)
++			syncWebhookPrivateHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
++				entered <- struct{}{}
++				if panics {
++					panic("synthetic webhook panic")
++				}
++				return nil, errors.New("synthetic webhook failure; no network")
++			})}
++			a := &App{}
++			jobs := make(chan syncWebhookEvent)
++			stop := a.runSyncWebhookWorker(context.Background(), SyncOptions{WebhookURL: "https://example.invalid/synthetic", WebhookAllowPrivate: true}, jobs)
++			jobs <- syncWebhookEvent{Kind: SyncWebhookEventMessage, Message: wa.ParsedMessage{ID: "synthetic"}}
++			select {
++			case <-entered:
++			case <-time.After(time.Second):
++				t.Fatal("synthetic webhook not executed")
++			}
++			close(jobs)
++			stop()
++			held, err := a.BeginDrain(context.Background())
++			var incomplete *DrainIncompleteError
++			if held != nil || !errors.As(err, &incomplete) || incomplete.Cause == nil {
++				t.Fatalf("webhook failure became successful drain: %v %v", held, err)
++			}
++		})
++	}
++}
+diff --git a/internal/wa/client.go b/internal/wa/client.go
+index e01fb85..8dd8f56 100644
+--- a/internal/wa/client.go
++++ b/internal/wa/client.go
+@@ -353,0 +354,19 @@ func qrChannelEventError(evt whatsmeow.QRChannelItem) error {
++// AddEventHandlerWithContext registers a handler that receives the SDK's
++// accepted causal context. It is additive; callers that only need the legacy
++// callback API can continue using AddEventHandler.
++func (c *Client) AddEventHandlerWithContext(handler func(context.Context, any) error) uint32 {
++	c.mu.Lock()
++	cli := c.client
++	c.mu.Unlock()
++	if cli == nil {
++		return 0
++	}
++	if contextHandler, ok := any(cli).(interface {
++		AddEventHandlerWithContext(func(context.Context, any) error) uint32
++	}); ok {
++		return contextHandler.AddEventHandlerWithContext(handler)
++	}
++	// Older SDKs have no causal context; preserve the additive wrapper API.
++	return cli.AddEventHandler(func(evt any) { _ = handler(context.Background(), evt) })
++}
++
+diff --git a/internal/wa/session.go b/internal/wa/session.go
+index 360905d..c271911 100644
+--- a/internal/wa/session.go
++++ b/internal/wa/session.go
+@@ -68 +68 @@ func (c *Client) init() (err error) {
+-	cli.AddEventHandler(func(evt any) {
++	cli.AddEventHandlerWithContext(func(_ context.Context, evt any) error {
+@@ -80,0 +81 @@ func (c *Client) init() (err error) {
++		return nil
