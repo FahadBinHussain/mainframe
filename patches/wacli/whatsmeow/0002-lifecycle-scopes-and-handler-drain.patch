@@ -1,5 +1,5 @@
 diff --git a/client.go b/client.go
-index 15b5aab..08f6406 100644
+index 15b5aab..35469f1 100644
 --- a/client.go
 +++ b/client.go
 @@ -134,0 +135 @@ type Client struct {
@@ -49,28 +49,32 @@ index 15b5aab..08f6406 100644
 +				cli.Log.Debugf("Skipping node after lifecycle scope closed: %v", err)
 +				continue
 +			}
-@@ -941 +973,9 @@ Loop:
+@@ -941 +973,13 @@ Loop:
 -			go func() {
 +			go func(node *waBinary.Node, child *LifecycleScope) {
 +				var handlerErr error
 +				defer func() {
 +					if recovered := recover(); recovered != nil {
 +						handlerErr = fmt.Errorf("node handler panic: %v", recovered)
++						if cause, ok := recovered.(error); ok {
++							handlerErr = fmt.Errorf("node handler panic: %w", cause)
++						}
++						cli.Log.Errorf("Node handler for %s panicked: %v\n%s", node.Tag, recovered, debug.Stack())
 +					}
 +					child.Finish(handlerErr)
 +					close(doneChan)
 +				}()
-@@ -944 +983,0 @@ Loop:
+@@ -944 +987,0 @@ Loop:
 -				close(doneChan)
-@@ -948 +987 @@ Loop:
+@@ -948 +991 @@ Loop:
 -			}()
 +			}(node, child)
 diff --git a/handler_loop_lifecycle_test.go b/handler_loop_lifecycle_test.go
 new file mode 100644
-index 0000000..37ad3b2
+index 0000000..f95d4e2
 --- /dev/null
 +++ b/handler_loop_lifecycle_test.go
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,133 @@
 +package whatsmeow
 +
 +import (
@@ -143,8 +147,8 @@ index 0000000..37ad3b2
 +		t.Fatal("queue loop did not clean up canceled queue")
 +	}
 +	_, err = cli.BeginDrain(context.Background())
-+	if !errors.Is(err, context.Canceled) {
-+		t.Fatalf("expected sticky cancellation error, got %v", err)
++	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrLifecycleCoverageIncomplete) {
++		t.Fatalf("expected sticky dropped-work cancellation and coverage marker, got %v", err)
 +	}
 +}
 +
@@ -169,6 +173,106 @@ index 0000000..37ad3b2
 +		t.Fatal("raw queue loop did not close")
 +	}
 +}
++
++func TestSyntheticEmptyDisconnectRetainsOnlyCoverage(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	scope, err := cli.BeginScope(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	connCtx, cancel := context.WithCancel(context.Background())
++	cancel()
++	closed := make(chan struct{})
++	go cli.handlerQueueLoopWithScope(context.Background(), connCtx, make(chan *binary.Node), closed, scope)
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("empty loop did not stop")
++	}
++	boundary, err := cli.BeginDrain(nil)
++	if boundary != nil || err != ErrLifecycleCoverageIncomplete {
++		t.Fatalf("benign disconnect: %v, %v", boundary, err)
++	}
++}
++
++func TestLifecycleCoverageMarkerSurvivesOperationalFailure(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	scope, err := cli.BeginScope(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	failure := errors.New("synthetic operation failure")
++	scope.Finish(failure)
++	boundary, err := cli.BeginDrain(context.Background())
++	if boundary != nil || !errors.Is(err, failure) || !errors.Is(err, ErrLifecycleCoverageIncomplete) {
++		t.Fatalf("lost coverage or operational cause: %v, %v", boundary, err)
++	}
++}
+diff --git a/handler_panic_lifecycle_test.go b/handler_panic_lifecycle_test.go
+new file mode 100644
+index 0000000..6ca3e92
+--- /dev/null
++++ b/handler_panic_lifecycle_test.go
+@@ -0,0 +1,59 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/store"
++	waLog "go.mau.fi/whatsmeow/util/log"
++)
++
++type syntheticPanicLogger struct {
++	waLog.Logger
++	messages chan string
++}
++
++func (l *syntheticPanicLogger) Errorf(format string, args ...any) {
++	l.messages <- fmt.Sprintf(format, args...)
++}
++func (l *syntheticPanicLogger) Sub(string) waLog.Logger { return l }
++
++func TestSyntheticHandlerPanicLogsAndRetainsCause(t *testing.T) {
++	logger := &syntheticPanicLogger{Logger: waLog.Noop, messages: make(chan string, 1)}
++	cli := NewClient(&store.Device{}, logger)
++	failure := errors.New("synthetic handler panic")
++	cli.nodeHandlers["synthetic"] = func(context.Context, *binary.Node) { panic(failure) }
++	scope, err := cli.BeginScope(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	queue := make(chan *binary.Node, 1)
++	closed := make(chan struct{})
++	connCtx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	go cli.handlerQueueLoopWithScope(context.Background(), connCtx, queue, closed, scope)
++	queue <- &binary.Node{Tag: "synthetic"}
++	select {
++	case message := <-logger.messages:
++		if !strings.Contains(message, "synthetic handler panic") || !strings.Contains(message, "runtime/debug.Stack") {
++			t.Fatalf("missing immediate panic/stack log: %q", message)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("panic was not logged before drain")
++	}
++	cancel()
++	select {
++	case <-closed:
++	case <-time.After(time.Second):
++		t.Fatal("queue did not close")
++	}
++	boundary, err := cli.BeginDrain(context.Background())
++	if boundary != nil || !errors.Is(err, failure) || !errors.Is(err, ErrLifecycleCoverageIncomplete) {
++		t.Fatalf("lost panic or coverage: %v, %v", boundary, err)
++	}
++}
 diff --git a/internals.go b/internals.go
 index d9ce814..6e90d4d 100644
 --- a/internals.go
@@ -183,10 +287,10 @@ index d9ce814..6e90d4d 100644
 +
 diff --git a/lifecycle.go b/lifecycle.go
 new file mode 100644
-index 0000000..f97d164
+index 0000000..3a9ea9a
 --- /dev/null
 +++ b/lifecycle.go
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,201 @@
 +package whatsmeow
 +
 +import (
@@ -200,6 +304,23 @@ index 0000000..f97d164
 +// always returned with this error; callers must not treat a partial drain as a
 +// whole-client capture frontier.
 +var ErrLifecycleCoverageIncomplete = errors.New("whatsmeow lifecycle coverage is incomplete")
++
++// LifecycleDrainError always retains the coverage marker independently of any
++// operational failure. Close callers may inspect Cause, but not certify a hold.
++type LifecycleDrainError struct{ Cause error }
++
++func (e *LifecycleDrainError) Error() string {
++	if e.Cause != nil {
++		return ErrLifecycleCoverageIncomplete.Error() + ": " + e.Cause.Error()
++	}
++	return ErrLifecycleCoverageIncomplete.Error()
++}
++func (e *LifecycleDrainError) Unwrap() []error {
++	if e.Cause == nil {
++		return []error{ErrLifecycleCoverageIncomplete}
++	}
++	return []error{ErrLifecycleCoverageIncomplete, e.Cause}
++}
 +
 +// HeldBoundary is intentionally opaque. It is only returned when the SDK can
 +// prove that every client root and accepted descendant is quiescent. The
@@ -361,10 +482,13 @@ index 0000000..f97d164
 +// not all registered yet, it deliberately returns ErrLifecycleCoverageIncomplete
 +// rather than a successful whole-client held boundary.
 +func (cli *Client) BeginDrain(ctx context.Context) (*HeldBoundary, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
 +	genericErr := cli.lifecycle.drain(ctx)
 +	keyErr := cli.appStateKeyShareDrain.drain(ctx)
 +	if genericErr != nil || keyErr != nil {
-+		return nil, errors.Join(genericErr, keyErr)
++		return nil, &LifecycleDrainError{Cause: errors.Join(genericErr, keyErr)}
 +	}
 +	return nil, ErrLifecycleCoverageIncomplete
 +}

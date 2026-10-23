@@ -24,7 +24,7 @@
     },
     {
       "path": "0006-lifecycle-api-and-sealed-media-membership.patch",
-      "sha256": "ff02ef16dd2e33677e286103945f9b50e7e85757c2e34063070098fc54698164"
+      "sha256": "433548969250094afcba700897f8331c83bd1b8f62aa2d99e08a3efd6f1d870f"
     }
   ],
   "whatsmeow": [
@@ -34,7 +34,7 @@
     },
     {
       "path": "whatsmeow/0002-lifecycle-scopes-and-handler-drain.patch",
-      "sha256": "2e4935514469b5b039726999183291773090513e351d4fc4e6f8e62c786406c5"
+      "sha256": "7753deefbbfb1fb8e2ad7e678c9002b4f59c6a13d5dba5e7b30a0167d225989f"
     }
   ],
   "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestDrain|TestStage|TestEnumerateMediaMembership|TestStoreVerifyMedia|TestMediaDownload(ReadOnlyOutput|LockedStore))",
