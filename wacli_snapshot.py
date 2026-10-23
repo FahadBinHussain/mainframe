@@ -37,6 +37,9 @@ def capture_status():
         'producer_protocol': PROTOCOL,
         'producer_inspection': 'stdin-only-informational-never-authorizes-capture',
         'producer_execution': False,
+        'lifecycle_api': 'source-proposal-incomplete-never-returns-held-boundary',
+        'media_policy': 'linux-sealed-verified-content-proposal-not-a-source-root-hold',
+        'upstream_sdk_acceptance': 'not-submitted-not-accepted',
     }
 
 

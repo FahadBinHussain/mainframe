@@ -1,0 +1,1198 @@
+diff --git a/cmd/wacli/drain_delegate_test.go b/cmd/wacli/drain_delegate_test.go
+new file mode 100644
+index 0000000..8c785cb
+--- /dev/null
++++ b/cmd/wacli/drain_delegate_test.go
+@@ -0,0 +1,24 @@
++package main
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/openclaw/wacli/internal/app"
++)
++
++func TestDrainDelegateOwnerRejectsAfterSeal(t *testing.T) {
++	a, err := app.New(app.Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	boundary, err := a.BeginDrain(nil)
++	if boundary != nil || !errors.Is(err, app.ErrDrainCoverageIncomplete) {
++		t.Fatalf("unsafe receipt: %v, %v", boundary, err)
++	}
++	_, err = executeAdmittedDelegate(t.Context(), a, sendDelegateRequest{Version: sendDelegateVersion, Kind: "unsupported"})
++	if !errors.Is(err, app.ErrOperationSealed) {
++		t.Fatalf("late delegate reached dispatch: %v", err)
++	}
++}
+diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
+index 4d613d9..264a009 100644
+--- a/cmd/wacli/send_ipc.go
++++ b/cmd/wacli/send_ipc.go
+@@ -181 +181 @@ func startSendDelegateServer(ctx context.Context, a *app.App, spacing sendSpacin
+-		return executeDelegatedSend(ctx, a, req)
++		return executeAdmittedDelegate(ctx, a, req)
+@@ -184,0 +185,9 @@ func startSendDelegateServer(ctx context.Context, a *app.App, spacing sendSpacin
++func executeAdmittedDelegate(ctx context.Context, a *app.App, req sendDelegateRequest) (response sendDelegateResponse, operationErr error) {
++	finish, err := a.BeginOperation(ctx)
++	if err != nil {
++		return sendDelegateResponse{}, err
++	}
++	defer func() { finish(operationErr) }()
++	return executeDelegatedSend(ctx, a, req)
++}
++
+diff --git a/cmd/wacli/store.go b/cmd/wacli/store.go
+index 3f1ca97..2cc6d50 100644
+--- a/cmd/wacli/store.go
++++ b/cmd/wacli/store.go
+@@ -12,0 +13 @@ func newStoreCmd(flags *rootFlags) *cobra.Command {
++	cmd.AddCommand(newStoreVerifyMediaCmd(flags))
+diff --git a/cmd/wacli/store_media_membership.go b/cmd/wacli/store_media_membership.go
+new file mode 100644
+index 0000000..4497b68
+--- /dev/null
++++ b/cmd/wacli/store_media_membership.go
+@@ -0,0 +1,60 @@
++package main
++
++import (
++	"fmt"
++
++	"github.com/openclaw/wacli/internal/mediamembership"
++	"github.com/openclaw/wacli/internal/out"
++	"github.com/spf13/cobra"
++)
++
++func newStoreVerifyMediaCmd(flags *rootFlags) *cobra.Command {
++	return &cobra.Command{
++		Use:   "verify-media",
++		Short: "Verify every stored local media reference into temporary immutable objects (Linux)",
++		Long:  "Verify every stored local media reference without network access or modifying originals. Missing bytes, missing fingerprints, unsupported kernels and resource limits fail the entire check. Temporary sealed objects are discarded after the report; this command does not capture, publish or certify a whole-store boundary.",
++		Args:  cobra.NoArgs,
++		RunE: func(cmd *cobra.Command, args []string) error {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
++			defer cancel()
++			readFlags := *flags
++			readFlags.readOnly = true
++			a, _, err := newApp(ctx, &readFlags, false, false)
++			if err != nil {
++				return err
++			}
++			defer a.Close()
++			members, err := a.DB().EnumerateMediaMembership(ctx)
++			if err != nil {
++				return err
++			}
++			refs := make([]mediamembership.Reference, len(members))
++			for i, member := range members {
++				refs[i] = mediamembership.Reference{Key: member.Key, LocalPath: member.LocalPath,
++					ExpectedSHA256: member.ExpectedSHA256, ExpectedLength: member.ExpectedLength}
++			}
++			blobs, err := mediamembership.Stage(ctx, refs)
++			if err != nil {
++				return err
++			}
++			defer func() {
++				for _, blob := range blobs {
++					_ = blob.Close()
++				}
++			}()
++			var total int64
++			for _, blob := range blobs {
++				total += blob.Size
++			}
++			if flags.asJSON {
++				return out.WriteJSON(cmd.OutOrStdout(), map[string]any{
++					"status": "verified-byte-objects-only", "checked_references": len(blobs),
++					"staged_bytes": total, "boundary": "UNVERIFIED", "complete": false,
++					"capture_enabled": false, "publishable": false, "windows_validated": false,
++				})
++			}
++			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Verified %d local references (%d bytes) into temporary sealed objects. Whole-store boundary UNVERIFIED; no capture published.\n", len(blobs), total)
++			return err
++		},
++	}
++}
+diff --git a/cmd/wacli/store_media_membership_test.go b/cmd/wacli/store_media_membership_test.go
+new file mode 100644
+index 0000000..2f44eab
+--- /dev/null
++++ b/cmd/wacli/store_media_membership_test.go
+@@ -0,0 +1,93 @@
++//go:build linux
++
++package main
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++)
++
++func TestStoreVerifyMediaSyntheticReferencesAndRefusal(t *testing.T) {
++	root := t.TempDir()
++	media := filepath.Join(t.TempDir(), "synthetic-media")
++	data := []byte("synthetic media bytes only")
++	if err := os.WriteFile(media, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	db, err := store.Open(filepath.Join(root, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	chat := "synthetic@s.whatsapp.net"
++	if err := db.UpsertChat(chat, "dm", "synthetic", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: "m", Timestamp: time.Now(), MediaType: "document", FileSHA256: sum[:], FileLength: uint64(len(data))}); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.MarkMediaDownloaded(chat, "m", media, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(store.UpsertMessageParams{ChatJID: chat, MsgID: "unknown-length", Timestamp: time.Now(), MediaType: "document", FileSHA256: sum[:]}); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.MarkMediaDownloaded(chat, "unknown-length", media, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Close(); err != nil {
++		t.Fatal(err)
++	}
++	var output bytes.Buffer
++	cmd := newStoreVerifyMediaCmd(&rootFlags{storeDir: root, asJSON: true})
++	cmd.SetOut(&output)
++	if err := cmd.Execute(); err != nil {
++		t.Fatal(err)
++	}
++	var result map[string]any
++	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
++		t.Fatal(err)
++	}
++	dataResult, ok := result["data"].(map[string]any)
++	if !ok {
++		t.Fatalf("missing diagnostic data: %v", result)
++	}
++	result = dataResult
++	if result["checked_references"] != float64(2) || result["complete"] != false || result["capture_enabled"] != false || result["publishable"] != false || result["boundary"] != "UNVERIFIED" {
++		t.Fatalf("misleading report: %v", result)
++	}
++	if _, err := os.Stat(filepath.Join(root, "session.db")); !os.IsNotExist(err) {
++		t.Fatalf("session source was opened: %v", err)
++	}
++	if err := os.WriteFile(media, []byte("foreign mutation"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	output.Reset()
++	cmd = newStoreVerifyMediaCmd(&rootFlags{storeDir: root, asJSON: true})
++	cmd.SetOut(&output)
++	cmd.SetErr(&output)
++	if err := cmd.Execute(); err == nil {
++		t.Fatal("changed media was accepted")
++	}
++	if bytes.Contains(output.Bytes(), []byte("verified-byte-objects-only")) {
++		t.Fatal("partial success report after failure")
++	}
++	got, err := os.ReadFile(media)
++	if err != nil || string(got) != "foreign mutation" {
++		t.Fatalf("original changed or removed: %q, %v", got, err)
++	}
++}
++
++func TestStoreVerifyMediaWired(t *testing.T) {
++	command, _, err := newStoreCmd(&rootFlags{}).Find([]string{"verify-media"})
++	if err != nil || command == nil || command.Name() != "verify-media" {
++		t.Fatalf("command = %v, %v", command, err)
++	}
++}
+diff --git a/docs/store.md b/docs/store.md
+index 15c34ee..e1546b0 100644
+--- a/docs/store.md
++++ b/docs/store.md
+@@ -91,0 +92,10 @@ wacli groups prune --include-active --days 365 --dry-run
++
++## Verify local media bytes (Linux)
++
++`wacli --json store verify-media` opens only the local message index in read-only mode. It enumerates every nonempty message media path and local-media alias, including repeated paths and orphan aliases, then verifies each object against its stored plaintext SHA-256 and length when present. It does not connect to WhatsApp, fetch missing media, open `session.db`, change the originals, or publish a backup.
++
++Verified bytes are held temporarily in Linux `memfd` objects with kernel write, grow, shrink and seal locks. Foreign writes through an original path or retained original descriptor cannot alter those staged objects. This is an immutable content-object policy, **not ownership of the original external directories or their names**.
++
++The check is all-or-nothing: missing files, absent or malformed fingerprints, orphan metadata, mismatched bytes, unsupported kernels and cancellation fail the entire command. Limits of 1,024 references/descriptors and 256 MiB of staged bytes also fail the entire command; no reference is silently skipped. Originals are never deleted to satisfy a limit. Empty local paths do not identify locally downloaded objects, so this is not a check that every remote attachment has been downloaded.
++
++A successful result says `verified-byte-objects-only`, with `boundary: UNVERIFIED`, `complete: false` and `publishable: false`. The temporary descriptors are closed after reporting. Concurrent producers can still change database membership or the external roots, so this diagnostic is **not** a held whole-store frontier, a capture receipt, a restore or a Windows validation. Other platforms refuse immutable staging rather than weakening the contract.
+diff --git a/internal/app/app.go b/internal/app/app.go
+index a6dbfe4..9475c05 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -127,0 +128 @@ type App struct {
++	operations              operationAdmission
+@@ -239,0 +241 @@ func (a *App) CloseWithError() error {
++		_ = a.operations.drain(context.Background())
+@@ -262,0 +265,7 @@ func (a *App) CloseWithError() error {
++		_, drainErr := a.BeginDrain(context.Background())
++		var incomplete *DrainIncompleteError
++		if errors.As(drainErr, &incomplete) {
++			a.closeErr = errors.Join(a.closeErr, incomplete.Cause)
++		} else {
++			a.closeErr = errors.Join(a.closeErr, drainErr)
++		}
+diff --git a/internal/app/drain.go b/internal/app/drain.go
+new file mode 100644
+index 0000000..30e5520
+--- /dev/null
++++ b/internal/app/drain.go
+@@ -0,0 +1,125 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++
++	"go.mau.fi/whatsmeow"
++)
++
++var ErrDrainCoverageIncomplete = errors.New("WACLI lifecycle coverage is incomplete: raw DB/WA handles and unregistered workers remain")
++var ErrOperationSealed = errors.New("WACLI operation admission is sealed")
++
++// DrainIncompleteError retains operational failures separately from the known
++// coverage gap. Ordinary Close may report Cause without claiming a held boundary.
++type DrainIncompleteError struct{ Cause error }
++
++func (e *DrainIncompleteError) Error() string {
++	if e.Cause != nil {
++		return ErrDrainCoverageIncomplete.Error() + ": " + e.Cause.Error()
++	}
++	return ErrDrainCoverageIncomplete.Error()
++}
++func (e *DrainIncompleteError) Unwrap() []error { return []error{ErrDrainCoverageIncomplete, e.Cause} }
++
++// HeldBoundary is reserved for a complete application frontier. No current path
++// constructs or returns one. Closing SQLite is not a substitute.
++type HeldBoundary struct{ _ struct{} }
++
++type operationAdmission struct {
++	mu        sync.Mutex
++	sealed    bool
++	active    int
++	done      chan struct{}
++	completed bool
++	err       error
++}
++
++func (o *operationAdmission) begin(ctx context.Context) (func(error), error) {
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.sealed {
++		return nil, ErrOperationSealed
++	}
++	o.active++
++	var once sync.Once
++	return func(err error) {
++		once.Do(func() {
++			o.mu.Lock()
++			defer o.mu.Unlock()
++			if o.err == nil && err != nil {
++				o.err = err
++			}
++			o.active--
++			o.completeLocked()
++		})
++	}, nil
++}
++func (o *operationAdmission) completeLocked() {
++	if o.sealed && o.active == 0 && !o.completed {
++		o.completed = true
++		close(o.done)
++	}
++}
++func (o *operationAdmission) drain(ctx context.Context) error {
++	o.mu.Lock()
++	if o.done == nil {
++		o.done = make(chan struct{})
++	}
++	o.sealed = true
++	o.completeLocked()
++	done := o.done
++	o.mu.Unlock()
++	select {
++	case <-done:
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		o.mu.Lock()
++		defer o.mu.Unlock()
++		return o.err
++	case <-ctx.Done():
++		return ctx.Err()
++	}
++}
++
++// BeginOperation tracks explicitly admitted CLI/delegate operations. The finish
++// function must run after their synchronous effects and is safe to call twice.
++// This does not track arbitrary goroutines launched by a borrowed DB/WA handle.
++func (a *App) BeginOperation(ctx context.Context) (func(error), error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return a.operations.begin(ctx)
++}
++
++// BeginDrain seals explicit application operations and invokes the SDK drain
++// while both stores remain open. It never returns a successful held boundary:
++// the public DB/WA accessors and remaining application workers are not revoked.
++// A canceled drain stays sealed; retrying may finish waiting but cannot certify.
++func (a *App) BeginDrain(ctx context.Context) (*HeldBoundary, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	workErr := a.operations.drain(ctx)
++	if ctx.Err() == nil {
++		a.waMu.Lock()
++		client := a.wa
++		a.waMu.Unlock()
++		if client != nil {
++			if drainer, ok := client.(interface {
++				BeginDrain(context.Context) (*whatsmeow.HeldBoundary, error)
++			}); ok {
++				_, err := drainer.BeginDrain(ctx)
++				if err != whatsmeow.ErrLifecycleCoverageIncomplete {
++					workErr = errors.Join(workErr, err)
++				}
++			}
++		}
++	}
++	return nil, &DrainIncompleteError{Cause: workErr}
++}
+diff --git a/internal/app/drain_test.go b/internal/app/drain_test.go
+new file mode 100644
+index 0000000..53ed63a
+--- /dev/null
++++ b/internal/app/drain_test.go
+@@ -0,0 +1,109 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow"
++)
++
++type drainWA struct {
++	WAClient
++	calls int
++	err   error
++}
++
++func (w *drainWA) BeginDrain(context.Context) (*whatsmeow.HeldBoundary, error) {
++	w.calls++
++	return nil, w.err
++}
++func (w *drainWA) Disconnect() {}
++func (w *drainWA) Close()      {}
++
++func TestDrainWaitsForAcceptedOperationAndRetainsFailure(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	finish, err := a.BeginOperation(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	failure := errors.New("synthetic accepted effect failed")
++	ctx, cancel := context.WithCancel(t.Context())
++	cancel()
++	boundary, err := a.BeginDrain(ctx)
++	if boundary != nil || !errors.Is(err, context.Canceled) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("drain = %v, %v", boundary, err)
++	}
++	if _, err := a.BeginOperation(t.Context()); !errors.Is(err, ErrOperationSealed) {
++		t.Fatalf("late admission = %v", err)
++	}
++	finished := make(chan error, 1)
++	go func() { _, err := a.BeginDrain(t.Context()); finished <- err }()
++	select {
++	case err := <-finished:
++		t.Fatalf("early drain: %v", err)
++	case <-time.After(10 * time.Millisecond):
++	}
++	if _, err := a.DB().CountMessages(); err != nil {
++		t.Fatalf("accepted continuation lost application store: %v", err)
++	}
++	finish(failure)
++	finish(nil)
++	select {
++	case err := <-finished:
++		if !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++			t.Fatalf("lost error: %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("drain did not finish")
++	}
++	if !errors.Is(a.CloseWithError(), failure) {
++		t.Fatal("close lost accepted operation failure")
++	}
++}
++
++func TestDrainAlwaysRefusesEvenIdleAndPropagatesSDKFailure(t *testing.T) {
++	for _, failure := range []error{nil, whatsmeow.ErrLifecycleCoverageIncomplete, errors.New("synthetic SDK effect failure")} {
++		a := &App{}
++		w := &drainWA{err: failure}
++		a.wa = w
++		boundary, err := a.BeginDrain(t.Context())
++		if boundary != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++			t.Fatalf("unsafe receipt: %v, %v", boundary, err)
++		}
++		if failure != nil && failure != whatsmeow.ErrLifecycleCoverageIncomplete && !errors.Is(err, failure) {
++			t.Fatalf("lost SDK failure: %v", err)
++		}
++		if w.calls != 1 {
++			t.Fatalf("SDK drain calls = %d", w.calls)
++		}
++	}
++}
++
++func TestDrainConcurrentIdleAndClose(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	var wg sync.WaitGroup
++	for range 12 {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			boundary, err := a.BeginDrain(t.Context())
++			if boundary != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++				t.Errorf("unsafe receipt: %v, %v", boundary, err)
++			}
++		}()
++	}
++	wg.Wait()
++	if err := a.CloseWithError(); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/internal/mediamembership/limits.go b/internal/mediamembership/limits.go
+new file mode 100644
+index 0000000..65dab17
+--- /dev/null
++++ b/internal/mediamembership/limits.go
+@@ -0,0 +1,8 @@
++package mediamembership
++
++// Exceeding a limit refuses the entire membership; it never drops references.
++const (
++	MaxReferences              = 1024
++	MaxStagedDescriptors       = 1024
++	MaxTotalStagedBytes  int64 = 256 << 20
++)
+diff --git a/internal/mediamembership/memfd_linux.go b/internal/mediamembership/memfd_linux.go
+new file mode 100644
+index 0000000..f23c21b
+--- /dev/null
++++ b/internal/mediamembership/memfd_linux.go
+@@ -0,0 +1,235 @@
++//go:build linux
++
++// Package mediamembership provides a deliberately low-level, bounded media
++// verifier. It does not claim a stable database frontier or enable capture.
++package mediamembership
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"io"
++	"os"
++
++	"golang.org/x/sys/unix"
++)
++
++type Reference struct {
++	Key            string
++	LocalPath      string
++	ExpectedSHA256 []byte
++	ExpectedLength *int64
++}
++
++type Blob struct {
++	Reference
++	File   *os.File
++	Size   int64
++	SHA256 [sha256.Size]byte
++}
++
++func Stage(ctx context.Context, refs []Reference) ([]Blob, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	if len(refs) > MaxReferences || len(refs) > MaxStagedDescriptors {
++		return nil, fmt.Errorf("media reference limit exceeded: %d (max %d)", len(refs), MaxReferences)
++	}
++	out := make([]Blob, 0, len(refs))
++	cleanup := func() {
++		for i := range out {
++			_ = out[i].Close()
++		}
++	}
++	var total int64
++	for i, ref := range refs {
++		if err := ctx.Err(); err != nil {
++			cleanup()
++			return nil, err
++		}
++		blob, err := stageOne(ctx, ref, MaxTotalStagedBytes-total)
++		if err != nil {
++			cleanup()
++			return nil, fmt.Errorf("reference %d (%s): %w", i, ref.Key, err)
++		}
++		total += blob.Size
++		out = append(out, blob)
++	}
++	if err := ctx.Err(); err != nil {
++		cleanup()
++		return nil, err
++	}
++	return out, nil
++}
++
++func stageOne(ctx context.Context, ref Reference, remaining int64) (Blob, error) {
++	var zero Blob
++	if err := ctx.Err(); err != nil {
++		return zero, err
++	}
++	if ref.LocalPath == "" {
++		return zero, errors.New("empty local path")
++	}
++	if len(ref.ExpectedSHA256) != sha256.Size {
++		return zero, errors.New("malformed expected sha256")
++	}
++	if ref.ExpectedLength != nil && *ref.ExpectedLength < 0 {
++		return zero, errors.New("negative expected length")
++	}
++	if remaining < 0 {
++		return zero, errors.New("total staged byte limit exceeded")
++	}
++
++	fd, err := unix.Open(ref.LocalPath, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
++	if err != nil {
++		return zero, fmt.Errorf("open source: %w", err)
++	}
++	src := os.NewFile(uintptr(fd), ref.LocalPath)
++	if src == nil {
++		_ = unix.Close(fd)
++		return zero, errors.New("open source: invalid descriptor")
++	}
++	defer src.Close()
++	before, err := src.Stat()
++	if err != nil {
++		return zero, fmt.Errorf("stat source: %w", err)
++	}
++	if !before.Mode().IsRegular() {
++		return zero, errors.New("source is not a regular file")
++	}
++	if before.Size() > remaining || before.Size() > MaxTotalStagedBytes {
++		return zero, errors.New("total staged byte limit exceeded")
++	}
++	if ref.ExpectedLength != nil && *ref.ExpectedLength > remaining {
++		return zero, errors.New("expected length exceeds total staged byte limit")
++	}
++
++	mfd, err := unix.MemfdCreate("wacli-media", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
++	if err != nil {
++		return zero, fmt.Errorf("memfd: %w", err)
++	}
++	f := os.NewFile(uintptr(mfd), "wacli-media")
++	fail := func(e error) (Blob, error) { _ = f.Close(); return zero, e }
++	h := sha256.New()
++	w := io.MultiWriter(f, h)
++	buf := make([]byte, 32*1024)
++	bound := before.Size() + 1
++	if ref.ExpectedLength != nil && *ref.ExpectedLength+1 < bound {
++		bound = *ref.ExpectedLength + 1
++	}
++	lr := io.LimitReader(src, bound)
++	var n int64
++	for {
++		if err := ctx.Err(); err != nil {
++			return fail(err)
++		}
++		r, er := lr.Read(buf)
++		if r > 0 {
++			if n+int64(r) > remaining {
++				return fail(errors.New("total staged byte limit exceeded"))
++			}
++			wn, ew := w.Write(buf[:r])
++			n += int64(wn)
++			if ew != nil {
++				return fail(fmt.Errorf("stage bytes: %w", ew))
++			}
++			if wn != r {
++				return fail(io.ErrShortWrite)
++			}
++		}
++		if er == io.EOF {
++			break
++		}
++		if er != nil {
++			return fail(fmt.Errorf("read source: %w", er))
++		}
++	}
++	after, err := src.Stat()
++	if err != nil {
++		return fail(fmt.Errorf("restat source: %w", err))
++	}
++	if before.Size() != after.Size() || before.ModTime() != after.ModTime() || before.Mode() != after.Mode() {
++		return fail(errors.New("source changed during staging"))
++	}
++	if n != before.Size() {
++		return fail(errors.New("source length changed or exceeds expected length"))
++	}
++	sum := h.Sum(nil)
++	if !equalBytes(sum, ref.ExpectedSHA256) {
++		return fail(fmt.Errorf("sha256 mismatch: got %s", hex.EncodeToString(sum)))
++	}
++	if ref.ExpectedLength != nil && n != *ref.ExpectedLength {
++		return fail(fmt.Errorf("length mismatch: got %d", n))
++	}
++	if err := sealAndVerify(ctx, f, ref.ExpectedSHA256, n); err != nil {
++		return fail(err)
++	}
++	var verified [sha256.Size]byte
++	copy(verified[:], sum)
++	return Blob{Reference: ref, File: f, Size: n, SHA256: verified}, nil
++}
++
++func sealAndVerify(ctx context.Context, f *os.File, expected []byte, size int64) error {
++	if _, err := unix.FcntlInt(f.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_WRITE|unix.F_SEAL_GROW|unix.F_SEAL_SHRINK|unix.F_SEAL_SEAL); err != nil {
++		return fmt.Errorf("seal memfd: %w", err)
++	}
++	info, err := f.Stat()
++	if err != nil {
++		return err
++	}
++	if info.Size() != size {
++		return errors.New("sealed object length mismatch")
++	}
++	// A writable alias obtained before sealing must not let staged bytes differ
++	// from the bytes hashed while copying. ReadAt also avoids shared fd offsets.
++	hash := sha256.New()
++	buf := make([]byte, 32*1024)
++	for offset := int64(0); offset < size; {
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		chunk := buf
++		if size-offset < int64(len(chunk)) {
++			chunk = chunk[:size-offset]
++		}
++		n, err := f.ReadAt(chunk, offset)
++		if err != nil {
++			return fmt.Errorf("read sealed object: %w", err)
++		}
++		if n != len(chunk) {
++			return io.ErrUnexpectedEOF
++		}
++		_, _ = hash.Write(chunk)
++		offset += int64(n)
++	}
++	if !equalBytes(hash.Sum(nil), expected) {
++		return errors.New("sealed object sha256 mismatch")
++	}
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	_, err = f.Seek(0, io.SeekStart)
++	return err
++}
++
++func equalBytes(a, b []byte) bool {
++	if len(a) != len(b) {
++		return false
++	}
++	var v byte
++	for i := range a {
++		v |= a[i] ^ b[i]
++	}
++	return v == 0
++}
++func (b Blob) Close() error {
++	if b.File == nil {
++		return nil
++	}
++	return b.File.Close()
++}
+diff --git a/internal/mediamembership/memfd_linux_test.go b/internal/mediamembership/memfd_linux_test.go
+new file mode 100644
+index 0000000..841caeb
+--- /dev/null
++++ b/internal/mediamembership/memfd_linux_test.go
+@@ -0,0 +1,174 @@
++//go:build linux
++
++package mediamembership
++
++import (
++	"context"
++	"crypto/sha256"
++	"errors"
++	"io"
++	"os"
++	"syscall"
++	"testing"
++
++	"golang.org/x/sys/unix"
++)
++
++func TestStageRejectsPresealDescriptorCorruption(t *testing.T) {
++	fd, err := unix.MemfdCreate("synthetic-preseal", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
++	if err != nil {
++		t.Fatal(err)
++	}
++	f := os.NewFile(uintptr(fd), "synthetic-preseal")
++	defer f.Close()
++	expected := []byte("expected")
++	if _, err := f.Write(expected); err != nil {
++		t.Fatal(err)
++	}
++	alias, err := unix.Dup(fd)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(alias)
++	if _, err := unix.Pwrite(alias, []byte("tampered"), 0); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(expected)
++	if err := sealAndVerify(t.Context(), f, sum[:], int64(len(expected))); err == nil {
++		t.Fatal("pre-seal corruption returned a verified object")
++	}
++	if _, err := unix.Pwrite(alias, []byte("x"), 0); !errors.Is(err, syscall.EPERM) {
++		t.Fatalf("retained descriptor not sealed: %v", err)
++	}
++}
++
++func TestStageSealsAndPreservesBytes(t *testing.T) {
++	p := t.TempDir() + "/media"
++	original := []byte("immutable media bytes")
++	if err := os.WriteFile(p, original, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(original)
++	n := int64(len(original))
++	blobs, err := Stage(context.Background(), []Reference{{Key: "one", LocalPath: p, ExpectedSHA256: sum[:], ExpectedLength: &n}})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blobs[0].Close()
++	if _, err := unixWrite(int(blobs[0].File.Fd()), []byte("x")); !errors.Is(err, syscall.EPERM) {
++		t.Fatalf("write error = %v, want EPERM", err)
++	}
++	if err := syscall.Ftruncate(int(blobs[0].File.Fd()), 0); !errors.Is(err, syscall.EPERM) {
++		t.Fatalf("truncate error = %v, want EPERM", err)
++	}
++	if err := os.WriteFile(p, []byte("changed externally"), 0600); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := blobs[0].File.Seek(0, io.SeekStart); err != nil {
++		t.Fatal(err)
++	}
++	got, err := io.ReadAll(blobs[0].File)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != string(original) {
++		t.Fatalf("held bytes = %q, want %q", got, original)
++	}
++}
++
++func unixWrite(fd int, p []byte) (int, error) { return syscall.Write(fd, p) }
++
++func TestStageCancellationIncludesEmptyAndFinal(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if _, err := Stage(ctx, nil); !errors.Is(err, context.Canceled) {
++		t.Fatalf("empty canceled Stage = %v", err)
++	}
++	path := t.TempDir() + "/media"
++	data := []byte("cancel")
++	if err := os.WriteFile(path, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	ctx, cancel = context.WithCancel(context.Background())
++	// A canceled context must not return staged descriptors, even at completion.
++	cancel()
++	if _, err := Stage(ctx, []Reference{{LocalPath: path, ExpectedSHA256: sum[:]}}); !errors.Is(err, context.Canceled) {
++		t.Fatalf("canceled Stage = %v", err)
++	}
++}
++
++func TestStageDuplicateReferencesRemainDistinct(t *testing.T) {
++	path := t.TempDir() + "/media"
++	data := []byte("same")
++	if err := os.WriteFile(path, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	blobs, err := Stage(context.Background(), []Reference{{Key: "a", LocalPath: path, ExpectedSHA256: sum[:]}, {Key: "b", LocalPath: path, ExpectedSHA256: sum[:]}})
++	if err != nil || len(blobs) != 2 {
++		t.Fatalf("duplicate Stage = %d, %v", len(blobs), err)
++	}
++	defer blobs[0].Close()
++	defer blobs[1].Close()
++}
++
++func TestStageRefusesMissingWrongAndFIFO(t *testing.T) {
++	path := t.TempDir() + "/media"
++	data := []byte("valid")
++	if err := os.WriteFile(path, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	if blobs, err := Stage(context.Background(), []Reference{{LocalPath: path + ".missing", ExpectedSHA256: sum[:]}}); err == nil || blobs != nil {
++		t.Fatalf("missing source = %v, %v", blobs, err)
++	}
++	wrong := sha256.Sum256([]byte("wrong"))
++	if blobs, err := Stage(context.Background(), []Reference{{LocalPath: path, ExpectedSHA256: wrong[:]}}); err == nil || blobs != nil {
++		t.Fatalf("wrong digest = %v, %v", blobs, err)
++	}
++	length := int64(len(data) + 1)
++	if blobs, err := Stage(context.Background(), []Reference{{LocalPath: path, ExpectedSHA256: sum[:], ExpectedLength: &length}}); err == nil || blobs != nil {
++		t.Fatalf("wrong length = %v, %v", blobs, err)
++	}
++	fifo := t.TempDir() + "/fifo"
++	if err := unix.Mkfifo(fifo, 0600); err != nil {
++		t.Fatal(err)
++	}
++	if blobs, err := Stage(context.Background(), []Reference{{LocalPath: fifo, ExpectedSHA256: sum[:]}}); err == nil || blobs != nil {
++		t.Fatalf("FIFO = %v, %v", blobs, err)
++	}
++}
++
++func TestStageResourceLimitsAbortWholeSet(t *testing.T) {
++	path := t.TempDir() + "/media"
++	data := []byte("small")
++	if err := os.WriteFile(path, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	tooMany := make([]Reference, MaxReferences+1)
++	for i := range tooMany {
++		tooMany[i] = Reference{LocalPath: path, ExpectedSHA256: sum[:]}
++	}
++	if blobs, err := Stage(context.Background(), tooMany); err == nil || blobs != nil {
++		t.Fatalf("count limit = %v, %v", blobs, err)
++	}
++	tooLong := MaxTotalStagedBytes + 1
++	if blobs, err := Stage(context.Background(), []Reference{{LocalPath: path, ExpectedSHA256: sum[:], ExpectedLength: &tooLong}}); err == nil || blobs != nil {
++		t.Fatalf("byte limit = %v, %v", blobs, err)
++	}
++}
++
++func TestStageFailsWholeManifestAndRetainsNoSuccess(t *testing.T) {
++	p := t.TempDir() + "/media"
++	data := []byte("x")
++	if err := os.WriteFile(p, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	sum := sha256.Sum256(data)
++	blobs, err := Stage(context.Background(), []Reference{{Key: "ok", LocalPath: p, ExpectedSHA256: sum[:]}, {Key: "bad", LocalPath: p, ExpectedSHA256: []byte("bad")}})
++	if err == nil || blobs != nil {
++		t.Fatalf("Stage = (%v, %v), want whole-manifest failure", blobs, err)
++	}
++}
+diff --git a/internal/mediamembership/memfd_other.go b/internal/mediamembership/memfd_other.go
+new file mode 100644
+index 0000000..d076e0f
+--- /dev/null
++++ b/internal/mediamembership/memfd_other.go
+@@ -0,0 +1,34 @@
++//go:build !linux
++
++package mediamembership
++
++import (
++	"context"
++	"crypto/sha256"
++	"errors"
++	"os"
++)
++
++type Reference struct {
++	Key            string
++	LocalPath      string
++	ExpectedSHA256 []byte
++	ExpectedLength *int64
++}
++
++type Blob struct {
++	Reference
++	File   *os.File
++	Size   int64
++	SHA256 [sha256.Size]byte
++}
++
++var ErrUnsupported = errors.New("immutable media staging requires Linux memfd sealing")
++
++func Stage(context.Context, []Reference) ([]Blob, error) { return nil, ErrUnsupported }
++func (b Blob) Close() error {
++	if b.File == nil {
++		return nil
++	}
++	return b.File.Close()
++}
+diff --git a/internal/store/media_membership.go b/internal/store/media_membership.go
+new file mode 100644
+index 0000000..ad88e0d
+--- /dev/null
++++ b/internal/store/media_membership.go
+@@ -0,0 +1,71 @@
++package store
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++
++	"github.com/openclaw/wacli/internal/mediamembership"
++)
++
++// MediaMembership is one persisted media.local_path reference. Rows are never
++// deduplicated: aliases and repeated paths remain separate membership entries.
++// This enumerator describes database membership only; it does not establish a
++// lifecycle hold/frontier and must not be used as a capture receipt.
++type MediaMembership struct {
++	Key            string
++	LocalPath      string
++	ExpectedSHA256 []byte
++	ExpectedLength *int64
++}
++
++// EnumerateMediaMembership returns every non-empty message local_path and every
++// non-empty alias local_path, or fails if the whole set exceeds the staging
++// reference limit. Alias metadata is inherited from
++// its referenced message when present; orphan aliases are retained with missing
++// metadata so the staging layer can refuse the whole set. A query or scan
++// failure aborts enumeration.
++func (d *DB) EnumerateMediaMembership(ctx context.Context) ([]MediaMembership, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	const query = `
++SELECT 'message:' || CAST(rowid AS TEXT), local_path, file_sha256, file_length
++  FROM messages
++ WHERE local_path IS NOT NULL AND local_path <> ''
++UNION ALL
++SELECT 'alias:' || a.chat_jid || ':' || a.msg_id || ':' || a.local_path,
++       a.local_path, m.file_sha256, m.file_length
++  FROM message_local_media_aliases AS a
++	  LEFT JOIN messages AS m ON m.chat_jid = a.chat_jid AND m.msg_id = a.msg_id
++ WHERE a.local_path IS NOT NULL AND a.local_path <> ''`
++	rows, err := d.sql.QueryContext(ctx, query)
++	if err != nil {
++		return nil, fmt.Errorf("enumerate media membership: %w", err)
++	}
++	defer rows.Close()
++	var result []MediaMembership
++	for rows.Next() {
++		if len(result) >= mediamembership.MaxReferences {
++			return nil, fmt.Errorf("media membership reference limit exceeded; no partial membership returned")
++		}
++		var key, path string
++		var digest []byte
++		var length sql.NullInt64
++		if err := rows.Scan(&key, &path, &digest, &length); err != nil {
++			return nil, fmt.Errorf("scan media membership: %w", err)
++		}
++		// database/sql may reuse its byte buffer; retain independent bytes.
++		copyDigest := append([]byte(nil), digest...)
++		var expectedLength *int64
++		if length.Valid && length.Int64 != 0 {
++			n := length.Int64
++			expectedLength = &n
++		}
++		result = append(result, MediaMembership{Key: key, LocalPath: path, ExpectedSHA256: copyDigest, ExpectedLength: expectedLength})
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("enumerate media membership rows: %w", err)
++	}
++	return result, nil
++}
+diff --git a/internal/store/media_membership_test.go b/internal/store/media_membership_test.go
+new file mode 100644
+index 0000000..a2a65d0
+--- /dev/null
++++ b/internal/store/media_membership_test.go
+@@ -0,0 +1,109 @@
++package store
++
++import (
++	"context"
++	"testing"
++	"time"
++)
++
++func TestEnumerateMediaMembershipIncludesEveryReference(t *testing.T) {
++	db := openTestDB(t)
++	defer db.Close()
++	chat := "membership@s.whatsapp.net"
++	if err := db.UpsertChat(chat, "dm", "membership", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(UpsertMessageParams{ChatJID: chat, MsgID: "m1", Timestamp: time.Now(), MediaType: "image", FileSHA256: []byte{1, 2, 3}}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.sql.Exec(`UPDATE messages SET local_path=? WHERE chat_jid=? AND msg_id=?`, "/same", chat, "m1"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.sql.Exec(`INSERT INTO message_local_media_aliases(chat_jid,msg_id,local_path) VALUES(?,?,?), (?,?,?)`, chat, "m1", "/same", chat, "m1", "/alias"); err != nil {
++		t.Fatal(err)
++	}
++	refs, err := db.EnumerateMediaMembership(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(refs) != 3 {
++		t.Fatalf("reference count = %d, want 3", len(refs))
++	}
++	for _, ref := range refs {
++		if ref.LocalPath == "" {
++			t.Fatal("empty path returned")
++		}
++	}
++}
++
++func TestEnumerateMediaMembershipDoesNotDropMissingDigest(t *testing.T) {
++	db := openTestDB(t)
++	defer db.Close()
++	chat := "missing@s.whatsapp.net"
++	if err := db.UpsertChat(chat, "dm", "missing", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(UpsertMessageParams{ChatJID: chat, MsgID: "m", Timestamp: time.Now(), MediaType: "image"}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.sql.Exec(`UPDATE messages SET local_path=? WHERE chat_jid=? AND msg_id=?`, "/missing", chat, "m"); err != nil {
++		t.Fatal(err)
++	}
++	refs, err := db.EnumerateMediaMembership(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(refs) != 1 || len(refs[0].ExpectedSHA256) != 0 {
++		t.Fatalf("refs = %#v, want one malformed-metadata reference", refs)
++	}
++}
++
++func TestEnumerateMediaMembershipRetainsOrphanAlias(t *testing.T) {
++	db := openTestDB(t)
++	defer db.Close()
++	chat := "orphan@s.whatsapp.net"
++	if err := db.UpsertChat(chat, "dm", "orphan", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(UpsertMessageParams{ChatJID: chat, MsgID: "missing", Timestamp: time.Now(), MediaType: "image"}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.sql.Exec(`INSERT INTO message_local_media_aliases(chat_jid,msg_id,local_path) VALUES(?,?,?)`, chat, "missing", "/orphan"); err != nil {
++		t.Fatal(err)
++	}
++	db.sql.SetMaxOpenConns(1)
++	if _, err := db.sql.Exec(`PRAGMA foreign_keys=OFF; DELETE FROM messages WHERE chat_jid=? AND msg_id=?`, chat, "missing"); err != nil {
++		t.Fatal(err)
++	}
++	refs, err := db.EnumerateMediaMembership(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(refs) != 1 || refs[0].LocalPath != "/orphan" || len(refs[0].ExpectedSHA256) != 0 || refs[0].ExpectedLength != nil {
++		t.Fatalf("refs = %#v, want retained orphan with missing metadata", refs)
++	}
++}
++
++func TestEnumerateMediaMembershipLimitFailsWithoutPartialSet(t *testing.T) {
++	db := openTestDB(t)
++	defer db.Close()
++	chat := "bounded@s.whatsapp.net"
++	if err := db.UpsertChat(chat, "dm", "bounded", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(UpsertMessageParams{ChatJID: chat, MsgID: "m", Timestamp: time.Now()}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.sql.Exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1025)
++		INSERT INTO message_local_media_aliases(chat_jid,msg_id,local_path) SELECT ?, ?, '/synthetic/' || x FROM n`, chat, "m"); err != nil {
++		t.Fatal(err)
++	}
++	refs, err := db.EnumerateMediaMembership(context.Background())
++	if err == nil || refs != nil {
++		t.Fatalf("oversized membership returned partial success: len=%d, err=%v", len(refs), err)
++	}
++	var count int
++	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM message_local_media_aliases`).Scan(&count); err != nil || count != 1025 {
++		t.Fatalf("original references modified: count=%d, err=%v", count, err)
++	}
++}
+diff --git a/internal/wa/client.go b/internal/wa/client.go
+index a44e1cd..bf28075 100644
+--- a/internal/wa/client.go
++++ b/internal/wa/client.go
+@@ -84 +84,4 @@ func (c *Client) CloseWithError() error {
+-			c.closeErr = errors.Join(c.closeErr, cli.DrainAppStateKeyShares(context.Background()))
++			_, err := cli.BeginDrain(context.Background())
++			if err != whatsmeow.ErrLifecycleCoverageIncomplete {
++				c.closeErr = errors.Join(c.closeErr, err)
++			}
+diff --git a/internal/wa/drain.go b/internal/wa/drain.go
+new file mode 100644
+index 0000000..d251f9e
+--- /dev/null
++++ b/internal/wa/drain.go
+@@ -0,0 +1,20 @@
++package wa
++
++import (
++	"context"
++
++	"go.mau.fi/whatsmeow"
++)
++
++// BeginDrain retains the stores while the SDK seals and joins its registered
++// operations. The pinned SDK refuses a whole-client receipt when coverage is
++// incomplete; neither a missing client nor a closed wrapper is a held boundary.
++func (c *Client) BeginDrain(ctx context.Context) (*whatsmeow.HeldBoundary, error) {
++	c.mu.Lock()
++	cli := c.client
++	c.mu.Unlock()
++	if cli == nil {
++		return nil, whatsmeow.ErrLifecycleCoverageIncomplete
++	}
++	return cli.BeginDrain(ctx)
++}
