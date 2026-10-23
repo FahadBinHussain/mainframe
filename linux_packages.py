@@ -428,7 +428,12 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                       "with no automatic toolchain download, and explicit isolated GOBIN, GOPATH, "
                       "GOMODCACHE, GOCACHE, GOTMPDIR and HOME/config roots with missing/overlap/symlink "
                       "rejection are not validated. Ambient GOENV/GOFLAGS/GOWORK/CGO/compiler settings "
-                      "must not override the reviewed build. No executor or cached-global-binary/release "
+                      "must not override the reviewed build. Official Go 1.25.12 Linux amd64/arm64 "
+                      "archive SHA-256/size metadata and all 31 declared module/go.mod checksum pairs "
+                      "are recorded, not verified archive bytes or a resolved Linux sqlite_fts5 build closure. "
+                      "Effective go env paths and compiler/sysroot provenance remain unverified; "
+                      "their toolchain/compiler execution is outside this dry-only review. "
+                      "No executor or cached-global-binary/release "
                       "fallback; no live-home/PATH/cache changes or build/install; "
                       "see docs/linux-wacli-build-review.md.")
         blockers.append(reason)
