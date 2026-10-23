@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -28,6 +29,27 @@ class RuntimeSeriesTests(unittest.TestCase):
                 self.assertIn('diff --git ', content)
         self.assertTrue(manifest['wacli_test_pattern'].startswith('^(Test'))
         self.assertTrue(manifest['dependency_test_pattern'].startswith('^Test'))
+
+    def test_lifecycle_and_media_tests_cannot_silently_drop_out_of_verifier(self):
+        manifest = json.loads((verifier.PATCHES / 'runtime-series.json').read_text())
+        cases = {
+            'wacli_test_pattern': ('TestDrainDelegateOwnerRejectsAfterSeal',
+                'TestStageRejectsPresealDescriptorCorruption',
+                'TestEnumerateMediaMembershipLimitFailsWithoutPartialSet',
+                'TestStoreVerifyMediaSyntheticReferencesAndRefusal'),
+            'dependency_test_pattern': ('TestLifecycleDrainCancellationSealsAdmission',
+                'TestSyntheticHandlerChildOutlivesQueueLoop', 'TestSyntheticQueuedCancellationIsSticky'),
+        }
+        for pattern, names in cases.items():
+            for name in names:
+                self.assertIsNotNone(re.search(manifest[pattern], name), name)
+        verifier_source = Path(verifier.__file__).read_text()
+        for package in ('./internal/store', './internal/mediamembership'):
+            self.assertIn(package, verifier_source)
+        wacli = verifier.PATCHES / '0006-lifecycle-api-and-sealed-media-membership.patch'
+        sdk = verifier.PATCHES / 'whatsmeow/0002-lifecycle-scopes-and-handler-drain.patch'
+        self.assertNotIn('diff --git a/go.mod', wacli.read_text())
+        self.assertIn('return nil, ErrLifecycleCoverageIncomplete', sdk.read_text())
 
     def test_changed_patch_and_unsafe_members_refuse(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(verifier, 'PATCHES', Path(temporary)):
