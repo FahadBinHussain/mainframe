@@ -6,181 +6,82 @@ diff --git a/appstate.go b/appstate.go
 index 008417f..5a469d9 100644
 --- a/appstate.go
 +++ b/appstate.go
-@@ -34,7 +34,7 @@ func (cli *Client) FetchAppState(ctx context.Context, name appstate.WAPatchName,
- 		return err
- 	}
- 	for _, evt := range eventsToDispatch {
+@@ -37 +37 @@ func (cli *Client) FetchAppState(ctx context.Context, name appstate.WAPatchName,
 -		cli.dispatchEvent(evt)
 +		cli.dispatchEventContext(ctx, evt)
- 	}
- 	return nil
- }
-@@ -74,7 +74,7 @@ func (cli *Client) fetchAppState(ctx context.Context, name appstate.WAPatchName,
- 		patches, err := cli.fetchAppStatePatches(ctx, name, state.Version, wantSnapshot)
- 		if err != nil {
- 			if fullSync && ctx.Err() == nil && cli.BackgroundEventCtx.Err() == nil {
+@@ -77 +77 @@ func (cli *Client) fetchAppState(ctx context.Context, name appstate.WAPatchName,
 -				cli.dispatchEvent(&events.AppStateSyncError{Name: name, FullSync: fullSync, Error: err})
 +				cli.dispatchEventContext(ctx, &events.AppStateSyncError{Name: name, FullSync: fullSync, Error: err})
- 			}
- 			return nil, fmt.Errorf("failed to fetch app state %s patches: %w", name, err)
- 		} else if !wantSnapshot && patches.Snapshot != nil {
-@@ -142,7 +142,7 @@ func (cli *Client) handleAppStateRecovery(
- 	}
- 	eventsToDispatch = append(eventsToDispatch, &events.AppStateSyncComplete{Name: name, Version: version, Recovery: true})
- 	for _, evt := range eventsToDispatch {
+@@ -145 +145 @@ func (cli *Client) handleAppStateRecovery(
 -		handlerFailed := cli.dispatchEvent(evt)
 +		handlerFailed := cli.dispatchEventContext(ctx, evt)
- 		if handlerFailed {
- 			return false
- 		}
-@@ -162,7 +162,7 @@ func (cli *Client) applyAppStatePatches(
- 	mutations, newState, err := cli.appStateProc.DecodePatches(ctx, patches, state, true)
- 	if err != nil {
- 		if errors.Is(err, appstate.ErrKeyNotFound) {
+@@ -165 +165 @@ func (cli *Client) applyAppStatePatches(
 -			childErr := goAppStateKeyShareChild(context.WithoutCancel(ctx), func(childCtx context.Context) error {
 +			childErr := cli.goAppStateKeyShareChild(context.WithoutCancel(ctx), func(childCtx context.Context) error {
- 				cli.requestMissingAppStateKeys(childCtx, patches)
- 				// The decode error is already retained by the key-share parent.
- 				// This registration additionally keeps SQL open for its request.
-@@ -170,7 +170,7 @@ func (cli *Client) applyAppStatePatches(
- 			})
- 			err = errors.Join(err, childErr)
- 		} else {
+@@ -173 +173 @@ func (cli *Client) applyAppStatePatches(
 -			cli.dispatchEvent(&events.AppStateSyncError{Name: name, FullSync: fullSync, Error: err})
 +			cli.dispatchEventContext(ctx, &events.AppStateSyncError{Name: name, FullSync: fullSync, Error: err})
- 		}
- 		return state, fmt.Errorf("failed to decode app state %s patches: %w", name, err)
- 	}
-@@ -620,11 +620,12 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
- 				return fmt.Errorf("%w (also, applying patches in the response failed: %w)", mainErr, err)
- 			} else {
- 				zerolog.Ctx(ctx).Debug().Msg("Retrying app state send after applying conflicting patches")
+@@ -623 +623 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
 -				go func() {
 +				_ = cli.launchLifecycle(ctx, func(ctx context.Context) error {
- 					for _, evt := range eventsToDispatch {
+@@ -625 +625 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
 -						cli.dispatchEvent(evt)
 +						cli.dispatchEventContext(ctx, evt)
- 					}
+@@ -627 +627,2 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
 -				}()
 +					return nil
 +				})
- 				return cli.sendAppState(ctx, patch, false)
- 			}
- 		}
-@@ -634,11 +635,12 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
- 	if err != nil {
- 		return fmt.Errorf("failed to fetch app state after sending update: %w", err)
- 	}
+@@ -637 +638 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
 -	go func() {
 +	_ = cli.launchLifecycle(ctx, func(ctx context.Context) error {
- 		for _, evt := range eventsToDispatch {
+@@ -639 +640 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
 -			cli.dispatchEvent(evt)
 +			cli.dispatchEventContext(ctx, evt)
- 		}
+@@ -641 +642,2 @@ func (cli *Client) sendAppState(ctx context.Context, patch appstate.PatchInfo, a
 -	}()
 +		return nil
 +	})
- 
- 	return nil
- }
 diff --git a/armadillomessage.go b/armadillomessage.go
 index f1f51c9..40b82f8 100644
 --- a/armadillomessage.go
 +++ b/armadillomessage.go
-@@ -40,7 +40,7 @@ func (cli *Client) handleDecryptedArmadillo(ctx context.Context, info *types.Mes
- 		}
- 	}
- 	if dec.Message != nil || dec.FBApplication != nil {
+@@ -43 +43 @@ func (cli *Client) handleDecryptedArmadillo(ctx context.Context, info *types.Mes
 -		handlerFailed = cli.dispatchEvent(&dec)
 +		handlerFailed = cli.dispatchEventContext(ctx, &dec)
- 	}
- 	return
- }
 diff --git a/call.go b/call.go
 index 47b0e21..2a9676d 100644
 --- a/call.go
 +++ b/call.go
-@@ -18,7 +18,7 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
- 	defer cli.maybeDeferredAck(ctx, node)()
- 
- 	if len(node.GetChildren()) != 1 {
+@@ -21 +21 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.UnknownCallEvent{Node: node})
 +		cli.dispatchEventContext(ctx, &events.UnknownCallEvent{Node: node})
- 		return
- 	}
- 	ag := node.AttrGetter()
-@@ -39,7 +39,7 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
- 	}
- 	switch child.Tag {
- 	case "offer":
+@@ -42 +42 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallOffer{
 +		cli.dispatchEventContext(ctx, &events.CallOffer{
- 			BasicCallMeta: basicMeta,
- 			CallRemoteMeta: types.CallRemoteMeta{
- 				RemotePlatform: ag.String("platform"),
-@@ -48,19 +48,19 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
- 			Data: &child,
- 		})
- 	case "offer_notice":
+@@ -51 +51 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallOfferNotice{
 +		cli.dispatchEventContext(ctx, &events.CallOfferNotice{
- 			BasicCallMeta: basicMeta,
- 			Media:         cag.String("media"),
- 			Type:          cag.String("type"),
- 			Data:          &child,
- 		})
- 	case "relaylatency":
+@@ -58 +58 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallRelayLatency{
 +		cli.dispatchEventContext(ctx, &events.CallRelayLatency{
- 			BasicCallMeta: basicMeta,
- 			Data:          &child,
- 		})
- 	case "accept":
+@@ -63 +63 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallAccept{
 +		cli.dispatchEventContext(ctx, &events.CallAccept{
- 			BasicCallMeta: basicMeta,
- 			CallRemoteMeta: types.CallRemoteMeta{
- 				RemotePlatform: ag.String("platform"),
-@@ -69,7 +69,7 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
- 			Data: &child,
- 		})
- 	case "preaccept":
+@@ -72 +72 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallPreAccept{
 +		cli.dispatchEventContext(ctx, &events.CallPreAccept{
- 			BasicCallMeta: basicMeta,
- 			CallRemoteMeta: types.CallRemoteMeta{
- 				RemotePlatform: ag.String("platform"),
-@@ -78,7 +78,7 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
- 			Data: &child,
- 		})
- 	case "transport":
+@@ -81 +81 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallTransport{
 +		cli.dispatchEventContext(ctx, &events.CallTransport{
- 			BasicCallMeta: basicMeta,
- 			CallRemoteMeta: types.CallRemoteMeta{
- 				RemotePlatform: ag.String("platform"),
-@@ -87,18 +87,18 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
- 			Data: &child,
- 		})
- 	case "terminate":
+@@ -90 +90 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallTerminate{
 +		cli.dispatchEventContext(ctx, &events.CallTerminate{
- 			BasicCallMeta: basicMeta,
- 			Reason:        cag.String("reason"),
- 			Data:          &child,
- 		})
- 	case "reject":
+@@ -96 +96 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.CallReject{
 +		cli.dispatchEventContext(ctx, &events.CallReject{
- 			BasicCallMeta: basicMeta,
- 			Data:          &child,
- 		})
- 	default:
+@@ -101 +101 @@ func (cli *Client) handleCallEvent(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.UnknownCallEvent{Node: node})
 +		cli.dispatchEventContext(ctx, &events.UnknownCallEvent{Node: node})
- 	}
- }
- 
 diff --git a/callback_lifecycle_test.go b/callback_lifecycle_test.go
 new file mode 100644
 index 0000000..14b979e
@@ -348,50 +249,33 @@ index 0000000..14b979e
 +	AddEventHandlerWithContext(func(context.Context, any) error) uint32
 +} = (*Client)(nil)
 diff --git a/client.go b/client.go
-index 35469f1..d4698f5 100644
+index 35469f1..b45a858 100644
 --- a/client.go
 +++ b/client.go
-@@ -46,13 +46,15 @@ import (
- // EventHandler is a function that can handle events from WhatsApp.
- type EventHandler func(evt any)
- type EventHandlerWithSuccessStatus func(evt any) bool
+@@ -48,0 +49 @@ type EventHandlerWithSuccessStatus func(evt any) bool
 +type EventHandlerWithContext func(context.Context, any) error
- type nodeHandler func(ctx context.Context, node *waBinary.Node)
- 
- var nextHandlerID uint32
- 
- type wrappedEventHandler struct {
+@@ -54,2 +55,3 @@ type wrappedEventHandler struct {
 -	fn EventHandlerWithSuccessStatus
 -	id uint32
 +	fn    EventHandlerWithSuccessStatus
 +	ctxfn EventHandlerWithContext
 +	id    uint32
- }
- 
- type deviceCache struct {
-@@ -538,19 +540,28 @@ func isRetryableConnectError(err error) bool {
- 	return errors.Is(err, socket.ErrDialFailed)
- }
- 
+@@ -108,0 +111 @@ type Client struct {
++	historySyncHandlerLock          sync.Mutex
+@@ -541 +544 @@ func isRetryableConnectError(err error) bool {
 -func (cli *Client) ConnectContext(ctx context.Context) error {
 +func (cli *Client) ConnectContext(ctx context.Context) (retErr error) {
- 	if cli == nil {
- 		return ErrClientIsNil
- 	}
+@@ -544,0 +548,6 @@ func (cli *Client) ConnectContext(ctx context.Context) error {
 +	op, err := cli.scopeForContext(ctx)
 +	if err != nil {
 +		return err
 +	}
 +	ctx = cli.lifecycleContext(ctx, op)
 +	defer func() { op.Finish(retErr) }()
- 
- 	cli.socketLock.Lock()
- 	defer cli.socketLock.Unlock()
- 
+@@ -549 +558 @@ func (cli *Client) ConnectContext(ctx context.Context) error {
 -	err := cli.unlockedConnect(ctx)
 +	err = cli.unlockedConnect(ctx)
- 	if isRetryableConnectError(err) && cli.InitialAutoReconnect && cli.EnableAutoReconnect {
- 		cli.Log.Errorf("Initial connection failed but reconnecting in background (%v)", err)
+@@ -552,2 +561,5 @@ func (cli *Client) ConnectContext(ctx context.Context) error {
 -		go cli.dispatchEvent(&events.Disconnected{})
 -		go cli.autoReconnect(ctx)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error {
@@ -399,28 +283,12 @@ index 35469f1..d4698f5 100644
 +			return nil
 +		})
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.autoReconnect(ctx); return nil })
- 		return nil
- 	}
- 	return err
-@@ -581,6 +592,7 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
- 		client = cli.preLoginHTTP
- 	}
- 	fs := socket.NewFrameSocket(cli.Log.Sub("Socket"), client)
+@@ -583,0 +596 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
 +	fs.SetLifecycleHooks(socket.LifecycleHooks{Launch: cli.launchLifecycle, Begin: cli.beginLifecycleWorker, ReportError: cli.lifecycle.recordError})
- 	if userAgent := cli.getUserAgent(); userAgent != "" {
- 		fs.HTTPHeaders.Set("User-Agent", userAgent)
- 	}
-@@ -598,13 +610,20 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
- 		return fmt.Errorf("noise handshake failed: %w", err)
- 	}
- 	closeWait := make(chan struct{})
+@@ -601 +614 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
 -	loopScope, err := cli.lifecycle.admit()
 +	loopScope, err := cli.scopeForContext(ctx)
- 	if err != nil {
- 		fs.Close(0)
- 		return err
- 	}
- 	cli.handlerQueueWait = closeWait
+@@ -607 +620,8 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
 -	go cli.keepAliveLoop(ctx, fs.Context())
 +	if err := cli.launchLifecycle(ctx, func(ctx context.Context) error {
 +		cli.keepAliveLoop(ctx, fs.Context())
@@ -430,20 +298,13 @@ index 35469f1..d4698f5 100644
 +		loopScope.Finish(err)
 +		return err
 +	}
- 	go cli.handlerQueueLoopWithScope(ctx, fs.Context(), queue, closeWait, loopScope)
- 	return nil
- }
-@@ -617,21 +636,30 @@ func (cli *Client) IsLoggedIn() bool {
- func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, remote bool) {
- 	ns.Stop(false, false)
- 	cli.socketLock.Lock()
+@@ -620,2 +640,3 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
 -	defer cli.socketLock.Unlock()
 -	if cli.socket == ns {
 +	shouldReconnect := false
 +	owned := cli.socket == ns
 +	if owned {
- 		cli.socket = nil
- 		cli.clearResponseWaiters(xmlStreamEndNode)
+@@ -624,8 +645,11 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
 -		if !cli.isExpectedDisconnect() && (cli.forceAutoReconnect.Swap(false) || remote) {
 -			cli.Log.Debugf("Emitting Disconnected event")
 -			go cli.dispatchEvent(&events.Disconnected{})
@@ -463,22 +324,16 @@ index 35469f1..d4698f5 100644
 +		cli.Log.Debugf("Emitting Disconnected event")
 +		if err := cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.dispatchEventContext(ctx, &events.Disconnected{}); return nil }); err != nil {
 +			cli.Log.Debugf("Failed to launch disconnected event: %v", err)
- 		}
+@@ -632,0 +657,5 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
 +		if err := cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.autoReconnect(ctx); return nil }); err != nil {
 +			cli.Log.Debugf("Failed to launch autoreconnect: %v", err)
 +		}
 +	} else if remote {
 +		cli.Log.Debugf("OnDisconnect() called, but it was expected, so not emitting event")
- 	} else {
+@@ -634 +663 @@ func (cli *Client) onDisconnect(ctx context.Context, ns *socket.NoiseSocket, rem
 -		cli.Log.Debugf("Ignoring OnDisconnect on different socket")
 +		cli.Log.Debugf("OnDisconnect() called after manual disconnection")
- 	}
- }
- 
-@@ -825,7 +853,16 @@ func (cli *Client) AddEventHandler(handler EventHandler) uint32 {
- func (cli *Client) AddEventHandlerWithSuccessStatus(handler EventHandlerWithSuccessStatus) uint32 {
- 	nextID := atomic.AddUint32(&nextHandlerID, 1)
- 	cli.eventHandlersLock.Lock()
+@@ -828 +857,10 @@ func (cli *Client) AddEventHandlerWithSuccessStatus(handler EventHandlerWithSucc
 -	cli.eventHandlers = append(cli.eventHandlers, wrappedEventHandler{handler, nextID})
 +	cli.eventHandlers = append(cli.eventHandlers, wrappedEventHandler{fn: handler, id: nextID})
 +	cli.eventHandlersLock.Unlock()
@@ -490,60 +345,29 @@ index 35469f1..d4698f5 100644
 +	nextID := atomic.AddUint32(&nextHandlerID, 1)
 +	cli.eventHandlersLock.Lock()
 +	cli.eventHandlers = append(cli.eventHandlers, wrappedEventHandler{ctxfn: handler, id: nextID})
- 	cli.eventHandlersLock.Unlock()
- 	return nextID
- }
-@@ -880,12 +917,14 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
- 	if err != nil {
- 		cli.Log.Warnf("Failed to decompress frame: %v", err)
- 		cli.Log.Debugf("Errored frame hex: %s", hex.EncodeToString(data))
+@@ -882,0 +921 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 +		cli.lifecycle.recordError(err)
- 		return
- 	}
- 	node, err := waBinary.Unmarshal(decompressed)
- 	if err != nil {
- 		cli.Log.Warnf("Failed to decode node in frame: %v", err)
- 		cli.Log.Debugf("Errored frame hex: %s", hex.EncodeToString(decompressed))
+@@ -888,0 +928 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 +		cli.lifecycle.recordError(err)
- 		return
- 	}
- 	cli.recvLog.Debugf("%s", node)
-@@ -900,14 +939,19 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
- 		select {
- 		case queue <- node:
- 		case <-ctx.Done():
+@@ -902,0 +943 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 +			cli.lifecycle.recordError(ctx.Err())
- 		default:
- 			cli.Log.Warnf("Handler queue is full, message ordering is no longer guaranteed")
+@@ -905 +946 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 -			go func() {
 +			if err := cli.launchLifecycle(ctx, func(ctx context.Context) error {
- 				select {
- 				case queue <- node:
+@@ -907,0 +949 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 +					return nil
- 				case <-ctx.Done():
+@@ -908,0 +951 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 +					return ctx.Err()
- 				}
+@@ -910 +953,3 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 -			}()
 +			}); err != nil {
 +				cli.Log.Debugf("Failed to queue overflow node: %v", err)
 +			}
- 		}
- 	} else if node.Tag != "ack" {
- 		cli.Log.Debugf("Didn't handle WhatsApp node %s", node.Tag)
-@@ -983,7 +1027,8 @@ Loop:
- 					child.Finish(handlerErr)
- 					close(doneChan)
- 				}()
+@@ -986 +1031,2 @@ Loop:
 -				cli.nodeHandlers[node.Tag](evtCtx, node)
 +				handlerCtx := cli.lifecycleContext(evtCtx, child)
 +				cli.nodeHandlers[node.Tag](handlerCtx, node)
- 				duration := time.Since(start)
- 				if duration > 5*time.Second {
- 					cli.Log.Warnf("Node handling took %s for %s", duration, node)
-@@ -1037,23 +1082,51 @@ func (cli *Client) sendNode(ctx context.Context, node waBinary.Node) error {
- 	return err
- }
- 
+@@ -1040 +1086,12 @@ func (cli *Client) sendNode(ctx context.Context, node waBinary.Node) error {
 -func (cli *Client) dispatchEvent(evt any) (handlerFailed bool) {
 +// dispatchEventContext dispatches while preserving the causal lifecycle context.
 +func (cli *Client) dispatchEventContext(ctx context.Context, evt any) (failed bool) {
@@ -557,9 +381,9 @@ index 35469f1..d4698f5 100644
 +	}
 +	ctx = cli.lifecycleContext(ctx, op)
 +	defer op.Finish(nil)
- 	cli.eventHandlersLock.RLock()
+@@ -1041,0 +1099 @@ func (cli *Client) dispatchEvent(evt any) (handlerFailed bool) {
 +	defer cli.eventHandlersLock.RUnlock()
- 	defer func() {
+@@ -1043,4 +1101,10 @@ func (cli *Client) dispatchEvent(evt any) (handlerFailed bool) {
 -		cli.eventHandlersLock.RUnlock()
 -		err := recover()
 -		if err != nil {
@@ -574,9 +398,7 @@ index 35469f1..d4698f5 100644
 +			cli.lifecycle.recordError(err)
 +			cli.Log.Errorf("Event handler panicked: %v\n%s", recovered, debug.Stack())
 +			failed = true
- 		}
- 	}()
- 	for _, handler := range cli.eventHandlers {
+@@ -1050 +1114,7 @@ func (cli *Client) dispatchEvent(evt any) (handlerFailed bool) {
 -		if !handler.fn(evt) {
 +		if handler.ctxfn != nil {
 +			if err := handler.ctxfn(ctx, evt); err != nil {
@@ -585,49 +407,28 @@ index 35469f1..d4698f5 100644
 +			}
 +		} else if handler.fn != nil && !handler.fn(evt) {
 +			cli.lifecycle.recordError(fmt.Errorf("event handler rejected %T", evt))
- 			return true
- 		}
- 	}
- 	return false
- }
- 
+@@ -1056,0 +1127,4 @@ func (cli *Client) dispatchEvent(evt any) (handlerFailed bool) {
 +func (cli *Client) dispatchEvent(evt any) bool {
 +	return cli.dispatchEventContext(context.Background(), evt)
 +}
 +
- // ParseWebMessage parses a WebMessageInfo object into *events.Message to match what real-time messages have.
- //
- // The chat JID can be found in the Conversation data:
 diff --git a/connectionevents.go b/connectionevents.go
-index 5d2e2e0..e1fed1c 100644
+index 5d2e2e0..619c686 100644
 --- a/connectionevents.go
 +++ b/connectionevents.go
-@@ -8,6 +8,7 @@ package whatsmeow
- 
- import (
- 	"context"
+@@ -10,0 +11 @@ import (
 +	"fmt"
- 	"time"
- 
- 	waBinary "go.mau.fi/whatsmeow/binary"
-@@ -30,17 +31,23 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
- 			return
- 		}
- 		cli.Log.Infof("Got 515 code, reconnecting...")
+@@ -33 +34 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -		go func() {
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
- 			cli.Disconnect()
+@@ -35 +36 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -			err := cli.connect(ctx)
 +			err := cli.connect(workerCtx)
- 			if err != nil {
- 				cli.Log.Errorf("Failed to reconnect after 515 code: %v", err)
- 			}
+@@ -39 +40,2 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -		}()
 +			return err
 +		})
- 	case code == "401" && conflictType == "device_removed":
- 		cli.expectDisconnect()
- 		cli.Log.Infof("Got device removed stream error, sending LoggedOut event and deleting session")
+@@ -43 +45,6 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -		go cli.dispatchEvent(&events.LoggedOut{OnConnect: false, Reason: events.ConnectFailureLoggedOut})
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			if cli.dispatchEventContext(workerCtx, &events.LoggedOut{OnConnect: false, Reason: events.ConnectFailureLoggedOut}) {
@@ -635,13 +436,7 @@ index 5d2e2e0..e1fed1c 100644
 +			}
 +			return nil
 +		})
- 		err := cli.Store.Delete(ctx)
- 		if err != nil {
- 			cli.Log.Warnf("Failed to delete store after device_removed error: %v", err)
-@@ -48,7 +55,12 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
- 	case conflictType == "replaced":
- 		cli.expectDisconnect()
- 		cli.Log.Infof("Got replaced stream error, sending StreamReplaced event")
+@@ -51 +58,6 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -		go cli.dispatchEvent(&events.StreamReplaced{})
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			if cli.dispatchEventContext(workerCtx, &events.StreamReplaced{}) {
@@ -649,13 +444,7 @@ index 5d2e2e0..e1fed1c 100644
 +			}
 +			return nil
 +		})
- 	case code == "503":
- 		// This seems to happen when the server wants to restart or something.
- 		// The disconnection will be emitted as an events.Disconnected and then the auto-reconnect will do its thing.
-@@ -61,11 +73,21 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
- 		if err != nil {
- 			cli.Log.Errorf("Failed to refresh CAT: %v", err)
- 			cli.expectDisconnect()
+@@ -64 +76,6 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -			go cli.dispatchEvent(&events.CATRefreshError{Error: err})
 +			_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +				if cli.dispatchEventContext(workerCtx, &events.CATRefreshError{Error: err}) {
@@ -663,9 +452,7 @@ index 5d2e2e0..e1fed1c 100644
 +				}
 +				return nil
 +			})
- 		}
- 	default:
- 		cli.Log.Errorf("Unknown stream error: %s", node)
+@@ -68 +85,6 @@ func (cli *Client) handleStreamError(ctx context.Context, node *waBinary.Node) {
 -		go cli.dispatchEvent(&events.StreamError{Code: code, Raw: node})
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			if cli.dispatchEventContext(workerCtx, &events.StreamError{Code: code, Raw: node}) {
@@ -673,13 +460,7 @@ index 5d2e2e0..e1fed1c 100644
 +			}
 +			return nil
 +		})
- 	}
- }
- 
-@@ -75,7 +97,12 @@ func (cli *Client) handleIB(ctx context.Context, node *waBinary.Node) {
- 		ag := child.AttrGetter()
- 		switch child.Tag {
- 		case "downgrade_webclient":
+@@ -78 +100,6 @@ func (cli *Client) handleIB(ctx context.Context, node *waBinary.Node) {
 -			go cli.dispatchEvent(&events.QRScannedWithoutMultidevice{})
 +			_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +				if cli.dispatchEventContext(workerCtx, &events.QRScannedWithoutMultidevice{}) {
@@ -687,13 +468,10 @@ index 5d2e2e0..e1fed1c 100644
 +				}
 +				return nil
 +			})
- 		case "offline_preview":
- 			cli.dispatchEvent(&events.OfflineSyncPreview{
- 				Total:          ag.Int("count"),
-@@ -125,33 +152,58 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
- 	}
- 	if reason.IsLoggedOut() {
- 		cli.Log.Infof("Got %s connect failure, sending LoggedOut event and deleting session", reason)
+@@ -80 +107 @@ func (cli *Client) handleIB(ctx context.Context, node *waBinary.Node) {
+-			cli.dispatchEvent(&events.OfflineSyncPreview{
++			cli.dispatchEventContext(ctx, &events.OfflineSyncPreview{
+@@ -128 +155,6 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 -		go cli.dispatchEvent(&events.LoggedOut{OnConnect: true, Reason: reason})
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			if cli.dispatchEventContext(workerCtx, &events.LoggedOut{OnConnect: true, Reason: reason}) {
@@ -701,12 +479,7 @@ index 5d2e2e0..e1fed1c 100644
 +			}
 +			return nil
 +		})
- 		err := cli.Store.Delete(ctx)
- 		if err != nil {
- 			cli.Log.Warnf("Failed to delete store after %d failure: %v", int(reason), err)
- 		}
- 	} else if reason == events.ConnectFailureTempBanned {
- 		cli.Log.Warnf("Temporary ban connect failure: %s", node)
+@@ -135,3 +167,8 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 -		go cli.dispatchEvent(&events.TemporaryBan{
 -			Code:   events.TempBanReason(ag.Int("code")),
 -			Expire: time.Duration(ag.Int("expire")) * time.Second,
@@ -718,9 +491,7 @@ index 5d2e2e0..e1fed1c 100644
 +				return fmt.Errorf("event handler failed for %T", &events.TemporaryBan{})
 +			}
 +			return nil
- 		})
- 	} else if reason == events.ConnectFailureClientOutdated {
- 		cli.Log.Errorf("Client outdated (405) connect failure (client version: %s)", store.GetWAVersion().String())
+@@ -141 +178,6 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 -		go cli.dispatchEvent(&events.ClientOutdated{})
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			if cli.dispatchEventContext(workerCtx, &events.ClientOutdated{}) {
@@ -728,12 +499,7 @@ index 5d2e2e0..e1fed1c 100644
 +			}
 +			return nil
 +		})
- 	} else if cli.RefreshCAT != nil && (reason == events.ConnectFailureCATInvalid || reason == events.ConnectFailureCATExpired) {
- 		cli.Log.Infof("Got %d/%s connect failure, refreshing CAT before reconnecting...", int(reason), message)
- 		err := cli.RefreshCAT(ctx)
- 		if err != nil {
- 			cli.Log.Errorf("Failed to refresh CAT: %v", err)
- 			cli.expectDisconnect()
+@@ -148 +190,6 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 -			go cli.dispatchEvent(&events.CATRefreshError{Error: err})
 +			_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +				if cli.dispatchEventContext(workerCtx, &events.CATRefreshError{Error: err}) {
@@ -741,11 +507,7 @@ index 5d2e2e0..e1fed1c 100644
 +				}
 +				return nil
 +			})
- 		}
- 	} else if willAutoReconnect {
- 		cli.Log.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", int(reason), message)
- 	} else {
- 		cli.Log.Warnf("Unknown connect failure: %s", node)
+@@ -154 +201,6 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 -		go cli.dispatchEvent(&events.ConnectFailure{Reason: reason, Message: message, Raw: node})
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			if cli.dispatchEventContext(workerCtx, &events.ConnectFailure{Reason: reason, Message: message, Raw: node}) {
@@ -753,55 +515,139 @@ index 5d2e2e0..e1fed1c 100644
 +			}
 +			return nil
 +		})
- 	}
- }
- 
-@@ -184,26 +236,29 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
- 		cli.StoreLIDPNMapping(ctx, cli.Store.GetLID(), cli.Store.GetJID())
- 	}
- 	cli.deleteExpiredPrivacyTokens()
+@@ -187,2 +239,2 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 -	go func() {
 -		if dbCount, err := cli.Store.PreKeys.UploadedPreKeyCount(ctx); err != nil {
 +	_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +		if dbCount, err := cli.Store.PreKeys.UploadedPreKeyCount(workerCtx); err != nil {
- 			cli.Log.Errorf("Failed to get number of prekeys in database: %v", err)
+@@ -190 +242 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 -		} else if serverCount, err := cli.getServerPreKeyCount(ctx); err != nil {
 +		} else if serverCount, err := cli.getServerPreKeyCount(workerCtx); err != nil {
- 			cli.Log.Warnf("Failed to get number of prekeys on server: %v", err)
- 		} else {
- 			cli.Log.Debugf("Database has %d prekeys, server says we have %d", dbCount, serverCount)
- 			if serverCount < MinPreKeyCount || dbCount < MinPreKeyCount {
+@@ -195,2 +247,2 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 -				cli.uploadPreKeys(ctx, dbCount == 0 && serverCount == 0)
 -				sc, _ := cli.getServerPreKeyCount(ctx)
 +				cli.uploadPreKeys(workerCtx, dbCount == 0 && serverCount == 0)
 +				sc, _ := cli.getServerPreKeyCount(workerCtx)
- 				cli.Log.Debugf("Prekey count after upload: %d", sc)
- 			}
- 		}
+@@ -200 +252 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 -		err := cli.SetPassive(ctx, false)
 +		err := cli.SetPassive(workerCtx, false)
- 		if err != nil {
- 			cli.Log.Warnf("Failed to send post-connect passive IQ: %v", err)
- 		}
+@@ -204 +256,3 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 -		cli.dispatchEvent(&events.Connected{})
 +		if cli.dispatchEventContext(workerCtx, &events.Connected{}) {
 +			return fmt.Errorf("event handler failed for %T", &events.Connected{})
 +		}
- 		cli.closeSocketWaitChan()
+@@ -206 +260,2 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 -	}()
 +		return nil
 +	})
- }
- 
- // SetPassive tells the WhatsApp server whether this device is passive or not.
+diff --git a/history_lifecycle_test.go b/history_lifecycle_test.go
+new file mode 100644
+index 0000000..5ce973e
+--- /dev/null
++++ b/history_lifecycle_test.go
+@@ -0,0 +1,90 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/store"
++	"go.mau.fi/whatsmeow/types"
++	"go.mau.fi/whatsmeow/types/events"
++)
++
++func TestLifecycleHistorySyncRejectedStartResetsFlagWithoutEnqueue(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	cli.sealLifecycleRoots()
++	info := &types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true}}
++	msg := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
++		HistorySyncNotification: &waE2E.HistorySyncNotification{},
++	}}
++	if cli.handleProtocolMessage(context.Background(), info, msg) != true {
++		t.Fatal("expected protocol handler to remain successful")
++	}
++	if cli.historySyncHandlerStarted.Load() {
++		t.Fatal("rejected history loop left started flag set")
++	}
++	if got := len(cli.historySyncNotifications); got != 0 {
++		t.Fatalf("rejected history loop enqueued %d notifications", got)
++	}
++}
++
++func TestLifecycleHistorySyncAcceptedRootCancelsAndDrainJoins(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	ctx, cancel := context.WithCancel(context.Background())
++	if !cli.startHistorySyncNotificationLoop(ctx) {
++		t.Fatal("accepted history loop was rejected")
++	}
++	cli.sealLifecycleRoots()
++	cancel()
++	deadline := time.After(time.Second)
++	for cli.historySyncHandlerStarted.Load() {
++		select {
++		case <-deadline:
++			t.Fatal("history loop did not stop after cancellation")
++		default:
++			time.Sleep(time.Millisecond)
++		}
++	}
++	if _, err := cli.BeginDrain(context.Background()); !errors.Is(err, ErrLifecycleCoverageIncomplete) {
++		t.Fatalf("drain did not join accepted history root: %v", err)
++	}
++}
++
++func TestLifecycleAcceptedOfflineSyncPreviewDispatchAfterSeal(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	ctx, root, err := cli.BeginOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	cancelCtx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	seen := make(chan *events.OfflineSyncPreview, 1)
++	cli.AddEventHandler(func(evt any) {
++		if preview, ok := evt.(*events.OfflineSyncPreview); ok {
++			seen <- preview
++		}
++	})
++	if !cli.startHistorySyncNotificationLoop(cancelCtx) {
++		t.Fatal("accepted history loop was rejected")
++	}
++	cli.sealLifecycleRoots()
++	cli.handleIB(ctx, &waBinary.Node{Tag: "ib", Content: []waBinary.Node{{
++		Tag: "offline_preview", Attrs: waBinary.Attrs{"count": "7", "message": "3"},
++	}}})
++	select {
++	case preview := <-seen:
++		if preview.Total != 7 || preview.Messages != 3 {
++			t.Fatalf("unexpected preview: %+v", preview)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("OfflineSyncPreview was not dispatched after sealing")
++	}
++	cancel()
++	root.Finish(nil)
++	if _, err := cli.BeginDrain(context.Background()); !errors.Is(err, ErrLifecycleCoverageIncomplete) {
++		t.Fatalf("drain did not join accepted roots: %v", err)
++	}
++}
+diff --git a/internals.go b/internals.go
+index 6e90d4d..19fbf39 100644
+--- a/internals.go
++++ b/internals.go
+@@ -382 +382 @@ func (int *DangerousInternalClient) HandleHistorySyncNotificationLoop() {
+-	int.c.handleHistorySyncNotificationLoop()
++	int.c.handleHistorySyncNotificationLoop(int.c.BackgroundEventCtx)
 diff --git a/keepalive.go b/keepalive.go
 index 8c50e7b..e8aa491 100644
 --- a/keepalive.go
 +++ b/keepalive.go
-@@ -39,20 +39,24 @@ func (cli *Client) keepAliveLoop(ctx, connCtx context.Context) {
- 				return
- 			} else if !isSuccess {
- 				errorCount++
+@@ -42,3 +42,4 @@ func (cli *Client) keepAliveLoop(ctx, connCtx context.Context) {
 -				go cli.dispatchEvent(&events.KeepAliveTimeout{
 -					ErrorCount:  errorCount,
 -					LastSuccess: lastSuccess,
@@ -809,95 +655,49 @@ index 8c50e7b..e8aa491 100644
 +				_ = cli.launchLifecycle(ctx, func(ctx context.Context) error {
 +					cli.dispatchEventContext(ctx, evt)
 +					return nil
- 				})
- 				if cli.EnableAutoReconnect && time.Since(lastSuccess) > KeepAliveMaxFailTime {
- 					cli.Log.Debugf("Forcing reconnect due to keepalive failure")
- 					cli.Disconnect()
- 					cli.resetExpectedDisconnect()
+@@ -50 +51 @@ func (cli *Client) keepAliveLoop(ctx, connCtx context.Context) {
 -					go cli.autoReconnect(ctx)
 +					_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.autoReconnect(ctx); return nil })
- 				}
- 			} else {
- 				if errorCount > 0 {
- 					errorCount = 0
+@@ -55 +56,4 @@ func (cli *Client) keepAliveLoop(ctx, connCtx context.Context) {
 -					go cli.dispatchEvent(&events.KeepAliveRestored{})
 +					_ = cli.launchLifecycle(ctx, func(ctx context.Context) error {
 +						cli.dispatchEventContext(ctx, &events.KeepAliveRestored{})
 +						return nil
 +					})
- 				}
- 				lastSuccess = time.Now()
- 			}
-@@ -72,6 +76,7 @@ func (cli *Client) sendKeepAlive(ctx context.Context) (isSuccess, shouldContinue
- 		return false, false
- 	} else if err != nil {
- 		cli.Log.Warnf("Failed to send keepalive: %v", err)
+@@ -74,0 +79 @@ func (cli *Client) sendKeepAlive(ctx context.Context) (isSuccess, shouldContinue
 +		cli.lifecycle.recordError(err)
- 		return false, true
- 	}
- 	select {
-@@ -80,6 +85,7 @@ func (cli *Client) sendKeepAlive(ctx context.Context) (isSuccess, shouldContinue
- 		return true, true
- 	case <-time.After(KeepAliveResponseDeadline):
- 		cli.Log.Warnf("Keepalive timed out")
+@@ -82,0 +88 @@ func (cli *Client) sendKeepAlive(ctx context.Context) (isSuccess, shouldContinue
 +		cli.lifecycle.recordError(context.DeadlineExceeded)
- 		return false, true
- 	case <-ctx.Done():
- 		return false, false
 diff --git a/keyshare_drain.go b/keyshare_drain.go
 index 71bc86b..fedeee3 100644
 --- a/keyshare_drain.go
 +++ b/keyshare_drain.go
-@@ -3,6 +3,7 @@ package whatsmeow
- import (
- 	"context"
- 	"errors"
+@@ -5,0 +6 @@ import (
 +	"fmt"
- 	"sync"
- 
- 	"go.mau.fi/whatsmeow/proto/waE2E"
-@@ -23,8 +24,10 @@ type appStateKeyShareDrain struct {
- }
- 
- type appStateKeyShareScope struct {
+@@ -26,2 +27,4 @@ type appStateKeyShareScope struct {
 -	drain *appStateKeyShareDrain
 -	done  bool // protected by drain.mu, including child admission
 +	drain     *appStateKeyShareDrain
 +	done      bool // protected by drain.mu, including child admission
 +	lifecycle *LifecycleScope
 +	client    *Client
- }
- 
- type appStateKeyShareScopeKey struct{}
-@@ -107,42 +110,82 @@ func (d *appStateKeyShareDrain) drain(ctx context.Context) error {
- }
- 
- func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.AppStateSyncKeyShare) error {
+@@ -109,0 +113,6 @@ func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
 +	ctx = context.WithoutCancel(ctx)
 +	op, err := cli.scopeForContext(ctx)
 +	if err != nil {
 +		cli.lifecycle.recordError(err)
 +		return err
 +	}
- 	scope, err := cli.appStateKeyShareDrain.admit()
- 	if err != nil {
+@@ -111,0 +121 @@ func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
 +		op.Finish(err)
- 		cli.Log.Warnf("Rejected app state sync key share after drain began: %v", err)
- 		return err
- 	}
+@@ -114,0 +125,3 @@ func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
 +	scope.lifecycle = op
 +	scope.client = cli
 +	ctx = cli.lifecycleContext(ctx, op)
- 	ctx = context.WithValue(context.WithoutCancel(ctx), appStateKeyShareScopeKey{}, scope)
- 	go func() {
- 		var workErr error
+@@ -118 +131 @@ func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
 -		defer func() { scope.finish(workErr) }()
 +		defer finishAppStateWorker(scope, &workErr)
- 		workErr = cli.handleAppStateSyncKeyShareError(ctx, keys)
- 	}()
- 	return nil
- }
- 
+@@ -124,3 +137,10 @@ func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
 -// goAppStateKeyShareChild retains a registered internal descendant when invoked
 -// from the key-share fetch path. Outside that path, its existing detached launch
 -// semantics are unchanged. Callback-created goroutines are not covered.
@@ -911,17 +711,11 @@ index 71bc86b..fedeee3 100644
 +
 +// goAppStateKeyShareChild requires an accepted narrow scope. Production callers
 +// without one use the client method, which admits through the common owner.
- func goAppStateKeyShareChild(ctx context.Context, fn func(context.Context) error) error {
- 	parent, _ := ctx.Value(appStateKeyShareScopeKey{}).(*appStateKeyShareScope)
- 	if parent == nil {
+@@ -130,2 +150 @@ func goAppStateKeyShareChild(ctx context.Context, fn func(context.Context) error
 -		go func() { _ = fn(ctx) }()
 -		return nil
 +		return errAppStateKeyShareScopeDone
- 	}
- 	child, err := parent.child()
- 	if err != nil {
- 		return err
- 	}
+@@ -136,0 +156,9 @@ func goAppStateKeyShareChild(ctx context.Context, fn func(context.Context) error
 +	child.client = parent.client
 +	if parent.lifecycle != nil {
 +		child.lifecycle, err = parent.lifecycle.Child()
@@ -931,16 +725,10 @@ index 71bc86b..fedeee3 100644
 +		}
 +		ctx = context.WithValue(ctx, lifecycleContextKey{}, child.lifecycle)
 +	}
- 	ctx = context.WithValue(ctx, appStateKeyShareScopeKey{}, child)
- 	go func() {
- 		var workErr error
+@@ -140 +168 @@ func goAppStateKeyShareChild(ctx context.Context, fn func(context.Context) error
 -		defer func() { child.finish(workErr) }()
 +		defer finishAppStateWorker(child, &workErr)
- 		workErr = fn(ctx)
- 	}()
- 	return nil
- }
- 
+@@ -145,0 +174,15 @@ func goAppStateKeyShareChild(ctx context.Context, fn func(context.Context) error
 +func finishAppStateWorker(scope *appStateKeyShareScope, workErr *error) {
 +	if recovered := recover(); recovered != nil {
 +		if cause, ok := recovered.(error); ok {
@@ -956,49 +744,24 @@ index 71bc86b..fedeee3 100644
 +	scope.lifecycle.Finish(*workErr)
 +}
 +
- // DrainAppStateKeyShares permanently seals protocol key-share root admission and
- // joins accepted workers, their synchronous key-store/fetch continuations and
- // explicitly scoped internal missing-key requests. Errors are retained. A
 diff --git a/lifecycle.go b/lifecycle.go
 index 3a9ea9a..4edb9b4 100644
 --- a/lifecycle.go
 +++ b/lifecycle.go
-@@ -3,6 +3,7 @@ package whatsmeow
- import (
- 	"context"
- 	"errors"
+@@ -5,0 +6 @@ import (
 +	"fmt"
- 	"sync"
- )
- 
-@@ -32,7 +33,7 @@ func (e *LifecycleDrainError) Unwrap() []error {
- // HeldBoundary is intentionally opaque. It is only returned when the SDK can
- // prove that every client root and accepted descendant is quiescent. The
- // current pinned SDK never returns one from BeginDrain.
+@@ -35 +36 @@ func (e *LifecycleDrainError) Unwrap() []error {
 -type HeldBoundary struct{ _ struct{} }
 +type HeldBoundary struct{ owner *clientLifecycle }
- 
- type clientLifecycle struct {
- 	mu     sync.Mutex
-@@ -88,7 +89,10 @@ func (cli *Client) BeginOperation(ctx context.Context) (context.Context, *Operat
- 	if ctx == nil {
- 		ctx = context.Background()
- 	}
+@@ -91 +92,4 @@ func (cli *Client) BeginOperation(ctx context.Context) (context.Context, *Operat
 -	op, err := cli.BeginLifecycleScope(ctx)
 +	op, err := cli.scopeForContext(ctx)
 +	if err == nil {
 +		ctx = cli.lifecycleContext(ctx, op)
 +	}
- 	return ctx, op, err
- }
- 
-@@ -127,9 +131,19 @@ func (s *LifecycleScope) LaunchContext(ctx context.Context, fn func(context.Cont
- 	if ctx == nil {
- 		ctx = context.Background()
- 	}
+@@ -129,0 +134 @@ func (s *LifecycleScope) LaunchContext(ctx context.Context, fn func(context.Cont
 +	ctx = context.WithValue(ctx, lifecycleContextKey{}, child)
- 	go func() {
- 		var workErr error
+@@ -132 +137,10 @@ func (s *LifecycleScope) LaunchContext(ctx context.Context, fn func(context.Cont
 -		defer func() { child.Finish(workErr) }()
 +		defer func() {
 +			if recovered := recover(); recovered != nil {
@@ -1010,15 +773,9 @@ index 3a9ea9a..4edb9b4 100644
 +			}
 +			child.Finish(workErr)
 +		}()
- 		workErr = fn(ctx)
- 	}()
- 	return nil
-@@ -192,8 +206,17 @@ func (cli *Client) BeginDrain(ctx context.Context) (*HeldBoundary, error) {
- 	if ctx == nil {
- 		ctx = context.Background()
- 	}
+@@ -194,0 +209 @@ func (cli *Client) BeginDrain(ctx context.Context) (*HeldBoundary, error) {
 +	cli.sealLifecycleRoots()
- 	genericErr := cli.lifecycle.drain(ctx)
+@@ -196 +211,9 @@ func (cli *Client) BeginDrain(ctx context.Context) (*HeldBoundary, error) {
 -	keyErr := cli.appStateKeyShareDrain.drain(ctx)
 +	cli.lifecycle.mu.Lock()
 +	joined := cli.lifecycle.closed
@@ -1029,9 +786,6 @@ index 3a9ea9a..4edb9b4 100644
 +		// the compatibility counter after causal producers have really joined.
 +		keyErr = cli.appStateKeyShareDrain.drain(ctx)
 +	}
- 	if genericErr != nil || keyErr != nil {
- 		return nil, &LifecycleDrainError{Cause: errors.Join(genericErr, keyErr)}
- 	}
 diff --git a/lifecycle_coverage.go b/lifecycle_coverage.go
 new file mode 100644
 index 0000000..842f54a
@@ -1051,6 +805,38 @@ index 0000000..842f54a
 +		"socket package standalone callers may omit the additive worker launcher; foreign transports and writable handles are outside client ownership",
 +		"queued node/frame membership and all error-only logging continuations are not a verified whole-client persistence frontier",
 +		"application and foreign-process media writers require their own exhaustive ownership and retained immutable membership contract",
++	}
++}
+diff --git a/lifecycle_failure_policy_test.go b/lifecycle_failure_policy_test.go
+new file mode 100644
+index 0000000..a9213fd
+--- /dev/null
++++ b/lifecycle_failure_policy_test.go
+@@ -0,0 +1,26 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"testing"
++)
++
++func TestLifecycleFirstFailureRemainsSticky(t *testing.T) {
++	cli := syntheticLifecycleClient()
++	root, err := cli.BeginScope(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	first := errors.New("synthetic first operational cause")
++	later := errors.New("synthetic later operational cause")
++	cli.lifecycle.recordError(first)
++	root.Finish(later)
++	held, drainErr := cli.BeginDrain(context.Background())
++	if held != nil || !errors.Is(drainErr, first) || !errors.Is(drainErr, ErrLifecycleCoverageIncomplete) {
++		t.Fatalf("first cause no longer denies a successful boundary: held=%v err=%v", held, drainErr)
++	}
++	if errors.Is(drainErr, later) {
++		t.Fatal("first-cause registry unexpectedly claimed an exhaustive error history")
 +	}
 +}
 diff --git a/lifecycle_source_inventory_test.go b/lifecycle_source_inventory_test.go
@@ -1508,63 +1294,41 @@ diff --git a/mediaretry.go b/mediaretry.go
 index b8666a1..e6ae578 100644
 --- a/mediaretry.go
 +++ b/mediaretry.go
-@@ -181,5 +181,5 @@ func (cli *Client) handleMediaRetryNotification(ctx context.Context, node *waBin
- 		cli.Log.Warnf("Failed to parse media retry notification: %v", err)
- 		return
- 	}
+@@ -184 +184 @@ func (cli *Client) handleMediaRetryNotification(ctx context.Context, node *waBin
 -	cli.dispatchEvent(evt)
 +	cli.dispatchEventContext(ctx, evt)
- }
 diff --git a/message.go b/message.go
-index a0496d7..d406a80 100644
+index a0496d7..7d3c495 100644
 --- a/message.go
 +++ b/message.go
-@@ -54,10 +54,16 @@ func (cli *Client) handleEncryptedMessage(ctx context.Context, node *waBinary.No
- 		cli.StoreLIDPNMapping(ctx, info.RecipientAlt, info.Chat)
- 	}
- 	if info.VerifiedName != nil && len(info.VerifiedName.Details.GetVerifiedName()) > 0 {
+@@ -57 +57,4 @@ func (cli *Client) handleEncryptedMessage(ctx context.Context, node *waBinary.No
 -		go cli.updateBusinessName(ctx, info.Sender, info.SenderAlt, info, info.VerifiedName.Details.GetVerifiedName())
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			cli.updateBusinessName(workerCtx, info.Sender, info.SenderAlt, info, info.VerifiedName.Details.GetVerifiedName())
 +			return nil
 +		})
- 	}
- 	if len(info.PushName) > 0 && info.PushName != "-" && (cli.MessengerConfig == nil || info.PushName != "username") {
+@@ -60 +63,4 @@ func (cli *Client) handleEncryptedMessage(ctx context.Context, node *waBinary.No
 -		go cli.updatePushName(ctx, info.Sender, info.SenderAlt, info, info.PushName)
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			cli.updatePushName(workerCtx, info.Sender, info.SenderAlt, info, info.PushName)
 +			return nil
 +		})
- 	}
- 	if info.Sender.Server == types.NewsletterServer {
- 		var cancelled bool
-@@ -325,9 +331,9 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
- 	if ok && len(node.GetChildrenByTag("enc")) == 0 {
- 		uType := events.UnavailableType(unavailableNode.AttrGetter().String("type"))
- 		cli.Log.Warnf("Unavailable message %s from %s (type: %q)", info.ID, info.SourceString(), uType)
+@@ -328,3 +334,3 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -		cli.backgroundIfAsyncAck(func() {
 -			cli.immediateRequestMessageFromPhone(ctx, info)
 -			cli.sendAck(ctx, node, 0)
 +		cli.backgroundIfAsyncAckContext(ctx, func(workerCtx context.Context) {
 +			cli.immediateRequestMessageFromPhone(workerCtx, info)
 +			cli.sendAck(workerCtx, node, 0)
- 		})
- 		cli.dispatchEvent(&events.UndecryptableMessage{Info: *info, IsUnavailable: true, UnavailableType: uType})
- 		return
-@@ -418,16 +424,22 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
- 			}
- 			isUnavailable := encType == "skmsg" && !containsDirectMsg && errors.Is(err, signalerror.ErrNoSenderKeyForUser)
- 			if encType == "msmsg" {
+@@ -332 +338 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
+-		cli.dispatchEvent(&events.UndecryptableMessage{Info: *info, IsUnavailable: true, UnavailableType: uType})
++		cli.dispatchEventContext(ctx, &events.UndecryptableMessage{Info: *info, IsUnavailable: true, UnavailableType: uType})
+@@ -421,2 +427,2 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -				cli.backgroundIfAsyncAck(func() {
 -					cli.sendAck(ctx, node, NackMissingMessageSecret)
 +				cli.backgroundIfAsyncAckContext(ctx, func(workerCtx context.Context) {
 +					cli.sendAck(workerCtx, node, NackMissingMessageSecret)
- 				})
- 			} else if cli.SynchronousAck {
- 				cli.sendRetryReceipt(ctx, node, info, isUnavailable)
- 				// TODO this probably isn't supposed to ack
- 				cli.sendAck(ctx, node, 0)
- 			} else {
+@@ -429,2 +435,8 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -				go cli.sendRetryReceipt(context.WithoutCancel(ctx), node, info, isUnavailable)
 -				go cli.sendAck(ctx, node, 0)
 +				_ = cli.launchLifecycle(context.WithoutCancel(ctx), func(workerCtx context.Context) error {
@@ -1575,383 +1339,242 @@ index a0496d7..d406a80 100644
 +					cli.sendAck(workerCtx, node, 0)
 +					return nil
 +				})
- 			}
- 			cli.dispatchEvent(&events.UndecryptableMessage{
- 				Info:            *info,
-@@ -477,22 +489,23 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
- 
- 			if time.Since(cli.lastDecryptedBufferClear) > 12*time.Hour && ctx.Err() == nil {
- 				cli.lastDecryptedBufferClear = time.Now()
+@@ -432 +444 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
+-			cli.dispatchEvent(&events.UndecryptableMessage{
++			cli.dispatchEventContext(ctx, &events.UndecryptableMessage{
+@@ -480,2 +492,2 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -				go func() {
 -					err := cli.Store.EventBuffer.DeleteOldBufferedHashes(context.WithoutCancel(ctx))
 +				_ = cli.launchLifecycle(context.WithoutCancel(ctx), func(workerCtx context.Context) error {
 +					err := cli.Store.EventBuffer.DeleteOldBufferedHashes(workerCtx)
- 					if err != nil {
+@@ -483 +495 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -						zerolog.Ctx(ctx).Err(err).Msg("Failed to delete old buffered hashes")
 +						zerolog.Ctx(workerCtx).Err(err).Msg("Failed to delete old buffered hashes")
- 					}
+@@ -485 +497,2 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -				}()
 +					return nil
 +				})
- 			}
- 		}
- 	}
+@@ -489 +502 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -	cli.backgroundIfAsyncAck(func() {
 +	cli.backgroundIfAsyncAckContext(ctx, func(workerCtx context.Context) {
- 		if !recognizedStanza {
+@@ -491 +504 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -			cli.sendAck(ctx, node, NackUnrecognizedStanza)
 +			cli.sendAck(workerCtx, node, NackUnrecognizedStanza)
- 		} else if protobufFailed {
+@@ -493 +506 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -			cli.sendAck(ctx, node, NackInvalidProtobuf)
 +			cli.sendAck(workerCtx, node, NackInvalidProtobuf)
- 		} else {
+@@ -495 +508 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 -			cli.sendMessageReceipt(ctx, info, node)
 +			cli.sendMessageReceipt(workerCtx, info, node)
- 		}
- 	})
- }
-@@ -506,7 +519,10 @@ func (cli *Client) clearUntrustedIdentity(ctx context.Context, target types.JID)
- 	if err != nil {
- 		return fmt.Errorf("failed to delete session: %w", err)
- 	}
+@@ -509 +522,4 @@ func (cli *Client) clearUntrustedIdentity(ctx context.Context, target types.JID)
 -	go cli.dispatchEvent(&events.IdentityChange{JID: target, Timestamp: time.Now(), Implicit: true})
 +	_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +		cli.dispatchEventContext(workerCtx, &events.IdentityChange{JID: target, Timestamp: time.Now(), Implicit: true})
 +		return nil
 +	})
- 	return nil
- }
- 
-@@ -721,7 +737,10 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
- 		// and the atomic variable being updated. If yes, restart the loop.
- 		if len(cli.historySyncNotifications) > 0 && cli.historySyncHandlerStarted.CompareAndSwap(false, true) {
- 			cli.Log.Warnf("New history sync notifications appeared after loop stopped, restarting loop...")
+@@ -712 +728,22 @@ func (cli *Client) handleSenderKeyDistributionMessage(ctx context.Context, chat,
+-func (cli *Client) handleHistorySyncNotificationLoop() {
++func (cli *Client) startHistorySyncNotificationLoop(ctx context.Context) bool {
++	if ctx != nil {
++		if err := ctx.Err(); err != nil {
++			return false
++		}
++	}
++	cli.historySyncHandlerLock.Lock()
++	defer cli.historySyncHandlerLock.Unlock()
++	if !cli.historySyncHandlerStarted.CompareAndSwap(false, true) {
++		return true
++	}
++	if err := cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
++		cli.handleHistorySyncNotificationLoop(workerCtx)
++		return nil
++	}); err != nil {
++		cli.historySyncHandlerStarted.Store(false)
++		return false
++	}
++	return true
++}
++
++func (cli *Client) handleHistorySyncNotificationLoop(ctx context.Context) {
+@@ -722,4 +759,6 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
+-		if len(cli.historySyncNotifications) > 0 && cli.historySyncHandlerStarted.CompareAndSwap(false, true) {
+-			cli.Log.Warnf("New history sync notifications appeared after loop stopped, restarting loop...")
 -			go cli.handleHistorySyncNotificationLoop()
-+			_ = cli.launchLifecycle(cli.BackgroundEventCtx, func(context.Context) error {
-+				cli.handleHistorySyncNotificationLoop()
-+				return nil
-+			})
- 		}
- 	}()
- 	ctx := cli.BackgroundEventCtx
-@@ -819,7 +838,10 @@ func (cli *Client) DownloadHistorySync(ctx context.Context, notif *waE2E.History
- 	if synchronousStorage {
- 		doStorage(ctx)
- 	} else {
+-		}
++			if ctx != nil && ctx.Err() != nil {
++				return
++			}
++			if len(cli.historySyncNotifications) > 0 && cli.startHistorySyncNotificationLoop(ctx) {
++				cli.Log.Warnf("New history sync notifications appeared after loop stopped, restarting loop...")
++			}
+@@ -727 +766,3 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
+-	ctx := cli.BackgroundEventCtx
++	if ctx == nil {
++		ctx = cli.BackgroundEventCtx
++	}
+@@ -735 +776 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
+-				cli.dispatchEvent(&events.HistorySync{Data: blob, Notification: notif})
++				cli.dispatchEventContext(ctx, &events.HistorySync{Data: blob, Notification: notif})
+@@ -741 +782,3 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
+-		case <-time.After(1 * time.Minute):
++			case <-ctx.Done():
++				return
++			case <-time.After(1 * time.Minute):
+@@ -822 +865,4 @@ func (cli *Client) DownloadHistorySync(ctx context.Context, notif *waE2E.History
 -		go doStorage(context.WithoutCancel(ctx))
 +		_ = cli.launchLifecycle(context.WithoutCancel(ctx), func(workerCtx context.Context) error {
 +			doStorage(workerCtx)
 +			return nil
 +		})
- 	}
- 	return &historySync, nil
- }
-@@ -869,6 +891,7 @@ func (cli *Client) handleAppStateSyncKeyShareError(ctx context.Context, keys *wa
- 	}
- 	return processErr
- }
+@@ -871,0 +918 @@ func (cli *Client) handleAppStateSyncKeyShareError(ctx context.Context, keys *wa
 +
- func (cli *Client) handlePlaceholderResendResponse(msg *waE2E.PeerDataOperationRequestResponseMessage) (ok bool) {
- 	reqID := msg.GetStanzaID()
- 	parts := msg.GetPeerDataOperationResult()
-@@ -902,16 +925,20 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
- 		if !cli.ManualHistorySyncDownload {
- 			cli.historySyncNotifications <- protoMsg.HistorySyncNotification
- 			if cli.historySyncHandlerStarted.CompareAndSwap(false, true) {
+@@ -903,3 +950,6 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
+-			cli.historySyncNotifications <- protoMsg.HistorySyncNotification
+-			if cli.historySyncHandlerStarted.CompareAndSwap(false, true) {
 -				go cli.handleHistorySyncNotificationLoop()
-+				_ = cli.launchLifecycle(cli.BackgroundEventCtx, func(context.Context) error {
-+					cli.handleHistorySyncNotificationLoop()
-+					return nil
-+				})
- 			}
- 		}
- 		if !(cli.ManualHistorySyncDownload && cli.DisableManualHistorySyncReceipt) {
++			if cli.startHistorySyncNotificationLoop(ctx) {
++				select {
++				case cli.historySyncNotifications <- protoMsg.HistorySyncNotification:
++				case <-ctx.Done():
++					return
++				}
+@@ -909,2 +959,2 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 -			go func() {
 -				err := cli.SendProtocolMessageReceipt(ctx, info.ID, types.ReceiptTypeHistorySync)
 +			_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +				err := cli.SendProtocolMessageReceipt(workerCtx, info.ID, types.ReceiptTypeHistorySync)
- 				if err != nil {
- 					cli.Log.Warnf("Failed to send acknowledgement for protocol message %s: %v", info.ID, err)
- 				}
+@@ -914 +964,2 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 -			}()
 +				return nil
 +			})
- 		}
- 	}
- 
-@@ -936,12 +963,13 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
- 	}
- 
- 	if info.Category == "peer" {
+@@ -939,2 +990,2 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 -		go func() {
 -			err := cli.SendProtocolMessageReceipt(ctx, info.ID, types.ReceiptTypePeerMsg)
 +		_ = cli.launchLifecycle(ctx, func(workerCtx context.Context) error {
 +			err := cli.SendProtocolMessageReceipt(workerCtx, info.ID, types.ReceiptTypePeerMsg)
- 			if err != nil {
- 				cli.Log.Warnf("Failed to send acknowledgement for protocol message %s: %v", info.ID, err)
- 			}
+@@ -944 +995,2 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 -		}()
 +			return nil
 +		})
- 	}
- 	return
- }
 diff --git a/notification.go b/notification.go
 index cac7597..eaef62f 100644
 --- a/notification.go
 +++ b/notification.go
-@@ -61,10 +61,10 @@ func (cli *Client) handleEncryptNotification(ctx context.Context, node *waBinary
- 			senderTS := cli.getTCTokenSenderTS(storageLID)
- 			if !senderTS.IsZero() {
- 				cli.Log.Debugf("Identity changed for %s, re-issuing tctoken", from)
+@@ -64 +64 @@ func (cli *Client) handleEncryptNotification(ctx context.Context, node *waBinary
 -				go cli.issuePrivacyTokenAndSave(storageLID, senderTS)
 +				_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.issuePrivacyTokenAndSave(storageLID, senderTS); return nil })
- 			}
- 		}
+@@ -67 +67 @@ func (cli *Client) handleEncryptNotification(ctx context.Context, node *waBinary
 -		cli.dispatchEvent(&events.IdentityChange{JID: from, Timestamp: ts})
 +		cli.dispatchEventContext(ctx, &events.IdentityChange{JID: from, Timestamp: ts})
- 	} else {
- 		cli.Log.Debugf("Got unknown encryption notification from server: %s", node)
- 	}
-@@ -109,7 +109,7 @@ func (cli *Client) handlePictureNotification(ctx context.Context, node *waBinary
- 			cli.Log.Debugf("Ignoring picture change notification with unexpected attributes: %v", ag.Error())
- 			continue
- 		}
+@@ -112 +112 @@ func (cli *Client) handlePictureNotification(ctx context.Context, node *waBinary
 -		cli.dispatchEvent(&evt)
 +		cli.dispatchEventContext(ctx, &evt)
- 	}
- }
- 
-@@ -260,7 +260,7 @@ func (cli *Client) handleBlocklist(ctx context.Context, node *waBinary.Node) {
- 		}
- 		evt.Changes = append(evt.Changes, change)
- 	}
+@@ -263 +263 @@ func (cli *Client) handleBlocklist(ctx context.Context, node *waBinary.Node) {
 -	cli.dispatchEvent(&evt)
 +	cli.dispatchEventContext(ctx, &evt)
- }
- 
- func (cli *Client) handleAccountSyncNotification(ctx context.Context, node *waBinary.Node) {
-@@ -271,7 +271,7 @@ func (cli *Client) handleAccountSyncNotification(ctx context.Context, node *waBi
- 		case "devices":
- 			cli.handleOwnDevicesNotification(ctx, &child, node.AttrGetter().JID("from"))
- 		case "picture":
+@@ -274 +274 @@ func (cli *Client) handleAccountSyncNotification(ctx context.Context, node *waBi
 -			cli.dispatchEvent(&events.Picture{
 +			cli.dispatchEventContext(ctx, &events.Picture{
- 				Timestamp: node.AttrGetter().UnixTime("t"),
- 				JID:       cli.getOwnID().ToNonAD(),
- 			})
-@@ -387,7 +387,7 @@ func (cli *Client) handleNewsletterNotification(ctx context.Context, node *waBin
- 	if !ok {
- 		messages = liveUpdates
- 	}
+@@ -390 +390 @@ func (cli *Client) handleNewsletterNotification(ctx context.Context, node *waBin
 -	cli.dispatchEvent(&events.NewsletterLiveUpdate{
 +	cli.dispatchEventContext(ctx, &events.NewsletterLiveUpdate{
- 		JID:      ag.JID("from"),
- 		Time:     ag.UnixTime("t"),
- 		Messages: cli.parseNewsletterMessages(&messages),
-@@ -430,19 +430,19 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
- 		}
- 		if wrapper.Data.Join != nil {
- 			wrapper.Data.Join.Mex = mnd
+@@ -433 +433 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 -			cli.dispatchEvent(wrapper.Data.Join)
 +			cli.dispatchEventContext(ctx, wrapper.Data.Join)
- 		} else if wrapper.Data.Leave != nil {
- 			wrapper.Data.Leave.Mex = mnd
+@@ -436 +436 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 -			cli.dispatchEvent(wrapper.Data.Leave)
 +			cli.dispatchEventContext(ctx, wrapper.Data.Leave)
- 		} else if wrapper.Data.MuteChange != nil {
- 			wrapper.Data.MuteChange.Mex = mnd
+@@ -439 +439 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 -			cli.dispatchEvent(wrapper.Data.MuteChange)
 +			cli.dispatchEventContext(ctx, wrapper.Data.MuteChange)
- 		} else if wrapper.Data.Milestone != nil {
- 			wrapper.Data.Milestone.Mex = mnd
+@@ -442 +442 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 -			cli.dispatchEvent(wrapper.Data.Milestone)
 +			cli.dispatchEventContext(ctx, wrapper.Data.Milestone)
- 		} else if wrapper.Data.NotifyAccountReachoutTimelock != nil {
- 			wrapper.Data.NotifyAccountReachoutTimelock.Mex = mnd
+@@ -445 +445 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 -			cli.dispatchEvent(wrapper.Data.NotifyAccountReachoutTimelock)
 +			cli.dispatchEventContext(ctx, wrapper.Data.NotifyAccountReachoutTimelock)
- 		}
- 	}
- }
-@@ -459,7 +459,7 @@ func (cli *Client) handleStatusNotification(ctx context.Context, node *waBinary.
- 		cli.Log.Warnf("Set status notification has unexpected content (%T)", child.Content)
- 		return
- 	}
+@@ -462 +462 @@ func (cli *Client) handleStatusNotification(ctx context.Context, node *waBinary.
 -	cli.dispatchEvent(&events.UserAbout{
 +	cli.dispatchEventContext(ctx, &events.UserAbout{
- 		JID:       ag.JID("from"),
- 		Timestamp: ag.UnixTime("t"),
- 		Status:    string(status),
-@@ -476,11 +476,11 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
- 	}
- 	switch notifType {
- 	case "encrypt":
+@@ -479 +479 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
 -		go cli.handleEncryptNotification(ctx, node)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.handleEncryptNotification(ctx, node); return nil })
- 	case "server_sync":
+@@ -481 +481 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
 -		go cli.handleAppStateNotification(ctx, node)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.handleAppStateNotification(ctx, node); return nil })
- 	case "account_sync":
+@@ -483 +483 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
 -		go cli.handleAccountSyncNotification(ctx, node)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.handleAccountSyncNotification(ctx, node); return nil })
- 	case "devices":
- 		cli.handleDeviceNotification(ctx, node)
- 	case "fbid:devices":
-@@ -498,7 +498,7 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
- 			if err != nil {
- 				cli.Log.Warnf("Failed to store redacted phones from group notification: %v", err)
- 			}
+@@ -501 +501 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
 -			cancelled = cli.dispatchEvent(evt)
 +			cancelled = cli.dispatchEventContext(ctx, evt)
- 		}
- 	case "picture":
- 		cli.handlePictureNotification(ctx, node)
-@@ -507,7 +507,7 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
- 	case "privacy_token":
- 		cli.handlePrivacyTokenNotification(ctx, node)
- 	case "link_code_companion_reg":
+@@ -510 +510 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
 -		go cli.tryHandleCodePairNotification(ctx, node)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.tryHandleCodePairNotification(ctx, node); return nil })
- 	case "newsletter":
- 		cli.handleNewsletterNotification(ctx, node)
- 	case "mex":
-@@ -517,7 +517,7 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
- 	case "passkey_prologue_request":
- 		cli.handlePasskeyNotification(ctx, node)
- 	case "crsc_continuation":
+@@ -520 +520 @@ func (cli *Client) handleNotification(ctx context.Context, node *waBinary.Node)
 -		go cli.tryHandlePasskeyContinuationNotification(ctx, node)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.tryHandlePasskeyContinuationNotification(ctx, node); return nil })
- 	case "companion_reg_refresh":
- 		_, refresh := node.GetOptionalChildByTag("companion_reg_refresh")
- 		_, rotateQR := node.GetOptionalChildByTag("pair-device-rotate-qr")
 diff --git a/pair-passkey.go b/pair-passkey.go
 index 4ec0371..9397f59 100644
 --- a/pair-passkey.go
 +++ b/pair-passkey.go
-@@ -58,7 +58,7 @@ func (cli *Client) handlePasskeyNotification(ctx context.Context, node *waBinary
- 		pubKey, secondErr = cli.getPasskeyRequestOptions(ctx)
- 		if secondErr != nil {
- 			cli.Log.Warnf("Failed to fetch passkey options: %v", secondErr)
+@@ -61 +61 @@ func (cli *Client) handlePasskeyNotification(ctx context.Context, node *waBinary
 -			cli.dispatchEvent(&events.PairPasskeyError{
 +			cli.dispatchEventContext(ctx, &events.PairPasskeyError{
- 				Error:        fmt.Errorf("failed to parse passkey notification: %w (fetching key also failed: %w)", err, secondErr),
- 				Continuation: false,
- 			})
-@@ -71,7 +71,7 @@ func (cli *Client) handlePasskeyNotification(ctx context.Context, node *waBinary
- 		ts:   time.Now(),
- 	})
- 	cli.Store.AdvSecretKey = random.Bytes(32)
+@@ -74 +74 @@ func (cli *Client) handlePasskeyNotification(ctx context.Context, node *waBinary
 -	cli.dispatchEvent(&events.PairPasskeyRequest{PublicKey: pubKey})
 +	cli.dispatchEventContext(ctx, &events.PairPasskeyRequest{PublicKey: pubKey})
- }
- 
- // SendPasskeyResponse sends a WebAuthn response from the authenticator to the server.
-@@ -155,7 +155,7 @@ func (cli *Client) tryHandlePasskeyContinuationNotification(ctx context.Context,
- 	err := cli.handlePasskeyContinuationNotification(ctx, node)
- 	if err != nil {
- 		cli.Log.Warnf("Failed to handle passkey continuation notification: %v", err)
+@@ -158 +158 @@ func (cli *Client) tryHandlePasskeyContinuationNotification(ctx context.Context,
 -		cli.dispatchEvent(&events.PairPasskeyError{
 +		cli.dispatchEventContext(ctx, &events.PairPasskeyError{
- 			Error:        err,
- 			Continuation: true,
- 		})
-@@ -198,7 +198,7 @@ func (cli *Client) handlePasskeyContinuationNotification(ctx context.Context, no
- 		codeBytes[i] = primaryEphemeralIdentity.Nonce[i] ^ digest[i]
- 	}
- 	encodedCode := linkingBase32.EncodeToString(codeBytes)
+@@ -201 +201 @@ func (cli *Client) handlePasskeyContinuationNotification(ctx context.Context, no
 -	cli.dispatchEvent(&events.PairPasskeyConfirmation{
 +	cli.dispatchEventContext(ctx, &events.PairPasskeyConfirmation{
- 		Code:          encodedCode[0:4] + "-" + encodedCode[4:],
- 		SkipHandoffUX: cli.passkeySkipHandoffUX.Load(),
- 	})
 diff --git a/pair.go b/pair.go
 index e64d3f1..04948d4 100644
 --- a/pair.go
 +++ b/pair.go
-@@ -78,13 +78,13 @@ func (cli *Client) handlePairDevice(ctx context.Context, node *waBinary.Node) {
- 		evt.Codes = append(evt.Codes, cli.makeQRData(content, cli.getQRClientType()))
- 	}
- 
+@@ -81 +81 @@ func (cli *Client) handlePairDevice(ctx context.Context, node *waBinary.Node) {
 -	cli.dispatchEvent(evt)
 +	cli.dispatchEventContext(ctx, evt)
- }
- 
- func (cli *Client) rotateADVSecret(ctx context.Context) {
- 	oldSecret := cli.Store.AdvSecretKey
- 	cli.Store.AdvSecretKey = random.Bytes(32)
+@@ -87 +87 @@ func (cli *Client) rotateADVSecret(ctx context.Context) {
 -	cli.dispatchEvent(&events.RotateADVSecret{
 +	cli.dispatchEventContext(ctx, &events.RotateADVSecret{
- 		OldSecret: base64.StdEncoding.EncodeToString(oldSecret),
- 		NewSecret: base64.StdEncoding.EncodeToString(cli.Store.AdvSecretKey),
- 	})
-@@ -145,18 +145,19 @@ func (cli *Client) handlePairSuccess(ctx context.Context, node *waBinary.Node) {
- 		cli.Log.Warnf("Failed to parse client pairing props: %v", err)
- 	}
- 
+@@ -148 +148 @@ func (cli *Client) handlePairSuccess(ctx context.Context, node *waBinary.Node) {
 -	go func() {
 +	_ = cli.launchLifecycle(ctx, func(ctx context.Context) error {
- 		err := cli.handlePair(ctx, deviceIdentityBytes, id, businessName, platform, jid, lid)
- 		if err != nil {
- 			cli.Log.Errorf("Failed to pair device: %v", err)
- 			cli.Disconnect()
+@@ -153 +153 @@ func (cli *Client) handlePairSuccess(ctx context.Context, node *waBinary.Node) {
 -			cli.dispatchEvent(&events.PairError{ID: jid, LID: lid, BusinessName: businessName, Platform: platform, Props: &props, Error: err})
 +			cli.dispatchEventContext(ctx, &events.PairError{ID: jid, LID: lid, BusinessName: businessName, Platform: platform, Props: &props, Error: err})
- 		} else {
- 			cli.Log.Infof("Successfully paired %s", cli.Store.ID)
+@@ -156,2 +156,2 @@ func (cli *Client) handlePairSuccess(ctx context.Context, node *waBinary.Node) {
 -			go cli.sendUnifiedSession()
 -			cli.dispatchEvent(&events.PairSuccess{ID: jid, LID: lid, BusinessName: businessName, Platform: platform, Props: &props})
 +			_ = cli.launchLifecycle(ctx, func(context.Context) error { cli.sendUnifiedSession(); return nil })
 +			cli.dispatchEventContext(ctx, &events.PairSuccess{ID: jid, LID: lid, BusinessName: businessName, Platform: platform, Props: &props})
- 		}
+@@ -159 +159,2 @@ func (cli *Client) handlePairSuccess(ctx context.Context, node *waBinary.Node) {
 -	}()
 +		return err
 +	})
- }
- 
- func (cli *Client) handlePair(ctx context.Context, deviceIdentityBytes []byte, reqID, businessName, platform string, jid, lid types.JID) error {
 diff --git a/presence.go b/presence.go
 index e84f51a..2e95b90 100644
 --- a/presence.go
 +++ b/presence.go
-@@ -28,7 +28,7 @@ func (cli *Client) handleChatState(ctx context.Context, node *waBinary.Node) {
- 			cli.Log.Warnf("Unrecognized chat presence state %s", child.Tag)
- 		}
- 		media := types.ChatPresenceMedia(child.AttrGetter().OptionalString("media"))
+@@ -31 +31 @@ func (cli *Client) handleChatState(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&events.ChatPresence{
 +		cli.dispatchEventContext(ctx, &events.ChatPresence{
- 			MessageSource: source,
- 			State:         presence,
- 			Media:         media,
-@@ -53,7 +53,7 @@ func (cli *Client) handlePresence(ctx context.Context, node *waBinary.Node) {
- 	if !ag.OK() {
- 		cli.Log.Warnf("Error parsing presence event: %+v", ag.Errors)
- 	} else {
+@@ -56 +56 @@ func (cli *Client) handlePresence(ctx context.Context, node *waBinary.Node) {
 -		cli.dispatchEvent(&evt)
 +		cli.dispatchEventContext(ctx, &evt)
- 	}
- }
- 
-@@ -68,7 +68,7 @@ func (cli *Client) SendPresence(ctx context.Context, state types.Presence) error
- 		return ErrNoPushName
- 	}
- 	if state == types.PresenceAvailable {
+@@ -71 +71 @@ func (cli *Client) SendPresence(ctx context.Context, state types.Presence) error
 -		go cli.sendUnifiedSession()
 +		_ = cli.launchLifecycle(ctx, func(context.Context) error { cli.sendUnifiedSession(); return nil })
- 		cli.sendActiveReceipts.CompareAndSwap(0, 1)
- 	} else {
- 		cli.sendActiveReceipts.CompareAndSwap(1, 0)
 diff --git a/privacysettings.go b/privacysettings.go
 index 554f1fe..48ba00b 100644
 --- a/privacysettings.go
 +++ b/privacysettings.go
-@@ -174,5 +174,5 @@ func (cli *Client) handlePrivacySettingsNotification(ctx context.Context, privac
- 	}
- 	evt := cli.parsePrivacySettings(privacyNode, settings)
- 	cli.privacySettingsCache.Store(settings)
+@@ -177 +177 @@ func (cli *Client) handlePrivacySettingsNotification(ctx context.Context, privac
 -	cli.dispatchEvent(evt)
 +	cli.dispatchEventContext(ctx, evt)
- }
 diff --git a/protocol_lifecycle_test.go b/protocol_lifecycle_test.go
 new file mode 100644
 index 0000000..d024110
@@ -2024,10 +1647,7 @@ diff --git a/qrchan.go b/qrchan.go
 index 710e3c6..17efc2e 100644
 --- a/qrchan.go
 +++ b/qrchan.go
-@@ -57,18 +57,48 @@ var (
- 
- type qrChannel struct {
- 	sync.Mutex
+@@ -60,8 +60,12 @@ type qrChannel struct {
 -	cli       *Client
 -	log       waLog.Logger
 -	ctx       context.Context
@@ -2048,11 +1668,10 @@ index 710e3c6..17efc2e 100644
 +	terminalDone chan struct{}
 +	emitters     sync.WaitGroup
 +	outputOnce   sync.Once
- }
- 
+@@ -69,0 +74,2 @@ type qrChannel struct {
 +func (qrc *qrChannel) closeOutput() { qrc.outputOnce.Do(func() { close(qrc.output) }) }
 +
- func (qrc *qrChannel) close() bool {
+@@ -71 +77,25 @@ func (qrc *qrChannel) close() bool {
 -	return !qrc.closed.Swap(true)
 +	if !qrc.closed.Swap(true) {
 +		if qrc.terminalDone != nil {
@@ -2079,43 +1698,19 @@ index 710e3c6..17efc2e 100644
 +		return true
 +	}
 +	return false
- }
- 
- func (qrc *qrChannel) emitQRs(codes []string) {
-@@ -78,8 +108,7 @@ func (qrc *qrChannel) emitQRs(codes []string) {
- 			if qrc.close() {
- 				qrc.log.Debugf("Ran out of QR codes, closing channel with status %s and disconnecting client", QRChannelTimeout.Event)
- 				qrc.output <- QRChannelTimeout
+@@ -81,2 +111 @@ func (qrc *qrChannel) emitQRs(codes []string) {
 -				close(qrc.output)
 -				go qrc.cli.RemoveEventHandler(qrc.handlerID)
 +				qrc.closeOutput()
- 				qrc.cli.Disconnect()
- 			} else {
- 				qrc.log.Debugf("Ran out of QR codes, but channel is already closed")
-@@ -100,8 +129,7 @@ func (qrc *qrChannel) emitQRs(codes []string) {
- 		default:
- 			qrc.log.Debugf("Output channel didn't accept code, exiting QR emitter")
- 			if qrc.close() {
+@@ -103,2 +132 @@ func (qrc *qrChannel) emitQRs(codes []string) {
 -				close(qrc.output)
 -				go qrc.cli.RemoveEventHandler(qrc.handlerID)
 +				qrc.closeOutput()
- 				qrc.cli.Disconnect()
- 			}
- 			return
-@@ -125,8 +153,7 @@ func (qrc *qrChannel) emitQRs(codes []string) {
- 		case <-qrc.ctx.Done():
- 			qrc.log.Debugf("Context is done, stopping QR emitter")
- 			if qrc.close() {
+@@ -128,2 +156 @@ func (qrc *qrChannel) emitQRs(codes []string) {
 -				close(qrc.output)
 -				go qrc.cli.RemoveEventHandler(qrc.handlerID)
 +				qrc.closeOutput()
- 				qrc.cli.Disconnect()
- 			}
- 		}
-@@ -142,7 +169,15 @@ func (qrc *qrChannel) handleEvent(rawEvt any) {
- 	switch evt := rawEvt.(type) {
- 	case *events.QR:
- 		qrc.log.Debugf("Received QR code event, starting to emit codes to channel")
+@@ -145 +172,9 @@ func (qrc *qrChannel) handleEvent(rawEvt any) {
 -		go qrc.emitQRs(slices.Clone(evt.Codes))
 +		qrc.emitters.Add(1)
 +		if err := qrc.cli.launchLifecycle(qrc.ctx, func(context.Context) error {
@@ -2126,33 +1721,18 @@ index 710e3c6..17efc2e 100644
 +			qrc.emitters.Done()
 +			qrc.log.Warnf("Failed to register QR emitter: %v", err)
 +		}
- 		return
- 	case *events.RotateADVSecret:
- 		select {
-@@ -204,12 +239,11 @@ func (qrc *qrChannel) handleEvent(rawEvt any) {
- 	if qrc.close() {
- 		qrc.log.Debugf("Closing channel with status %+v", outputType)
- 		qrc.output <- outputType
+@@ -207 +242 @@ func (qrc *qrChannel) handleEvent(rawEvt any) {
 -		close(qrc.output)
 +		qrc.closeOutput()
- 	} else {
- 		qrc.log.Debugf("Got status %+v, but channel is already closed", outputType)
- 	}
- 	// Has to be done in background because otherwise there's a deadlock with eventHandlersLock
+@@ -212 +246,0 @@ func (qrc *qrChannel) handleEvent(rawEvt any) {
 -	go qrc.cli.RemoveEventHandler(qrc.handlerID)
- }
- 
- // GetQRChannel returns a channel that automatically outputs a new QR code when the previous one expires.
-@@ -227,14 +261,34 @@ func (cli *Client) GetQRChannel(ctx context.Context) (<-chan QRChannelItem, erro
- 		return nil, ErrQRStoreContainsID
- 	}
- 	ch := make(chan QRChannelItem, 8)
+@@ -229,0 +264,5 @@ func (cli *Client) GetQRChannel(ctx context.Context) (<-chan QRChannelItem, erro
 +	scope, err := cli.scopeForContext(ctx)
 +	if err != nil {
 +		return nil, err
 +	}
 +	ctx = cli.lifecycleContext(ctx, scope)
- 	qrc := qrChannel{
+@@ -231,6 +270,8 @@ func (cli *Client) GetQRChannel(ctx context.Context) (<-chan QRChannelItem, erro
 -		output:    ch,
 -		stopQRs:   make(chan struct{}),
 -		rotateAdv: make(chan *events.RotateADVSecret, 4),
@@ -2167,8 +1747,7 @@ index 710e3c6..17efc2e 100644
 +		ctx:          ctx,
 +		scope:        scope,
 +		terminalDone: make(chan struct{}),
- 	}
- 	qrc.handlerID = cli.AddEventHandler(qrc.handleEvent)
+@@ -238,0 +280,13 @@ func (cli *Client) GetQRChannel(ctx context.Context) (<-chan QRChannelItem, erro
 +	if err := cli.launchLifecycle(ctx, func(ctx context.Context) error {
 +		select {
 +		case <-ctx.Done():
@@ -2182,135 +1761,70 @@ index 710e3c6..17efc2e 100644
 +		scope.Finish(err)
 +		return nil, err
 +	}
- 	return ch, nil
- }
 diff --git a/receipt.go b/receipt.go
 index 8def76a..81338f9 100644
 --- a/receipt.go
 +++ b/receipt.go
-@@ -24,26 +24,30 @@ func (cli *Client) handleReceipt(ctx context.Context, node *waBinary.Node) {
- 	receipt, participants, err := cli.parseReceipt(node)
- 	if err != nil {
- 		cli.Log.Warnf("Failed to parse receipt: %v", err)
+@@ -27 +27 @@ func (cli *Client) handleReceipt(ctx context.Context, node *waBinary.Node) {
 -		go cli.sendAck(ctx, node, NackParsingError)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.sendAck(ctx, node, NackParsingError); return nil })
- 	} else if participants != nil {
- 		defer cli.maybeDeferredAck(ctx, node)(&cancelled)
- 		for _, pcp := range participants {
+@@ -31 +31 @@ func (cli *Client) handleReceipt(ctx context.Context, node *waBinary.Node) {
 -			cancelled = cli.handleGroupedReceipt(*receipt, &pcp)
 +			cancelled = cli.handleGroupedReceiptContext(ctx, *receipt, &pcp)
- 		}
- 	} else {
- 		if receipt.Type == types.ReceiptTypeRetry {
- 			// Ack happens inside the retry receipt handler
+@@ -36 +36 @@ func (cli *Client) handleReceipt(ctx context.Context, node *waBinary.Node) {
 -			cli.backgroundIfAsyncAck(func() {
 +			cli.backgroundIfAsyncAckContext(ctx, func(ctx context.Context) {
- 				cli.tryHandleRetryReceipt(ctx, receipt, node)
- 			})
- 		} else {
- 			defer cli.maybeDeferredAck(ctx, node)(&cancelled)
- 		}
+@@ -42 +42 @@ func (cli *Client) handleReceipt(ctx context.Context, node *waBinary.Node) {
 -		cancelled = cli.dispatchEvent(receipt)
 +		cancelled = cli.dispatchEventContext(ctx, receipt)
- 	}
- }
- 
- func (cli *Client) handleGroupedReceipt(partialReceipt events.Receipt, participants *waBinary.Node) (cancelled bool) {
+@@ -46,0 +47,4 @@ func (cli *Client) handleGroupedReceipt(partialReceipt events.Receipt, participa
 +	return cli.handleGroupedReceiptContext(cli.BackgroundEventCtx, partialReceipt, participants)
 +}
 +
 +func (cli *Client) handleGroupedReceiptContext(ctx context.Context, partialReceipt events.Receipt, participants *waBinary.Node) (cancelled bool) {
- 	pag := participants.AttrGetter()
- 	partialReceipt.MessageIDs = []types.MessageID{pag.String("key")}
- 	for _, child := range participants.GetChildren() {
-@@ -59,7 +63,7 @@ func (cli *Client) handleGroupedReceipt(partialReceipt events.Receipt, participa
- 			cli.Log.Warnf("Failed to parse user node %s in grouped receipt: %v", &child, ag.Error())
- 			continue
- 		}
+@@ -62 +66 @@ func (cli *Client) handleGroupedReceipt(partialReceipt events.Receipt, participa
 -		cancelled = cli.dispatchEvent(&receipt) || cancelled
 +		cancelled = cli.dispatchEventContext(ctx, &receipt) || cancelled
- 	}
- 	return
- }
-@@ -105,10 +109,14 @@ func (cli *Client) parseReceipt(node *waBinary.Node) (*events.Receipt, []waBinar
- }
- 
- func (cli *Client) backgroundIfAsyncAck(fn func()) {
+@@ -107,0 +112,4 @@ func (cli *Client) backgroundIfAsyncAck(fn func()) {
 +	cli.backgroundIfAsyncAckContext(cli.BackgroundEventCtx, func(context.Context) { fn() })
 +}
 +
 +func (cli *Client) backgroundIfAsyncAckContext(ctx context.Context, fn func(context.Context)) {
- 	if cli.SynchronousAck {
+@@ -109 +117 @@ func (cli *Client) backgroundIfAsyncAck(fn func()) {
 -		fn()
 +		fn(ctx)
- 	} else {
+@@ -111 +119 @@ func (cli *Client) backgroundIfAsyncAck(fn func()) {
 -		go fn()
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { fn(ctx); return nil })
- 	}
- }
- 
-@@ -127,7 +135,7 @@ func (cli *Client) maybeDeferredAck(ctx context.Context, node *waBinary.Node) fu
- 			cli.sendAck(ctx, node, 0)
- 		}
- 	} else {
+@@ -130 +138 @@ func (cli *Client) maybeDeferredAck(ctx context.Context, node *waBinary.Node) fu
 -		go cli.sendAck(ctx, node, 0)
 +		_ = cli.launchLifecycle(ctx, func(ctx context.Context) error { cli.sendAck(ctx, node, 0); return nil })
- 		return func(...*bool) {}
- 	}
- }
-@@ -181,6 +189,7 @@ func (cli *Client) sendAck(ctx context.Context, node *waBinary.Node, error int)
- 	})
- 	if err != nil {
- 		cli.Log.Warnf("Failed to send acknowledgement for %s %s: %v", node.Tag, node.Attrs["id"], err)
+@@ -183,0 +192 @@ func (cli *Client) sendAck(ctx context.Context, node *waBinary.Node, error int)
 +		cli.lifecycle.recordError(err)
- 	}
- }
- 
 diff --git a/retry.go b/retry.go
 index 9051e6f..ce73aea 100644
 --- a/retry.go
 +++ b/retry.go
-@@ -494,7 +494,7 @@ func (cli *Client) sendRetryReceipt(ctx context.Context, node *waBinary.Node, in
- 		if cli.SynchronousAck {
- 			cli.immediateRequestMessageFromPhone(ctx, info)
- 		} else {
+@@ -497 +497 @@ func (cli *Client) sendRetryReceipt(ctx context.Context, node *waBinary.Node, in
 -			go cli.delayedRequestMessageFromPhone(info)
 +			_ = cli.launchLifecycle(context.WithoutCancel(ctx), func(ctx context.Context) error { cli.delayedRequestMessageFromPhone(info); return nil })
- 		}
- 	}
- 
 diff --git a/send.go b/send.go
 index f2ce0f8..ec19802 100644
 --- a/send.go
 +++ b/send.go
-@@ -921,7 +921,7 @@ func (cli *Client) sendDM(
- 
- 	storageJID := cli.resolveTCTokenStorageLID(ctx, to)
- 	if shouldSendTCTokenInChatAction(to) && shouldSendNewTCToken(cli.getTCTokenSenderTS(storageJID)) {
+@@ -924 +924 @@ func (cli *Client) sendDM(
 -		go cli.issuePrivacyTokenAndSave(storageJID, time.Now())
 +		_ = cli.launchLifecycle(ctx, func(context.Context) error { cli.issuePrivacyTokenAndSave(storageJID, time.Now()); return nil })
- 	}
- 
- 	return phash, data, nil
 diff --git a/socket/framesocket.go b/socket/framesocket.go
 index 4d6fc6e..3c48aff 100644
 --- a/socket/framesocket.go
 +++ b/socket/framesocket.go
-@@ -36,7 +36,9 @@ type FrameSocket struct {
- 
- 	Header []byte
- 
+@@ -39 +39,3 @@ type FrameSocket struct {
 -	closed atomic.Bool
 +	closed          atomic.Bool
 +	hooks           LifecycleHooks
 +	lifecycleFinish func(error)
- 
- 	incomingLength int
- 	receivedLength int
-@@ -44,6 +46,42 @@ type FrameSocket struct {
- 	partialHeader  []byte
- }
- 
+@@ -46,0 +49,36 @@ type FrameSocket struct {
 +// LifecycleHooks lets callers register socket-owned goroutines before launch.
 +type LifecycleHooks struct {
 +	Launch      func(context.Context, func(context.Context) error) error
@@ -2347,22 +1861,14 @@ index 4d6fc6e..3c48aff 100644
 +	return nil
 +}
 +
- func NewFrameSocket(log waLog.Logger, client *http.Client) *FrameSocket {
- 	return &FrameSocket{
- 		log:    log,
-@@ -66,38 +104,55 @@ func (fs *FrameSocket) IsConnected() bool {
- 
- func (fs *FrameSocket) Close(code websocket.StatusCode) {
- 	fs.lock.Lock()
+@@ -69,2 +106,0 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 -	defer fs.lock.Unlock()
 -
- 	conn := fs.conn.Swap(nil)
- 	if conn == nil {
+@@ -72,0 +109 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 +		fs.lock.Unlock()
- 		return
- 	}
+@@ -75 +111,0 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 -
- 	fs.closed.Store(true)
+@@ -76,0 +113,8 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 +	cancel := fs.cancel
 +	fs.cancel = nil
 +	callback := fs.OnDisconnect
@@ -2371,13 +1877,12 @@ index 4d6fc6e..3c48aff 100644
 +	fs.lifecycleFinish = nil
 +	fs.lock.Unlock()
 +	var closeErr error
- 	if code > 0 {
+@@ -78,2 +122,2 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 -		err := conn.Close(code, "")
 -		if err != nil {
 +		if err := conn.Close(code, ""); err != nil {
 +			closeErr = err
- 			fs.log.Warnf("Error sending close to websocket: %v", err)
- 		}
+@@ -82,5 +126,3 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 -	} else {
 -		err := conn.CloseNow()
 -		if err != nil {
@@ -2386,7 +1891,7 @@ index 4d6fc6e..3c48aff 100644
 +	} else if err := conn.CloseNow(); err != nil {
 +		closeErr = err
 +		fs.log.Debugf("Error force closing websocket: %v", err)
- 	}
+@@ -88,4 +130,9 @@ func (fs *FrameSocket) Close(code websocket.StatusCode) {
 -	fs.cancel()
 -	fs.cancel = nil
 -	if fs.OnDisconnect != nil {
@@ -2400,16 +1905,11 @@ index 4d6fc6e..3c48aff 100644
 +	fs.reportError(closeErr)
 +	if finish != nil {
 +		finish(closeErr)
- 	}
- }
- 
- func (fs *FrameSocket) Connect(ctx context.Context) error {
- 	fs.lock.Lock()
+@@ -97 +143,0 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
 -	defer fs.lock.Unlock()
- 	if fs.conn.Load() != nil {
+@@ -98,0 +145 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
 +		fs.lock.Unlock()
- 		return ErrSocketAlreadyOpen
- 	}
+@@ -100,0 +148,8 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
 +	if begin := fs.hooks.Begin; begin != nil {
 +		ownedCtx, finish, err := begin(ctx)
 +		if err != nil {
@@ -2418,25 +1918,14 @@ index 4d6fc6e..3c48aff 100644
 +		}
 +		ctx, fs.lifecycleFinish = ownedCtx, finish
 +	}
- 	fs.parentCtx = ctx
- 	fs.cancelCtx, fs.cancel = context.WithCancel(ctx)
- 
-@@ -108,17 +163,43 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
- 			err = ErrWithStatusCode{err, resp.StatusCode}
- 		}
- 		fs.cancel()
+@@ -110,0 +166,6 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
 +		finish := fs.lifecycleFinish
 +		fs.lifecycleFinish = nil
 +		fs.lock.Unlock()
 +		if finish != nil {
 +			finish(err)
 +		}
- 		return fmt.Errorf("%w: %w", ErrDialFailed, err)
- 	}
- 	conn.SetReadLimit(FrameMaxSize)
- 
- 	fs.conn.Store(conn)
- 
+@@ -117 +178,19 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
 -	go fs.readPump(conn, ctx)
 +	fs.lock.Unlock()
 +	if err := fs.launch(ctx, func(ctx context.Context) error {
@@ -2457,53 +1946,26 @@ index 4d6fc6e..3c48aff 100644
 +		}
 +		return err
 +	}
- 	return nil
- }
- 
- func (fs *FrameSocket) Context() context.Context {
+@@ -121,0 +201,2 @@ func (fs *FrameSocket) Context() context.Context {
 +	fs.lock.Lock()
 +	defer fs.lock.Unlock()
- 	return fs.cancelCtx
- }
- 
-@@ -160,7 +241,11 @@ func (fs *FrameSocket) frameComplete() {
- 	fs.partialHeader = nil
- 	fs.incomingLength = 0
- 	fs.receivedLength = 0
+@@ -163 +244,5 @@ func (fs *FrameSocket) frameComplete() {
 -	fs.Frames <- data
 +	select {
 +	case fs.Frames <- data:
 +	case <-fs.Context().Done():
 +		fs.reportError(context.Canceled)
 +	}
- }
- 
- func (fs *FrameSocket) processData(msg []byte) {
-@@ -208,7 +293,7 @@ func (fs *FrameSocket) readPump(conn *websocket.Conn, ctx context.Context) {
- 	fs.log.Debugf("Frame websocket read pump starting %p", fs)
- 	defer func() {
- 		fs.log.Debugf("Frame websocket read pump exiting %p", fs)
+@@ -211 +296 @@ func (fs *FrameSocket) readPump(conn *websocket.Conn, ctx context.Context) {
 -		go fs.Close(0)
 +		fs.Close(0)
- 	}()
- 	for {
- 		msgType, data, err := conn.Read(ctx)
-@@ -216,6 +301,7 @@ func (fs *FrameSocket) readPump(conn *websocket.Conn, ctx context.Context) {
- 			// Ignore the error if the context has been closed
- 			if !fs.closed.Load() && !errors.Is(ctx.Err(), context.Canceled) {
- 				fs.log.Errorf("Error reading from websocket: %v", err)
+@@ -218,0 +304 @@ func (fs *FrameSocket) readPump(conn *websocket.Conn, ctx context.Context) {
 +				fs.reportError(err)
- 			}
- 			return
- 		} else if msgType != websocket.MessageBinary {
 diff --git a/socket/noisesocket.go b/socket/noisesocket.go
 index 632684b..47662ec 100644
 --- a/socket/noisesocket.go
 +++ b/socket/noisesocket.go
-@@ -47,7 +47,12 @@ func newNoiseSocket(
- 	fs.OnDisconnect = func(ctx context.Context, remote bool) {
- 		disconnectHandler(ctx, ns, remote)
- 	}
+@@ -50 +50,6 @@ func newNoiseSocket(
 -	go ns.consumeFrames(fs.Context(), fs.Frames)
 +	if err := fs.launch(fs.Context(), func(ctx context.Context) error {
 +		ns.consumeFrames(ctx, fs.Frames)
@@ -2511,13 +1973,7 @@ index 632684b..47662ec 100644
 +	}); err != nil {
 +		return nil, err
 +	}
- 	return ns, nil
- }
- 
-@@ -97,9 +102,13 @@ func (ns *NoiseSocket) SendFrame(ctx context.Context, plaintext []byte) error {
- 	ciphertext := ns.writeKey.Seal(nil, generateIV(ns.writeCounter), plaintext, nil)
- 	ns.writeCounter++
- 	doneChan := make(chan error, 1)
+@@ -100,3 +105,7 @@ func (ns *NoiseSocket) SendFrame(ctx context.Context, plaintext []byte) error {
 -	go func() {
 -		doneChan <- ns.fs.SendFrame(ciphertext)
 -	}()
@@ -2528,17 +1984,8 @@ index 632684b..47662ec 100644
 +	}); err != nil {
 +		return err
 +	}
- 	select {
- 	case <-ctx.Done():
- 		return ctx.Err()
-@@ -113,6 +122,7 @@ func (ns *NoiseSocket) receiveEncryptedFrame(ctx context.Context, ciphertext []b
- 	ns.readCounter++
- 	if err != nil {
- 		ns.fs.log.Warnf("Failed to decrypt frame: %v", err)
+@@ -115,0 +125 @@ func (ns *NoiseSocket) receiveEncryptedFrame(ctx context.Context, ciphertext []b
 +		ns.fs.reportError(err)
- 		return
- 	}
- 	ns.onFrame(ctx, plaintext)
 diff --git a/socket/socket_lifecycle_test.go b/socket/socket_lifecycle_test.go
 new file mode 100644
 index 0000000..1d1f9d7
@@ -2664,45 +2111,23 @@ diff --git a/tctoken.go b/tctoken.go
 index 7eb4897..505e8e4 100644
 --- a/tctoken.go
 +++ b/tctoken.go
-@@ -146,15 +146,16 @@ func (cli *Client) deleteExpiredPrivacyTokens() {
- 		return
- 	}
- 	cli.lastTCTokenDBPrune = time.Now()
+@@ -149 +149 @@ func (cli *Client) deleteExpiredPrivacyTokens() {
 -	go func() {
 +	_ = cli.launchLifecycle(cli.BackgroundEventCtx, func(workerCtx context.Context) error {
- 		defer cli.tcTokenDBPruneLock.Unlock()
+@@ -151 +151 @@ func (cli *Client) deleteExpiredPrivacyTokens() {
 -		deleted, err := cli.Store.PrivacyTokens.DeleteExpiredPrivacyTokens(cli.BackgroundEventCtx, currentTCTokenCutoffTimestamp())
 +		deleted, err := cli.Store.PrivacyTokens.DeleteExpiredPrivacyTokens(workerCtx, currentTCTokenCutoffTimestamp())
- 		if err != nil {
- 			cli.Log.Warnf("Failed to remove expired tctokens from DB: %v", err)
- 		} else if deleted > 0 {
- 			cli.Log.Debugf("Removed %d expired tctokens from DB", deleted)
- 		}
+@@ -157 +157,2 @@ func (cli *Client) deleteExpiredPrivacyTokens() {
 -	}()
 +		return err
 +	})
- }
- 
- // Only called when a bucket boundary has been crossed since the last issuance.
 diff --git a/user.go b/user.go
 index 7075357..22b2454 100644
 --- a/user.go
 +++ b/user.go
-@@ -696,7 +696,7 @@ func (cli *Client) updatePushName(ctx context.Context, user, userAlt types.JID,
- 			}
- 		}
- 		cli.Log.Debugf("Push name of %s changed from %s to %s, dispatching event", user, previousName, name)
+@@ -699 +699 @@ func (cli *Client) updatePushName(ctx context.Context, user, userAlt types.JID,
 -		cli.dispatchEvent(&events.PushName{
 +		cli.dispatchEventContext(ctx, &events.PushName{
- 			JID:         user,
- 			JIDAlt:      userAlt,
- 			Message:     messageInfo,
-@@ -725,7 +725,7 @@ func (cli *Client) updateBusinessName(ctx context.Context, user, userAlt types.J
- 			}
- 		}
- 		cli.Log.Debugf("Business name of %s changed from %s to %s, dispatching event", user, previousName, name)
+@@ -728 +728 @@ func (cli *Client) updateBusinessName(ctx context.Context, user, userAlt types.J
 -		cli.dispatchEvent(&events.BusinessName{
 +		cli.dispatchEventContext(ctx, &events.BusinessName{
- 			JID:             user,
- 			Message:         messageInfo,
- 			OldBusinessName: previousName,

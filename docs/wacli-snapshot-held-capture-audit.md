@@ -12,6 +12,8 @@ WACLI adds distinct causal operation tokens and cancellation ownership that surv
 
 Review hardening removes the send adapter's unscoped compatibility fallback. Missing owners or operation scopes refuse before worker launch; already-canceled attempts finish registration without starting send effects. Synthetic doubles now supply genuine test-only application scopes instead of relying on a production bypass. Regressions verify both refusals and canceled-attempt behavior.
 
+External review also hardens history-consumer startup/rejection and carries accepted lineage through the remaining audited undecryptable-message and offline-preview dispatches. Media panics retain immediate structured/stderr stack diagnostics as well as a drain failure. Successful terminal logout is distinct from unexpected reconnect failure; cancellation of its joined reconnect child is normalized only when that logout requested it.
+
 SDK legacy void producers cannot return every launch rejection to their caller. Rejections are retained as drain failures, not evidence that work was accepted. A regression discards a launch result deliberately and verifies that the callback never executes and the later drain retains both admission and coverage errors. Causal child registration after sealing preserves ownership of accepted work; it is not permission to ignore cancellation or begin arbitrary new effects. Callback cooperation and complete error propagation remain unproven.
 
 The source inventory gates enumerate raw goroutine sites and reject newly unreviewed worker classes. They are review guards, **not proof that arbitrary callback-created work, driver activity, filesystem writers or public handles are owned**. Timer waits inside a registered worker are included in that worker's lifetime; timers and callbacks are also listed by the source inventory for review. No timer count is treated as a capture receipt.
@@ -19,6 +21,8 @@ The source inventory gates enumerate raw goroutine sites and reject newly unrevi
 ## Why no held capture can be returned
 
 Both production `BeginDrain` APIs still return a nil held boundary and an explicit coverage error, even after all registered work has finished. The SDK's `LifecycleCoverageGaps()` returns a fresh, fixed gap list; a caller cannot approve, remove or override it. Known operational errors remain distinguishable from coverage refusal. Ordinary error-free close means only that the known joined operations did not fail.
+
+Failure retention is deliberately conservative: a later successful retry does not prove an earlier attempt had no partial persistence effects, so it does not clear that attempt's drain failure. A regression preserves this distinction between command success and lifecycle evidence. Each registry retains its first operational cause, not an exhaustive error history; later failures can be masked diagnostically, but cannot turn a failed drain into success. Broader bounded multi-cause diagnostics remain follow-up work, not a capture prerequisite satisfied by this series.
 
 Remaining gaps are concrete:
 
