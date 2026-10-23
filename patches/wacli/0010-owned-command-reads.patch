@@ -1,0 +1,1743 @@
+Subject: LOCAL SOURCE PROPOSAL: owned command read families
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/cmd/wacli/calls.go b/cmd/wacli/calls.go
+index a603dbc..3835cbb 100644
+--- a/cmd/wacli/calls.go
++++ b/cmd/wacli/calls.go
+@@ -4 +3,0 @@ import (
+-	"context"
+@@ -35,2 +34,2 @@ func newCallsListCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -43,0 +43,5 @@ func newCallsListCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
+@@ -62 +66,9 @@ func newCallsListCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				return err
++			}
++			chatJIDs, err := reads.ChatJIDFilter(ctx, chat)
++			if err != nil {
++				return err
++			}
++			db, err := a.OwnedDB(ctx)
+@@ -66 +78 @@ func newCallsListCmd(flags *rootFlags) *cobra.Command {
+-			calls, err := a.DB().ListCallEvents(store.ListCallEventsParams{
++			calls, err := db.ListCallEvents(ctx, store.ListCallEventsParams{
+diff --git a/cmd/wacli/history.go b/cmd/wacli/history.go
+index 142bfeb..f801f9d 100644
+--- a/cmd/wacli/history.go
++++ b/cmd/wacli/history.go
+@@ -38 +38 @@ func newHistoryCoverageCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -46,0 +47,5 @@ func newHistoryCoverageCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
+@@ -48 +53,5 @@ func newHistoryCoverageCmd(flags *rootFlags) *cobra.Command {
+-			coverage, err := a.DB().ListHistoryCoverage(store.ListHistoryCoverageParams{
++			db, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
++			coverage, err := db.ListHistoryCoverage(ctx, store.ListHistoryCoverageParams{
+@@ -84 +93 @@ func newHistoryFillCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -96,0 +106,5 @@ func newHistoryFillCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
+@@ -98 +112,5 @@ func newHistoryFillCmd(flags *rootFlags) *cobra.Command {
+-			coverage, err := a.DB().ListHistoryCoverage(store.ListHistoryCoverageParams{
++			db, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
++			coverage, err := db.ListHistoryCoverage(ctx, store.ListHistoryCoverageParams{
+@@ -138 +156 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -160 +178 @@ func newHistoryBackfillCmd(flags *rootFlags) *cobra.Command {
+-			defer finish(nil)
++			defer func() { finish(runErr) }()
+diff --git a/cmd/wacli/messages_changes.go b/cmd/wacli/messages_changes.go
+index 2059883..f2cc6f4 100644
+--- a/cmd/wacli/messages_changes.go
++++ b/cmd/wacli/messages_changes.go
+@@ -4 +3,0 @@ import (
+-	"context"
+@@ -16,2 +15,2 @@ func newMessagesChangesCmd(flags *rootFlags) *cobra.Command {
+-	cmd := &cobra.Command{Use: "changes", Short: "Read content-free local changes or obtain a checkpoint", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+-		ctx, cancel := withTimeout(context.Background(), flags)
++	cmd := &cobra.Command{Use: "changes", Short: "Read content-free local changes or obtain a checkpoint", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++		ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -24 +23,11 @@ func newMessagesChangesCmd(flags *rootFlags) *cobra.Command {
+-		page, err := a.DB().MessageChanges(since, checkpoint, limit)
++
++		ctx, finish, err := a.BeginScopedOperation(ctx)
++		if err != nil {
++			return err
++		}
++		defer func() { finish(runErr) }()
++		reads, err := a.OwnedMessageReads(ctx)
++		if err != nil {
++			return err
++		}
++		page, err := reads.Changes(ctx, since, checkpoint, limit)
+diff --git a/cmd/wacli/messages_helpers.go b/cmd/wacli/messages_helpers.go
+index f686d10..e4516f3 100644
+--- a/cmd/wacli/messages_helpers.go
++++ b/cmd/wacli/messages_helpers.go
+@@ -72,79 +71,0 @@ func jidStrings(jids []types.JID) []string {
+-type lidSenderResolver interface {
+-	ResolveLIDToPN(context.Context, types.JID) types.JID
+-}
+-
+-func resolveMessageSenderNames(ctx context.Context, a *app.App, msgs []store.Message) []store.Message {
+-	return resolveMessageSenderNamesInView(ctx, a, a.DB(), msgs)
+-}
+-
+-func resolveMessageSenderNamesInView(ctx context.Context, a *app.App, db *store.DB, msgs []store.Message) []store.Message {
+-	if len(msgs) == 0 || !messagesNeedSenderResolution(msgs) {
+-		return msgs
+-	}
+-	if _, err := os.Stat(filepath.Join(a.StoreDir(), "session.db")); err != nil {
+-		return msgs
+-	}
+-	resolver, err := a.LocalResolver()
+-	if err != nil {
+-		return msgs
+-	}
+-	return resolveMessageSenderNamesWith(ctx, db, resolver, msgs)
+-}
+-
+-func messagesNeedSenderResolution(msgs []store.Message) bool {
+-	for _, msg := range msgs {
+-		if !msg.FromMe && strings.TrimSpace(msg.SenderName) == "" && strings.HasSuffix(strings.TrimSpace(msg.SenderJID), "@"+types.HiddenUserServer) {
+-			return true
+-		}
+-	}
+-	return false
+-}
+-
+-func resolveMessageSenderNamesWith(ctx context.Context, db *store.DB, resolver lidSenderResolver, msgs []store.Message) []store.Message {
+-	if resolver == nil {
+-		return msgs
+-	}
+-	cache := map[string]string{}
+-	for i := range msgs {
+-		if msgs[i].FromMe || strings.TrimSpace(msgs[i].SenderName) != "" {
+-			continue
+-		}
+-		sender := strings.TrimSpace(msgs[i].SenderJID)
+-		if sender == "" {
+-			continue
+-		}
+-		if name, ok := cache[sender]; ok {
+-			msgs[i].SenderName = name
+-			continue
+-		}
+-		name := resolvedSenderName(ctx, db, resolver, sender)
+-		cache[sender] = name
+-		msgs[i].SenderName = name
+-	}
+-	return msgs
+-}
+-
+-func resolvedSenderName(ctx context.Context, db *store.DB, resolver lidSenderResolver, sender string) string {
+-	jid, err := types.ParseJID(sender)
+-	if err != nil || jid.Server != types.HiddenUserServer {
+-		return ""
+-	}
+-	pn := resolver.ResolveLIDToPN(ctx, jid)
+-	if pn.IsEmpty() || pn == jid {
+-		return ""
+-	}
+-	contact, err := db.GetContact(pn.String())
+-	if err == nil {
+-		if contact.Alias != "" {
+-			return contact.Alias
+-		}
+-		if contact.Name != "" {
+-			return contact.Name
+-		}
+-		if contact.Phone != "" {
+-			return contact.Phone
+-		}
+-	}
+-	return pn.String()
+-}
+-
+@@ -175,18 +95,0 @@ func getMessageByChatFilter(db *store.DB, chatJIDs []string, id string) (store.M
+-func getMessageContextByChatFilter(db *store.DB, chatJIDs []string, id string, before, after int) ([]store.Message, error) {
+-	var notFound error
+-	for _, chatJID := range chatJIDs {
+-		msgs, err := db.MessageContext(chatJID, id, before, after)
+-		if err == nil {
+-			return msgs, nil
+-		}
+-		if !isNoRows(err) {
+-			return nil, err
+-		}
+-		notFound = err
+-	}
+-	if notFound != nil {
+-		return nil, notFound
+-	}
+-	return nil, sql.ErrNoRows
+-}
+-
+@@ -211,0 +115,4 @@ func loadMessageMutationTarget(ctx context.Context, a *app.App, chat, id string)
++
++func ownedMessageChatJIDFilter(ctx context.Context, reads *app.OwnedMessageReads, chat string) ([]string, error) {
++	return reads.ChatJIDFilter(ctx, chat)
++}
+diff --git a/cmd/wacli/messages_pages.go b/cmd/wacli/messages_pages.go
+index 4f91987..951a97d 100644
+--- a/cmd/wacli/messages_pages.go
++++ b/cmd/wacli/messages_pages.go
+@@ -5 +4,0 @@ import (
+-	"fmt"
+@@ -18,12 +17,2 @@ type searchHitContext struct {
+-func readListMessagePage(ctx context.Context, a *app.App, command string, p store.ListMessagesParams, cursor string) (store.MessagePage, error) {
+-	var page store.MessagePage
+-	err := a.DB().ReadView(func(db *store.DB) error {
+-		var err error
+-		page, err = db.ListMessagesPage(command, p, cursor)
+-		if err != nil {
+-			return err
+-		}
+-		page.Messages = resolveMessageSenderNamesInView(ctx, a, db, page.Messages)
+-		return nil
+-	})
+-	return page, err
++func readListMessagePage(ctx context.Context, reads *app.OwnedMessageReads, command string, p store.ListMessagesParams, cursor string) (store.MessagePage, error) {
++	return reads.ListPage(ctx, command, p, cursor)
+@@ -31,8 +20,5 @@ func readListMessagePage(ctx context.Context, a *app.App, command string, p stor
+-func readSearchMessagePage(ctx context.Context, a *app.App, p store.SearchMessagesParams, cursor string, before, after int) (store.MessagePage, []searchHitContext, error) {
+-	var page store.MessagePage
+-	var contexts []searchHitContext
+-	if before < 0 || after < 0 || before > 20 || after > 20 {
+-		return page, nil, fmt.Errorf("context counts must be between 0 and 20")
+-	}
+-	if (before > 0 || after > 0) && p.Limit > 100 {
+-		return page, nil, fmt.Errorf("context search requires --limit at most 100 hits")
++func readSearchMessagePage(ctx context.Context, reads *app.OwnedMessageReads, p store.SearchMessagesParams, cursor string, before, after int) (store.MessagePage, []searchHitContext, error) {
++	page, owned, err := reads.SearchPage(ctx, p, cursor, before, after)
++	contexts := make([]searchHitContext, len(owned))
++	for i := range owned {
++		contexts[i] = searchHitContext{ChatJID: owned[i].ChatJID, MsgID: owned[i].MsgID, Messages: owned[i].Messages}
+@@ -40,25 +25,0 @@ func readSearchMessagePage(ctx context.Context, a *app.App, p store.SearchMessag
+-	err := a.DB().ReadView(func(db *store.DB) error {
+-		var err error
+-		page, err = db.SearchMessagesPage(p, cursor)
+-		if err != nil {
+-			return err
+-		}
+-		page.Messages = resolveMessageSenderNamesInView(ctx, a, db, page.Messages)
+-		if before == 0 && after == 0 {
+-			return nil
+-		}
+-		contexts = make([]searchHitContext, 0, len(page.Messages))
+-		for _, hit := range page.Messages {
+-			chats, err := messageChatJIDFilter(ctx, a, hit.ChatJID)
+-			if err != nil {
+-				return err
+-			}
+-			msgs, err := db.MessageContextInChats(chats, hit, before, after)
+-			if err != nil {
+-				return err
+-			}
+-			msgs = resolveMessageSenderNamesInView(ctx, a, db, msgs)
+-			contexts = append(contexts, searchHitContext{ChatJID: hit.ChatJID, MsgID: hit.MsgID, Messages: msgs})
+-		}
+-		return nil
+-	})
+@@ -66,0 +28,2 @@ func readSearchMessagePage(ctx context.Context, a *app.App, p store.SearchMessag
++
++// Legacy mutation routes still use this raw database parser and remain unproven.
+diff --git a/cmd/wacli/messages_read.go b/cmd/wacli/messages_read.go
+index 87e517f..537d093 100644
+--- a/cmd/wacli/messages_read.go
++++ b/cmd/wacli/messages_read.go
+@@ -4 +3,0 @@ import (
+-	"context"
+@@ -30,2 +29,2 @@ func newMessagesListCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -43,0 +43,10 @@ func newMessagesListCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				return err
++			}
++
+@@ -59 +68 @@ func newMessagesListCmd(flags *rootFlags) *cobra.Command {
+-			sender, err = localMessageIdentifier(a.DB(), sender, false)
++			sender, err = reads.ResolveMessageName(ctx, sender, false)
+@@ -63 +72 @@ func newMessagesListCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			chatJIDs, err := ownedMessageChatJIDFilter(ctx, reads, chat)
+@@ -68 +77 @@ func newMessagesListCmd(flags *rootFlags) *cobra.Command {
+-			page, err := readListMessagePage(ctx, a, cmd.Name(), store.ListMessagesParams{
++			page, err := readListMessagePage(ctx, reads, cmd.Name(), store.ListMessagesParams{
+@@ -124,2 +133,2 @@ func newMessagesSearchCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -133,0 +143,10 @@ func newMessagesSearchCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				return err
++			}
++
+@@ -139 +158 @@ func newMessagesSearchCmd(flags *rootFlags) *cobra.Command {
+-			from, err = localMessageIdentifier(a.DB(), from, false)
++			from, err = reads.ResolveMessageName(ctx, from, false)
+@@ -143 +162 @@ func newMessagesSearchCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			chatJIDs, err := ownedMessageChatJIDFilter(ctx, reads, chat)
+@@ -148 +167 @@ func newMessagesSearchCmd(flags *rootFlags) *cobra.Command {
+-			page, contexts, err := readSearchMessagePage(ctx, a, store.SearchMessagesParams{
++			page, contexts, err := readSearchMessagePage(ctx, reads, store.SearchMessagesParams{
+@@ -183 +202 @@ func newMessagesSearchCmd(flags *rootFlags) *cobra.Command {
+-			if !a.DB().HasFTS() {
++			if !page.FTS {
+@@ -215,2 +234,2 @@ func newMessagesStarredCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -224,0 +244,10 @@ func newMessagesStarredCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				return err
++			}
++
+@@ -230 +259 @@ func newMessagesStarredCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			chatJIDs, err := ownedMessageChatJIDFilter(ctx, reads, chat)
+@@ -234 +263 @@ func newMessagesStarredCmd(flags *rootFlags) *cobra.Command {
+-			msgs, err := a.DB().ListStarredMessages(store.ListStarredMessagesParams{
++			msgs, fts, err := reads.ListStarred(ctx, store.ListStarredMessagesParams{
+@@ -244 +273,4 @@ func newMessagesStarredCmd(flags *rootFlags) *cobra.Command {
+-			msgs = resolveMessageSenderNames(ctx, a, msgs)
++			msgs, err = reads.ResolveMessageSenderNames(ctx, msgs)
++			if err != nil {
++				return err
++			}
+@@ -249 +281 @@ func newMessagesStarredCmd(flags *rootFlags) *cobra.Command {
+-					"fts":      a.DB().HasFTS(),
++					"fts":      fts,
+@@ -270 +302 @@ func newMessagesShowCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -275 +307 @@ func newMessagesShowCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -284 +316 @@ func newMessagesShowCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			ctx, finish, err := a.BeginScopedOperation(ctx)
+@@ -288 +320,2 @@ func newMessagesShowCmd(flags *rootFlags) *cobra.Command {
+-			m, err := getMessageByChatFilter(a.DB(), chatJIDs, id)
++			defer func() { finish(runErr) }()
++			reads, err := a.OwnedMessageReads(ctx)
+@@ -292 +325,14 @@ func newMessagesShowCmd(flags *rootFlags) *cobra.Command {
+-			m = resolveMessageSenderNames(ctx, a, []store.Message{m})[0]
++
++			chatJIDs, err := ownedMessageChatJIDFilter(ctx, reads, chat)
++			if err != nil {
++				return err
++			}
++			m, err := reads.GetMessage(ctx, chatJIDs, id)
++			if err != nil {
++				return err
++			}
++			resolved, err := reads.ResolveMessageSenderNames(ctx, []store.Message{m})
++			if err != nil {
++				return err
++			}
++			m = resolved[0]
+@@ -316 +362 @@ func newMessagesContextCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -321 +367 @@ func newMessagesContextCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -330 +376 @@ func newMessagesContextCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			ctx, finish, err := a.BeginScopedOperation(ctx)
+@@ -334 +380,15 @@ func newMessagesContextCmd(flags *rootFlags) *cobra.Command {
+-			msgs, err := getMessageContextByChatFilter(a.DB(), chatJIDs, id, before, after)
++			defer func() { finish(runErr) }()
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				return err
++			}
++
++			chatJIDs, err := ownedMessageChatJIDFilter(ctx, reads, chat)
++			if err != nil {
++				return err
++			}
++			msgs, err := reads.MessageContext(ctx, chatJIDs, id, before, after)
++			if err != nil {
++				return err
++			}
++			msgs, err = reads.ResolveMessageSenderNames(ctx, msgs)
+@@ -338 +397,0 @@ func newMessagesContextCmd(flags *rootFlags) *cobra.Command {
+-			msgs = resolveMessageSenderNames(ctx, a, msgs)
+@@ -365,2 +424,2 @@ func newMessagesExportCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -374,0 +434,10 @@ func newMessagesExportCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				return err
++			}
++
+@@ -380 +449 @@ func newMessagesExportCmd(flags *rootFlags) *cobra.Command {
+-			chatJIDs, err := messageChatJIDFilter(ctx, a, chat)
++			chatJIDs, err := ownedMessageChatJIDFilter(ctx, reads, chat)
+@@ -385 +454 @@ func newMessagesExportCmd(flags *rootFlags) *cobra.Command {
+-			page, err := readListMessagePage(ctx, a, cmd.Name(), store.ListMessagesParams{
++			page, err := readListMessagePage(ctx, reads, cmd.Name(), store.ListMessagesParams{
+diff --git a/cmd/wacli/messages_test.go b/cmd/wacli/messages_test.go
+index 0e60cb2..70487ba 100644
+--- a/cmd/wacli/messages_test.go
++++ b/cmd/wacli/messages_test.go
+@@ -766,0 +767,71 @@ func messageIDs(msgs []store.Message) string {
++
++// Legacy sender-resolution oracle retained only for synthetic tests.
++type lidSenderResolver interface {
++	ResolveLIDToPN(context.Context, types.JID) types.JID
++}
++
++func resolveMessageSenderNamesWith(ctx context.Context, db *store.DB, resolver lidSenderResolver, msgs []store.Message) []store.Message {
++	if resolver == nil {
++		return msgs
++	}
++	cache := map[string]string{}
++	for i := range msgs {
++		if msgs[i].FromMe || strings.TrimSpace(msgs[i].SenderName) != "" {
++			continue
++		}
++		sender := strings.TrimSpace(msgs[i].SenderJID)
++		if sender == "" {
++			continue
++		}
++		if name, ok := cache[sender]; ok {
++			msgs[i].SenderName = name
++			continue
++		}
++		name := resolvedSenderName(ctx, db, resolver, sender)
++		cache[sender] = name
++		msgs[i].SenderName = name
++	}
++	return msgs
++}
++
++func resolvedSenderName(ctx context.Context, db *store.DB, resolver lidSenderResolver, sender string) string {
++	jid, err := types.ParseJID(sender)
++	if err != nil || jid.Server != types.HiddenUserServer {
++		return ""
++	}
++	pn := resolver.ResolveLIDToPN(ctx, jid)
++	if pn.IsEmpty() || pn == jid {
++		return ""
++	}
++	contact, err := db.GetContact(pn.String())
++	if err == nil {
++		if contact.Alias != "" {
++			return contact.Alias
++		}
++		if contact.Name != "" {
++			return contact.Name
++		}
++		if contact.Phone != "" {
++			return contact.Phone
++		}
++	}
++	return pn.String()
++}
++
++func getMessageContextByChatFilter(db *store.DB, chatJIDs []string, id string, before, after int) ([]store.Message, error) {
++	var notFound error
++	for _, chatJID := range chatJIDs {
++		msgs, err := db.MessageContext(chatJID, id, before, after)
++		if err == nil {
++			return msgs, nil
++		}
++		if !isNoRows(err) {
++			return nil, err
++		}
++		notFound = err
++	}
++	if notFound != nil {
++		return nil, notFound
++	}
++	return nil, sql.ErrNoRows
++}
+diff --git a/cmd/wacli/owned_command_routes_test.go b/cmd/wacli/owned_command_routes_test.go
+new file mode 100644
+index 0000000..d40775f
+--- /dev/null
++++ b/cmd/wacli/owned_command_routes_test.go
+@@ -0,0 +1,31 @@
++package main
++
++import (
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"testing"
++)
++
++// This is a narrow route regression, not whole-program ownership proof. Legacy
++// mutation helpers, output descriptors and direct application fields stay gaps.
++func TestOwnedCommandRoutesDoNotBorrowRawHandles(t *testing.T) {
++	for _, path := range []string{"messages_read.go", "messages_changes.go", "calls.go", "history.go", "store_stats.go"} {
++		fset := token.NewFileSet()
++		file, err := parser.ParseFile(fset, path, nil, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ast.Inspect(file, func(n ast.Node) bool {
++			sel, ok := n.(*ast.SelectorExpr)
++			if !ok {
++				return true
++			}
++			switch sel.Sel.Name {
++			case "DB", "WA", "LocalResolver", "ReadOnlyResolver":
++				t.Errorf("%s: migrated route borrows raw accessor/method value %s", fset.Position(sel.Pos()), sel.Sel.Name)
++			}
++			return true
++		})
++	}
++}
+diff --git a/cmd/wacli/store_stats.go b/cmd/wacli/store_stats.go
+index 3d90076..568bacd 100644
+--- a/cmd/wacli/store_stats.go
++++ b/cmd/wacli/store_stats.go
+@@ -4 +3,0 @@ import (
+-	"context"
+@@ -16,2 +15,2 @@ func newStoreStatsCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
+-			ctx, cancel := withTimeout(context.Background(), flags)
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
++			ctx, cancel := withTimeout(cmd.Context(), flags)
+@@ -25,7 +24 @@ func newStoreStatsCmd(flags *rootFlags) *cobra.Command {
+-
+-			chats, err := a.DB().CountChats()
+-			if err != nil {
+-				return err
+-			}
+-
+-			groups, err := a.DB().CountGroups()
++			ctx, finish, err := a.BeginScopedOperation(ctx)
+@@ -34,0 +28 @@ func newStoreStatsCmd(flags *rootFlags) *cobra.Command {
++			defer func() { finish(runErr) }()
+@@ -36 +30 @@ func newStoreStatsCmd(flags *rootFlags) *cobra.Command {
+-			leftGroups, err := a.DB().CountLeftGroups()
++			db, err := a.OwnedDB(ctx)
+@@ -40,2 +34 @@ func newStoreStatsCmd(flags *rootFlags) *cobra.Command {
+-
+-			totalMessages, err := a.DB().CountMessages()
++			chats, groups, leftGroups, totalMessages, err := db.CountArchiveStats(ctx)
+diff --git a/cmd/wacli/testdata/owned_handle_inventory.json b/cmd/wacli/testdata/owned_handle_inventory.json
+index 2294c60..8313839 100644
+--- a/cmd/wacli/testdata/owned_handle_inventory.json
++++ b/cmd/wacli/testdata/owned_handle_inventory.json
+@@ -32,10 +31,0 @@
+-  {
+-    "id": "cmd/wacli/calls.go:newCallsListCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/calls.go",
+-    "function": "newCallsListCmd",
+-    "accessor": "DB",
+-    "line": 66,
+-    "column": 18,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+@@ -852,20 +841,0 @@
+-  {
+-    "id": "cmd/wacli/history.go:newHistoryCoverageCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/history.go",
+-    "function": "newHistoryCoverageCmd",
+-    "accessor": "DB",
+-    "line": 48,
+-    "column": 21,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/history.go:newHistoryFillCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/history.go",
+-    "function": "newHistoryFillCmd",
+-    "accessor": "DB",
+-    "line": 98,
+-    "column": 21,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+@@ -922,10 +891,0 @@
+-  {
+-    "id": "cmd/wacli/messages_changes.go:newMessagesChangesCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_changes.go",
+-    "function": "newMessagesChangesCmd",
+-    "accessor": "DB",
+-    "line": 24,
+-    "column": 16,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+@@ -1112,10 +1071,0 @@
+-  {
+-    "id": "cmd/wacli/messages_helpers.go:resolveMessageSenderNames:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_helpers.go",
+-    "function": "resolveMessageSenderNames",
+-    "accessor": "DB",
+-    "line": 77,
+-    "column": 49,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+@@ -1127 +1077 @@
+-    "line": 202,
++    "line": 105,
+@@ -1132,20 +1081,0 @@
+-  {
+-    "id": "cmd/wacli/messages_pages.go:readListMessagePage:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_pages.go",
+-    "function": "readListMessagePage",
+-    "accessor": "DB",
+-    "line": 20,
+-    "column": 9,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_pages.go:readSearchMessagePage:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_pages.go",
+-    "function": "readSearchMessagePage",
+-    "accessor": "DB",
+-    "line": 40,
+-    "column": 9,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+@@ -1182,70 +1111,0 @@
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesListCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesListCmd",
+-    "accessor": "DB",
+-    "line": 59,
+-    "column": 41,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesSearchCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesSearchCmd",
+-    "accessor": "DB",
+-    "line": 139,
+-    "column": 39,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesSearchCmd:DB:occurrence-2",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesSearchCmd",
+-    "accessor": "DB",
+-    "line": 183,
+-    "column": 8,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesStarredCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesStarredCmd",
+-    "accessor": "DB",
+-    "line": 234,
+-    "column": 17,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesStarredCmd:DB:occurrence-2",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesStarredCmd",
+-    "accessor": "DB",
+-    "line": 249,
+-    "column": 18,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesShowCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesShowCmd",
+-    "accessor": "DB",
+-    "line": 288,
+-    "column": 37,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/messages_read.go:newMessagesContextCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/messages_read.go",
+-    "function": "newMessagesContextCmd",
+-    "accessor": "DB",
+-    "line": 334,
+-    "column": 47,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+@@ -2062,40 +1921,0 @@
+-  {
+-    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/store_stats.go",
+-    "function": "newStoreStatsCmd",
+-    "accessor": "DB",
+-    "line": 26,
+-    "column": 18,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-2",
+-    "path": "cmd/wacli/store_stats.go",
+-    "function": "newStoreStatsCmd",
+-    "accessor": "DB",
+-    "line": 31,
+-    "column": 19,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-3",
+-    "path": "cmd/wacli/store_stats.go",
+-    "function": "newStoreStatsCmd",
+-    "accessor": "DB",
+-    "line": 36,
+-    "column": 23,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-4",
+-    "path": "cmd/wacli/store_stats.go",
+-    "function": "newStoreStatsCmd",
+-    "accessor": "DB",
+-    "line": 41,
+-    "column": 26,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+diff --git a/internal/app/owned_archive.go b/internal/app/owned_archive.go
+new file mode 100644
+index 0000000..dd27ad8
+--- /dev/null
++++ b/internal/app/owned_archive.go
+@@ -0,0 +1,53 @@
++package app
++
++import (
++	"context"
++
++	"github.com/openclaw/wacli/internal/store"
++)
++
++// ListCallEvents reads local call diagnostics while retaining the child lease
++// for the complete store invocation.
++func (d *OwnedDB) ListCallEvents(ctx context.Context, p store.ListCallEventsParams) (events []store.CallEvent, err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.archive.ListCallEvents(p)
++}
++
++// ListHistoryCoverage reads local archive coverage while retaining the child
++// lease for the complete store invocation.
++func (d *OwnedDB) ListHistoryCoverage(ctx context.Context, p store.ListHistoryCoverageParams) (coverage []store.HistoryCoverage, err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.archive.ListHistoryCoverage(p)
++}
++
++// CountArchiveStats reads all store counters used by the local diagnostics
++// command under one invocation lease.
++func (d *OwnedDB) CountArchiveStats(ctx context.Context) (chats, groups, leftGroups, messages int64, err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return 0, 0, 0, 0, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	chats, err = d.archive.CountChats()
++	if err != nil {
++		return 0, 0, 0, 0, err
++	}
++	groups, err = d.archive.CountGroups()
++	if err != nil {
++		return 0, 0, 0, 0, err
++	}
++	leftGroups, err = d.archive.CountLeftGroups()
++	if err != nil {
++		return 0, 0, 0, 0, err
++	}
++	messages, err = d.archive.CountMessages()
++	return chats, groups, leftGroups, messages, err
++}
+diff --git a/internal/app/owned_archive_test.go b/internal/app/owned_archive_test.go
+new file mode 100644
+index 0000000..3f51ea2
+--- /dev/null
++++ b/internal/app/owned_archive_test.go
+@@ -0,0 +1,185 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++)
++
++type ownedArchiveProbe struct {
++	ownedArchiveReader
++	calls            atomic.Int32
++	entered, release chan struct{}
++	failure          error
++	panics           bool
++}
++
++func (p *ownedArchiveProbe) read() error {
++	p.calls.Add(1)
++	if p.entered != nil {
++		close(p.entered)
++		<-p.release
++	}
++	if p.panics {
++		panic(p.failure)
++	}
++	return p.failure
++}
++func (p *ownedArchiveProbe) ListCallEvents(store.ListCallEventsParams) ([]store.CallEvent, error) {
++	return nil, p.read()
++}
++func (p *ownedArchiveProbe) ListHistoryCoverage(store.ListHistoryCoverageParams) ([]store.HistoryCoverage, error) {
++	return nil, p.read()
++}
++func (p *ownedArchiveProbe) CountChats() (int64, error) { return 0, p.read() }
++
++var ownedArchiveInvocations = []struct {
++	name string
++	call func(*OwnedDB, context.Context) error
++}{
++	{"calls", func(d *OwnedDB, c context.Context) error {
++		_, e := d.ListCallEvents(c, store.ListCallEventsParams{})
++		return e
++	}},
++	{"history", func(d *OwnedDB, c context.Context) error {
++		_, e := d.ListHistoryCoverage(c, store.ListHistoryCoverageParams{})
++		return e
++	}},
++	{"stats", func(d *OwnedDB, c context.Context) error { _, _, _, _, e := d.CountArchiveStats(c); return e }},
++}
++
++func TestOwnedArchiveRefusalHasZeroStoreEffects(t *testing.T) {
++	for _, mode := range []string{"sealed-finished", "sealed-missing", "foreign", "canceled"} {
++		t.Run(mode, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			d, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			probe := &ownedArchiveProbe{ownedArchiveReader: d.archive}
++			d.archive = probe
++			use := ctx
++			switch mode {
++			case "sealed-finished", "sealed-missing":
++				finish(nil)
++				if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++					t.Fatalf("seal = %v %v", held, err)
++				}
++				if mode == "sealed-missing" {
++					use = context.Background()
++				}
++			case "foreign":
++				other := &App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(ctx)
++				cancel()
++			}
++			for _, op := range ownedArchiveInvocations {
++				if err := op.call(d, use); !errors.Is(err, ErrHandleRevoked) {
++					t.Fatalf("%s = %v", op.name, err)
++				}
++			}
++			if probe.calls.Load() != 0 {
++				t.Fatalf("refused operations performed %d store effects", probe.calls.Load())
++			}
++		})
++	}
++}
++
++func TestOwnedArchiveAcceptedAfterSealAndActualInvocationJoin(t *testing.T) {
++	for _, op := range ownedArchiveInvocations {
++		t.Run(op.name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			d, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			failure := errors.New("synthetic archive failure")
++			probe := &ownedArchiveProbe{ownedArchiveReader: d.archive, entered: make(chan struct{}), release: make(chan struct{}), failure: failure}
++			d.archive = probe
++			var release sync.Once
++			defer release.Do(func() { close(probe.release) })
++			sealed, cancel := context.WithCancel(context.Background())
++			cancel()
++			if held, err := a.BeginDrain(sealed); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++				t.Fatalf("seal = %v %v", held, err)
++			}
++			result := make(chan error, 1)
++			go func() { result <- op.call(d, ctx) }()
++			select {
++			case <-probe.entered:
++			case <-time.After(time.Second):
++				t.Fatal("live parent failed to admit child after seal")
++			}
++			finish(nil)
++			drain := make(chan error, 1)
++			go func() { _, err := a.BeginDrain(context.Background()); drain <- err }()
++			select {
++			case err := <-drain:
++				t.Fatalf("drain escaped invocation: %v", err)
++			case <-time.After(20 * time.Millisecond):
++			}
++			release.Do(func() { close(probe.release) })
++			select {
++			case err := <-result:
++				if !errors.Is(err, failure) {
++					t.Fatal(err)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("invocation failed to return")
++			}
++			select {
++			case err := <-drain:
++				if !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++					t.Fatal(err)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("drain did not join")
++			}
++			if probe.calls.Load() != 1 {
++				t.Fatal("unexpected store effect count")
++			}
++		})
++	}
++}
++
++func TestOwnedArchivePanicRetainsCause(t *testing.T) {
++	for _, op := range ownedArchiveInvocations {
++		t.Run(op.name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			d, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			failure := errors.New("synthetic archive panic")
++			d.archive = &ownedArchiveProbe{ownedArchiveReader: d.archive, failure: failure, panics: true}
++			func() {
++				defer func() {
++					if recover() != failure {
++						t.Error("panic cause changed")
++					}
++				}()
++				_ = op.call(d, ctx)
++			}()
++			finish(nil)
++			if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++				t.Fatalf("lost panic = %v %v", held, err)
++			}
++		})
++	}
++}
+diff --git a/internal/app/owned_db.go b/internal/app/owned_db.go
+index 7b373bd..fad7440 100644
+--- a/internal/app/owned_db.go
++++ b/internal/app/owned_db.go
+@@ -11,0 +12,9 @@ import (
++type ownedArchiveReader interface {
++	ListCallEvents(store.ListCallEventsParams) ([]store.CallEvent, error)
++	ListHistoryCoverage(store.ListHistoryCoverageParams) ([]store.HistoryCoverage, error)
++	CountChats() (int64, error)
++	CountGroups() (int64, error)
++	CountLeftGroups() (int64, error)
++	CountMessages() (int64, error)
++}
++
+@@ -21,3 +30,4 @@ type OwnedDB struct {
+-	db    *store.DB
+-	app   *App
+-	quote ownedQuoteReader
++	db      *store.DB
++	app     *App
++	quote   ownedQuoteReader
++	archive ownedArchiveReader
+@@ -36 +46 @@ func (a *App) OwnedDB(ctx context.Context) (*OwnedDB, error) {
+-	return &OwnedDB{db: a.db, app: a, quote: a.db}, nil
++	return &OwnedDB{db: a.db, app: a, quote: a.db, archive: a.db}, nil
+diff --git a/internal/app/owned_message_reads.go b/internal/app/owned_message_reads.go
+new file mode 100644
+index 0000000..c60a8fb
+--- /dev/null
++++ b/internal/app/owned_message_reads.go
+@@ -0,0 +1,368 @@
++package app
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/openclaw/wacli/internal/store"
++	"github.com/openclaw/wacli/internal/wa"
++	"go.mau.fi/whatsmeow/types"
++)
++
++// OwnedMessageReads is the command read facade. The database and resolver are
++// deliberately private; each method admits and leases its complete effect.
++type OwnedMessageReads struct {
++	db        *store.DB
++	app       *App
++	viewProbe func(context.Context) error
++}
++
++type OwnedSearchHitContext struct {
++	ChatJID  string          `json:"chat_jid"`
++	MsgID    string          `json:"msg_id"`
++	Messages []store.Message `json:"messages"`
++}
++
++func (a *App) OwnedMessageReads(ctx context.Context) (*OwnedMessageReads, error) {
++	if err := a.admitHandle(ctx); err != nil {
++		return nil, err
++	}
++	a.waMu.Lock()
++	closed, db := a.closed, a.db
++	a.waMu.Unlock()
++	if closed || db == nil {
++		return nil, ErrHandleRevoked
++	}
++	return &OwnedMessageReads{db: db, app: a}, nil
++}
++
++func (r *OwnedMessageReads) effect(ctx context.Context) (context.Context, func(error), error) {
++	if err := r.app.admitHandle(ctx); err != nil {
++		return nil, nil, err
++	}
++	child, finish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		return nil, nil, errors.Join(ErrHandleRevoked, err)
++	}
++	return child, finish, nil
++}
++
++func (r *OwnedMessageReads) withView(ctx context.Context, fn func(context.Context, *store.DB) error) (err error) {
++	owned, finish, err := r.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return r.db.ReadView(func(view *store.DB) error {
++		if probe := r.viewProbe; probe != nil {
++			if err := probe(owned); err != nil {
++				return err
++			}
++		}
++		return fn(owned, view)
++	})
++}
++
++func (r *OwnedMessageReads) ResolveMessageName(ctx context.Context, input string, chats bool) (out string, err error) {
++	if input == "" {
++		return "", nil
++	}
++	jid, parseErr := wa.ParseUserOrJID(input)
++	if parseErr == nil {
++		return jid.String(), nil
++	}
++	explicit, numeric := strings.Contains(input, "@"), true
++	for _, c := range input {
++		if (c < '0' || c > '9') && !strings.ContainsRune("+ -()", c) {
++			numeric = false
++			break
++		}
++	}
++	if explicit || numeric {
++		return "", parseErr
++	}
++	err = r.withView(ctx, func(_ context.Context, db *store.DB) error {
++		out, err = db.ResolveMessageName(input, chats)
++		return err
++	})
++	return out, err
++}
++
++func (r *OwnedMessageReads) ChatJIDFilter(ctx context.Context, chat string) ([]string, error) {
++	chat = strings.TrimSpace(chat)
++	if chat == "" {
++		return nil, nil
++	}
++	var out []string
++	err := r.withView(ctx, func(child context.Context, db *store.DB) error {
++		resolved, err := localOwnedIdentifier(db, chat, true)
++		if err != nil {
++			return err
++		}
++		jid, err := wa.ParseUserOrJID(resolved)
++		if err != nil {
++			return err
++		}
++		jids := []types.JID{canonicalOwnedMessageJID(jid)}
++		if _, err := os.Stat(filepath.Join(r.app.opts.StoreDir, "session.db")); err != nil {
++			out = ownedJIDStrings(jids)
++			return nil
++		}
++		resolver, err := r.app.LocalResolver()
++		if err != nil {
++			out = ownedJIDStrings(jids)
++			return nil
++		}
++		switch jid.Server {
++		case types.DefaultUserServer:
++			jids = append(jids, canonicalOwnedMessageJID(resolver.ResolvePNToLID(child, jid)))
++		case types.HiddenUserServer:
++			jids = append(jids, canonicalOwnedMessageJID(resolver.ResolveLIDToPN(child, jid)))
++		}
++		out = ownedJIDStrings(jids)
++		return nil
++	})
++	return out, err
++}
++
++func (r *OwnedMessageReads) ListPage(ctx context.Context, command string, p store.ListMessagesParams, cursor string) (page store.MessagePage, err error) {
++	err = r.withView(ctx, func(c context.Context, db *store.DB) error {
++		page, err = db.ListMessagesPage(command, p, cursor)
++		if err == nil {
++			page.Messages = r.resolveNames(c, db, page.Messages)
++		}
++		return err
++	})
++	return
++}
++func (r *OwnedMessageReads) SearchPage(ctx context.Context, p store.SearchMessagesParams, cursor string, before, after int) (page store.MessagePage, contexts []OwnedSearchHitContext, err error) {
++	if before < 0 || after < 0 || before > 20 || after > 20 {
++		return page, nil, fmt.Errorf("context counts must be between 0 and 20")
++	}
++	if (before > 0 || after > 0) && p.Limit > 100 {
++		return page, nil, fmt.Errorf("context search requires --limit at most 100 hits")
++	}
++	err = r.withView(ctx, func(c context.Context, db *store.DB) error {
++		page, err = db.SearchMessagesPage(p, cursor)
++		if err != nil {
++			return err
++		}
++		page.Messages = r.resolveNames(c, db, page.Messages)
++		if before == 0 && after == 0 {
++			return nil
++		}
++		contexts = make([]OwnedSearchHitContext, 0, len(page.Messages))
++		for _, hit := range page.Messages {
++			chats, e := r.chatFilterInView(c, db, hit.ChatJID)
++			if e != nil {
++				return e
++			}
++			msgs, e := db.MessageContextInChats(chats, hit, before, after)
++			if e != nil {
++				return e
++			}
++			contexts = append(contexts, OwnedSearchHitContext{ChatJID: hit.ChatJID, MsgID: hit.MsgID, Messages: r.resolveNames(c, db, msgs)})
++		}
++		return nil
++	})
++	return
++}
++func (r *OwnedMessageReads) ListStarred(ctx context.Context, p store.ListStarredMessagesParams) (msgs []store.Message, fts bool, err error) {
++	err = r.withView(ctx, func(c context.Context, db *store.DB) error {
++		msgs, err = db.ListStarredMessages(p)
++		if err == nil {
++			msgs = r.resolveNames(c, db, msgs)
++			fts = db.HasFTS()
++		}
++		return err
++	})
++	return
++}
++func (r *OwnedMessageReads) GetMessage(ctx context.Context, chats []string, id string) (m store.Message, err error) {
++	err = r.withView(ctx, func(_ context.Context, db *store.DB) error { m, err = getOwnedMessage(db, chats, id); return err })
++	return
++}
++func (r *OwnedMessageReads) MessageContext(ctx context.Context, chats []string, id string, before, after int) (msgs []store.Message, err error) {
++	err = r.withView(ctx, func(_ context.Context, db *store.DB) error {
++		msgs, err = getOwnedContext(db, chats, id, before, after)
++		return err
++	})
++	return
++}
++func (r *OwnedMessageReads) Changes(ctx context.Context, since string, checkpoint bool, limit int) (page store.ChangesPage, err error) {
++	child, finish, err := r.effect(ctx)
++	if err != nil {
++		return page, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	if r.viewProbe != nil {
++		if err = r.viewProbe(child); err != nil {
++			return page, err
++		}
++	}
++	// MessageChanges owns its consistent transaction; do not nest ReadView.
++	return r.db.MessageChanges(since, checkpoint, limit)
++}
++
++func (r *OwnedMessageReads) ResolveMessageSenderNames(ctx context.Context, msgs []store.Message) (out []store.Message, err error) {
++	err = r.withView(ctx, func(c context.Context, db *store.DB) error { out = r.resolveNames(c, db, msgs); return nil })
++	return out, err
++}
++func (r *OwnedMessageReads) resolveNames(ctx context.Context, db *store.DB, msgs []store.Message) []store.Message {
++	if len(msgs) == 0 || !ownedMessagesNeedNames(msgs) {
++		return msgs
++	}
++	if _, err := os.Stat(filepath.Join(r.app.opts.StoreDir, "session.db")); err != nil {
++		return msgs
++	}
++	resolver, err := r.app.LocalResolver()
++	if err != nil {
++		return msgs
++	}
++	cache := make(map[string]string)
++	for i := range msgs {
++		if msgs[i].FromMe || strings.TrimSpace(msgs[i].SenderName) != "" {
++			continue
++		}
++		sender := strings.TrimSpace(msgs[i].SenderJID)
++		if name, ok := cache[sender]; ok {
++			msgs[i].SenderName = name
++			continue
++		}
++		cache[sender] = ""
++		jid, e := types.ParseJID(sender)
++		if e != nil || jid.Server != types.HiddenUserServer {
++			continue
++		}
++		pn := resolver.ResolveLIDToPN(ctx, jid)
++		if pn.IsEmpty() || pn == jid {
++			continue
++		}
++		contact, e := db.GetContact(pn.String())
++		if e == nil {
++			if contact.Alias != "" {
++				msgs[i].SenderName = contact.Alias
++			} else if contact.Name != "" {
++				msgs[i].SenderName = contact.Name
++			} else if contact.Phone != "" {
++				msgs[i].SenderName = contact.Phone
++			}
++		}
++		if msgs[i].SenderName == "" {
++			msgs[i].SenderName = pn.String()
++		}
++		cache[sender] = msgs[i].SenderName
++	}
++	return msgs
++}
++func (r *OwnedMessageReads) chatFilterInView(ctx context.Context, db *store.DB, chat string) ([]string, error) {
++	resolved, err := localOwnedIdentifier(db, chat, true)
++	if err != nil {
++		return nil, err
++	}
++	jid, err := wa.ParseUserOrJID(resolved)
++	if err != nil {
++		return nil, err
++	}
++	jids := []types.JID{canonicalOwnedMessageJID(jid)}
++	if _, err := os.Stat(filepath.Join(r.app.opts.StoreDir, "session.db")); err != nil {
++		return ownedJIDStrings(jids), nil
++	}
++	resolver, e := r.app.LocalResolver()
++	if e == nil {
++		if jid.Server == types.DefaultUserServer {
++			jids = append(jids, canonicalOwnedMessageJID(resolver.ResolvePNToLID(ctx, jid)))
++		} else if jid.Server == types.HiddenUserServer {
++			jids = append(jids, canonicalOwnedMessageJID(resolver.ResolveLIDToPN(ctx, jid)))
++		}
++	}
++	return ownedJIDStrings(jids), nil
++}
++func localOwnedIdentifier(db *store.DB, input string, chats bool) (string, error) {
++	if input == "" {
++		return "", nil
++	}
++	jid, err := wa.ParseUserOrJID(input)
++	if err == nil {
++		return jid.String(), nil
++	}
++	explicit, numeric := strings.Contains(input, "@"), true
++	for _, c := range input {
++		if (c < '0' || c > '9') && !strings.ContainsRune("+ -()", c) {
++			numeric = false
++			break
++		}
++	}
++	if explicit || numeric {
++		return "", err
++	}
++	return db.ResolveMessageName(input, chats)
++}
++func canonicalOwnedMessageJID(jid types.JID) types.JID {
++	if jid.Server == types.DefaultUserServer {
++		return jid.ToNonAD()
++	}
++	return jid
++}
++func ownedJIDStrings(jids []types.JID) []string {
++	out := make([]string, 0, len(jids))
++	seen := map[string]bool{}
++	for _, j := range jids {
++		if j.IsEmpty() || seen[j.String()] {
++			continue
++		}
++		seen[j.String()] = true
++		out = append(out, j.String())
++	}
++	return out
++}
++func ownedMessagesNeedNames(msgs []store.Message) bool {
++	for _, m := range msgs {
++		if !m.FromMe && strings.TrimSpace(m.SenderName) == "" && strings.HasSuffix(strings.TrimSpace(m.SenderJID), "@"+types.HiddenUserServer) {
++			return true
++		}
++	}
++	return false
++}
++func getOwnedMessage(db *store.DB, chats []string, id string) (store.Message, error) {
++	var nf error
++	for _, chat := range chats {
++		m, err := db.GetMessage(chat, id)
++		if err == nil {
++			if c, e := db.MessageReceipts(m.ChatJID, m.MsgID); e == nil {
++				m.DeliveredTo, m.ReadBy = c.Delivered, c.Read
++			}
++			return m, nil
++		}
++		if !errors.Is(err, sql.ErrNoRows) {
++			return store.Message{}, err
++		}
++		nf = err
++	}
++	if nf != nil {
++		return store.Message{}, nf
++	}
++	return store.Message{}, sql.ErrNoRows
++}
++func getOwnedContext(db *store.DB, chats []string, id string, before, after int) ([]store.Message, error) {
++	var nf error
++	for _, chat := range chats {
++		m, err := db.MessageContext(chat, id, before, after)
++		if err == nil {
++			return m, nil
++		}
++		if !errors.Is(err, sql.ErrNoRows) {
++			return nil, err
++		}
++		nf = err
++	}
++	if nf != nil {
++		return nil, nf
++	}
++	return nil, sql.ErrNoRows
++}
+diff --git a/internal/app/owned_message_reads_test.go b/internal/app/owned_message_reads_test.go
+new file mode 100644
+index 0000000..9a8de19
+--- /dev/null
++++ b/internal/app/owned_message_reads_test.go
+@@ -0,0 +1,310 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++func TestOwnedMessageReadsRefuseAfterScopeFinish(t *testing.T) {
++	a, _, ctx, finish := ownedMessageTestApp(t)
++	defer finish(nil)
++	reads, err := a.OwnedMessageReads(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	finish(nil)
++	_, err = reads.ListPage(ctx, "list", store.ListMessagesParams{Limit: 1}, "")
++	if !errors.Is(err, ErrHandleRevoked) {
++		t.Fatalf("read after finish = %v", err)
++	}
++}
++
++func TestOwnedMessageReadsRefuseForeignOrCanceledContexts(t *testing.T) {
++	a, _, parent, finish := ownedMessageTestApp(t)
++	defer finish(nil)
++	reads, err := a.OwnedMessageReads(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := reads.ListPage(context.Background(), "list", store.ListMessagesParams{Limit: 1}, ""); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatalf("foreign read = %v", err)
++	}
++	canceled, cancel := context.WithCancel(parent)
++	cancel()
++	if _, err := reads.ListPage(canceled, "list", store.ListMessagesParams{Limit: 1}, ""); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatalf("canceled read = %v", err)
++	}
++}
++
++func TestOwnedMessageReadsChatJIDFilterRefusesEveryInvalidContext(t *testing.T) {
++	for _, mode := range []string{"finished", "canceled", "foreign", "missing"} {
++		t.Run(mode, func(t *testing.T) {
++			a, _, parent, finish := ownedMessageTestApp(t)
++			defer finish(nil)
++			reads, err := a.OwnedMessageReads(parent)
++			if err != nil {
++				t.Fatal(err)
++			}
++			use := parent
++			var foreignFinish func(error)
++			switch mode {
++			case "finished":
++				finish(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(parent)
++				cancel()
++			case "foreign":
++				other := &App{}
++				var err error
++				use, foreignFinish, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer foreignFinish(nil)
++			case "missing":
++				use = context.Background()
++			}
++			if _, err := reads.ChatJIDFilter(use, "1234567"); !errors.Is(err, ErrHandleRevoked) {
++				t.Fatalf("%s ChatJIDFilter = %v", mode, err)
++			}
++		})
++	}
++}
++
++func TestOwnedMessageReadsChatJIDFilterJoinsBlockedInvocationAfterParentFinish(t *testing.T) {
++	a, _, parent, finish := ownedMessageTestApp(t)
++	defer finish(nil)
++	reads, err := a.OwnedMessageReads(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	reads.viewProbe = func(ctx context.Context) error {
++		close(entered)
++		<-release
++		return nil
++	}
++	result := make(chan error, 1)
++	go func() {
++		_, err := reads.ChatJIDFilter(parent, "1234567")
++		result <- err
++	}()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("ChatJIDFilter did not enter admitted read view")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, err := a.BeginDrain(context.Background()); drain <- err }()
++	select {
++	case err := <-drain:
++		t.Fatalf("drain escaped blocked child: %v", err)
++	case <-time.After(25 * time.Millisecond):
++	}
++	close(release)
++	if err := <-result; err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-drain:
++		if !errors.Is(err, ErrDrainCoverageIncomplete) {
++			t.Fatalf("drain result = %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join ChatJIDFilter")
++	}
++}
++
++func TestOwnedMessageReadsReadViewFailureAndPanicRetainLifecycleCause(t *testing.T) {
++	failure := errors.New("synthetic message read failure")
++	for _, tc := range []struct {
++		name  string
++		panic bool
++	}{
++		{name: "failure"},
++		{name: "panic", panic: true},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			a, _, parent, finish := ownedMessageTestApp(t)
++			defer finish(nil)
++			reads, err := a.OwnedMessageReads(parent)
++			if err != nil {
++				t.Fatal(err)
++			}
++			reads.viewProbe = func(context.Context) error {
++				if tc.panic {
++					panic(failure)
++				}
++				return failure
++			}
++			if tc.panic {
++				func() {
++					defer func() {
++						if recover() != failure {
++							t.Fatal("read panic was changed")
++						}
++					}()
++					_, _ = reads.ChatJIDFilter(parent, "1234567")
++				}()
++			} else if _, err := reads.ChatJIDFilter(parent, "1234567"); !errors.Is(err, failure) {
++				t.Fatalf("read failure = %v", err)
++			}
++			finish(nil)
++			if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++				t.Fatalf("lifecycle cause/coverage lost: %v %v", held, err)
++			}
++		})
++	}
++}
++
++func TestOwnedMessageReadsSealedRefusalHasZeroViewEffects(t *testing.T) {
++	a, _, ctx, finish := ownedMessageTestApp(t)
++	defer finish(nil)
++	reads, err := a.OwnedMessageReads(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	calls := 0
++	reads.viewProbe = func(context.Context) error { calls++; return nil }
++	finish(nil)
++	if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("seal = %v %v", held, err)
++	}
++	for _, use := range []context.Context{ctx, context.Background()} {
++		operations := []struct {
++			name string
++			call func() error
++		}{
++			{"name", func() error { _, e := reads.ResolveMessageName(use, "Synthetic Contact", false); return e }},
++			{"filter", func() error { _, e := reads.ChatJIDFilter(use, "1234567"); return e }},
++			{"list", func() error { _, e := reads.ListPage(use, "list", store.ListMessagesParams{Limit: 1}, ""); return e }},
++			{"search", func() error {
++				_, _, e := reads.SearchPage(use, store.SearchMessagesParams{Query: "synthetic", Limit: 1}, "", 0, 0)
++				return e
++			}},
++			{"starred", func() error { _, _, e := reads.ListStarred(use, store.ListStarredMessagesParams{Limit: 1}); return e }},
++			{"message", func() error { _, e := reads.GetMessage(use, []string{"synthetic"}, "message"); return e }},
++			{"context", func() error { _, e := reads.MessageContext(use, []string{"synthetic"}, "message", 1, 1); return e }},
++			{"changes", func() error { _, e := reads.Changes(use, "", true, 1); return e }},
++			{"senders", func() error { _, e := reads.ResolveMessageSenderNames(use, nil); return e }},
++		}
++		for _, op := range operations {
++			if err := op.call(); !errors.Is(err, ErrHandleRevoked) {
++				t.Errorf("%s refusal = %v", op.name, err)
++			}
++		}
++	}
++	if calls != 0 {
++		t.Fatalf("refused reads reached %d view effects", calls)
++	}
++}
++
++func ownedMessageTestApp(t *testing.T) (*App, *ownedProbeWA, context.Context, func(error)) {
++	a, client, ctx, finish := ownedTestApp(t)
++	a.opts.StoreDir = t.TempDir()
++	return a, client, ctx, finish
++}
++
++func TestOwnedMessageChangesRetainsOwnTransaction(t *testing.T) {
++	// The store method begins its own transaction. Wrapping it in ReadView can
++	// deadlock a one-connection pool and cannot provide its claimed snapshot.
++	f, err := parser.ParseFile(token.NewFileSet(), "owned_message_reads.go", nil, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, decl := range f.Decls {
++		fn, ok := decl.(*ast.FuncDecl)
++		if !ok || fn.Name.Name != "Changes" {
++			continue
++		}
++		ast.Inspect(fn.Body, func(n ast.Node) bool {
++			if sel, ok := n.(*ast.SelectorExpr); ok && (sel.Sel.Name == "withView" || sel.Sel.Name == "ReadView") {
++				t.Errorf("Changes must not nest its own transaction in %s", sel.Sel.Name)
++			}
++			return true
++		})
++	}
++	a, _, ctx, finish := ownedMessageTestApp(t)
++	defer finish(nil)
++	reads, err := a.OwnedMessageReads(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	page, err := reads.Changes(ctx, "", true, 1)
++	if err != nil || page.NextCheckpoint == "" {
++		t.Fatalf("synthetic checkpoint = %+v, %v", page, err)
++	}
++}
++
++type ownedSenderCacheProbe struct {
++	WAClient
++	calls  atomic.Int32
++	target types.JID
++}
++
++func (p *ownedSenderCacheProbe) ResolveLIDToPN(context.Context, types.JID) types.JID {
++	p.calls.Add(1)
++	return p.target
++}
++
++func TestOwnedMessageReadsCachesRepeatedSenderAndUnresolvedResult(t *testing.T) {
++	for _, resolved := range []bool{false, true} {
++		name := "unresolved"
++		if resolved {
++			name = "resolved"
++		}
++		t.Run(name, func(t *testing.T) {
++			a, _, ctx, finish := ownedMessageTestApp(t)
++			defer finish(nil)
++			// Only an inert marker enables the pre-existing resolver route. The fake
++			// in-memory WA is already installed, so no session DB/client is opened.
++			if err := os.WriteFile(filepath.Join(a.opts.StoreDir, "session.db"), []byte("synthetic marker"), 0600); err != nil {
++				t.Fatal(err)
++			}
++			p := &ownedSenderCacheProbe{}
++			expected := ""
++			if resolved {
++				p.target = types.NewJID("15550001111", types.DefaultUserServer)
++				if err := a.db.UpsertContact(p.target.String(), "15550001111", "", "", "", ""); err != nil {
++					t.Fatal(err)
++				}
++				if err := a.db.SetAlias([]string{p.target.String()}, "Synthetic Alias"); err != nil {
++					t.Fatal(err)
++				}
++				expected = "Synthetic Alias"
++			}
++			a.wa = p
++			a.sessionState = &sessionObservation{}
++			reads, err := a.OwnedMessageReads(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			lid := types.NewJID("12345", types.HiddenUserServer).String()
++			msgs := []store.Message{{SenderJID: lid}, {SenderJID: " " + lid + " "}, {SenderJID: lid, FromMe: true}, {SenderJID: lid, SenderName: "Existing"}}
++			out, err := reads.ResolveMessageSenderNames(ctx, msgs)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if p.calls.Load() != 1 {
++				t.Fatalf("repeated sender made %d resolver calls", p.calls.Load())
++			}
++			if out[0].SenderName != expected || out[1].SenderName != expected || out[2].SenderName != "" || out[3].SenderName != "Existing" {
++				t.Fatalf("cache changed names: %+v", out)
++			}
++		})
++	}
++}
