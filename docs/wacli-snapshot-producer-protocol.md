@@ -2,6 +2,8 @@
 
 **This is a matched command/consumer proposal, not a working account backup.** Mainframe capture stays blocked. No source databases, credentials, chats or personal media were read; development uses synthetic fixtures only. No Windows validation or complete Linux restoration is claimed.
 
+The [producer lifecycle follow-up](wacli-snapshot-producer-lifecycle.md) documents dependency-owned work that outlives queue/wrapper shutdown, WACLI's existing partial drains, and unresolved media membership. It adds offline counterexamples, not an enabled backend or a new trusted receipt format.
+
 ## What is ready
 
 The [WACLI patch](../patches/wacli/0001-blocked-snapshot-protocol.patch) proposes `wacli store snapshot plan` and a fail-closed `create` command. It is based on upstream commit `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b`, not Mainframe's older Linux target pin. It is a reviewable source proposal: it has not been accepted upstream, released, installed or activated. Applying it does not unlock capture.
