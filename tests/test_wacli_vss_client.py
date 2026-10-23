@@ -18,13 +18,36 @@ class VssClientDevelopmentTests(unittest.TestCase):
         if compiler is None:
             self.skipTest('g++ unavailable; synthetic C++ tests not run')
         with tempfile.TemporaryDirectory(prefix='wacli-vss-synthetic-') as directory:
-            output = Path(directory) / 'fake-tests'
-            subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                            '-pedantic', '-I', str(MODULE / 'include'),
-                            str(MODULE / 'src/orchestrator.cpp'),
-                            str(MODULE / 'tests/fake_tests.cpp'), '-o', str(output)],
-                           check=True, capture_output=True, timeout=60)
-            subprocess.run([str(output)], check=True, capture_output=True, timeout=30)
+            for fixture in ('fake_tests', 'copy_tests'):
+                with self.subTest(fixture=fixture):
+                    output = Path(directory) / fixture
+                    subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                                    '-pedantic', '-I', str(MODULE / 'include'),
+                                    str(MODULE / 'src/orchestrator.cpp'),
+                                    str(MODULE / f'tests/{fixture}.cpp'), '-o', str(output)],
+                                   check=True, capture_output=True, timeout=60)
+                    subprocess.run([str(output)], check=True, capture_output=True, timeout=30)
+
+    def test_actual_native_adapters_with_fake_windows_apis(self):
+        """Execute production adapter code against in-memory Win32/VSS API doubles."""
+        compiler = shutil.which('g++')
+        if compiler is None:
+            self.skipTest('g++ unavailable; native API-double tests not run')
+        cases = {
+            'native_copy_tests': ['native_snapshot_copy.cpp'],
+            'native_backend_tests': ['native_vss_backend.cpp', 'orchestrator.cpp'],
+        }
+        with tempfile.TemporaryDirectory(prefix='wacli-vss-fake-win32-') as directory:
+            for fixture, sources in cases.items():
+                with self.subTest(fixture=fixture):
+                    output = Path(directory) / fixture
+                    subprocess.run([compiler, '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                                    '-D_WIN32', '-I', str(MODULE / 'tests/win32_fake'),
+                                    '-I', str(MODULE / 'include'),
+                                    *(str(MODULE / 'src' / source) for source in sources),
+                                    str(MODULE / f'tests/{fixture}.cpp'), '-o', str(output)],
+                                   check=True, capture_output=True, timeout=60)
+                    subprocess.run([str(output)], check=True, capture_output=True, timeout=30)
 
     def test_native_adapter_cross_compiles_only(self):
         """Check Windows API declarations without running a Windows executable."""
@@ -36,8 +59,9 @@ class VssClientDevelopmentTests(unittest.TestCase):
                             '-I', str(MODULE / 'include'),
                             str(MODULE / 'src/orchestrator.cpp'),
                             str(MODULE / 'src/native_vss_backend.cpp'),
+                            str(MODULE / 'src/native_snapshot_copy.cpp'),
                             str(MODULE / 'tests/link_only.cpp'),
-                            '-lole32', '-lvssapi', '-luuid', '-o',
+                            '-lole32', '-lvssapi', '-luuid', '-ladvapi32', '-o',
                             str(Path(directory) / 'link-only.exe')],
                            check=True, capture_output=True, timeout=60)
 

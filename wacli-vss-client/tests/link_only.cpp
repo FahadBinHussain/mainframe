@@ -5,6 +5,7 @@ int main() {
     // never resolve a root, initialize COM or request any snapshot.
     auto resolver = wacli::vss::make_native_resolver();
     auto backend = wacli::vss::make_native_backend();
-    return resolver && backend ? 0 : 1;
+    auto copier = wacli::vss::make_native_snapshot_copy("");
+    return resolver && backend && copier ? 0 : 1;
 }
 #endif

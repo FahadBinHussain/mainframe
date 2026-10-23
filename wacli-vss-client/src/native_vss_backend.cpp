@@ -172,6 +172,7 @@ class NativeBackend final : public Backend {
     bool com_owned_ = false;
     bool started_ = false;
     bool terminal_ = false;
+    bool snapshot_finished_ = false;
     bool used_ = false;
     std::map<std::string, GUID> snapshots_;
 public:
@@ -245,12 +246,16 @@ public:
         if (FAILED(hr)) { error = failure("QueryStatus", hr); return AsyncState::failed; }
         if (status == VSS_S_ASYNC_PENDING) { Sleep(100); return AsyncState::pending; }
         terminal_ = true;
-        if (status == VSS_S_ASYNC_FINISHED) return AsyncState::finished;
+        if (status == VSS_S_ASYNC_FINISHED) {
+            snapshot_finished_ = true;
+            return AsyncState::finished;
+        }
         if (status == VSS_S_ASYNC_CANCELLED) return AsyncState::cancelled;
         error = failure("VSS operation", status);
         return AsyncState::failed;
     }
     bool verify_snapshot_set(const std::vector<SnapshotInfo>& expected, std::string& error) override {
+        if (!components_ || !started_ || !snapshot_finished_) { error = "snapshot set is not held"; return false; }
         if (expected.size() != snapshots_.size()) { error = "snapshot count mismatch"; return false; }
         for (const auto& snapshot : expected) {
             const auto member = snapshots_.find(snapshot.snapshot_id);
@@ -268,6 +273,26 @@ public:
                 property.m_pwszSnapshotDeviceObject[0] != L'\0';
             if (!valid) { error = "snapshot properties mismatch"; return false; }
         }
+        return true;
+    }
+    bool snapshot_device(const SnapshotInfo& expected, std::string& device, std::string& error) override {
+        if (!components_ || !started_ || !snapshot_finished_) { error = "snapshot set is not held"; return false; }
+        const auto member = snapshots_.find(expected.snapshot_id);
+        if (member == snapshots_.end()) { error = "snapshot membership missing"; return false; }
+        VSS_SNAPSHOT_PROP property{};
+        const HRESULT hr = components_->GetSnapshotProperties(member->second, &property);
+        if (FAILED(hr)) { error = failure("GetSnapshotProperties", hr); return false; }
+        struct Properties { VSS_SNAPSHOT_PROP& p; ~Properties() { VssFreeSnapshotProperties(&p); } } owned{property};
+        if (!IsEqualGUID(property.m_SnapshotId, member->second) ||
+            !IsEqualGUID(property.m_SnapshotSetId, set_) ||
+            property.m_lSnapshotsCount != static_cast<LONG>(snapshots_.size()) ||
+            property.m_eStatus != VSS_SS_CREATED ||
+            volume_text(property.m_pwszOriginalVolumeName) != expected.volume_guid ||
+            !property.m_pwszSnapshotDeviceObject || property.m_pwszSnapshotDeviceObject[0] == L'\0') {
+            error = "snapshot device properties mismatch"; return false;
+        }
+        device = utf8(property.m_pwszSnapshotDeviceObject);
+        if (device.empty()) { error = "snapshot device conversion failed"; return false; }
         return true;
     }
     CleanupResult cleanup(bool finished, std::size_t expected) noexcept override {

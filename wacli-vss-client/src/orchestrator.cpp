@@ -18,10 +18,26 @@ bool canonical_volume(const std::string& s) {
     return true;
 }
 
-Result probe_volumes(const std::vector<std::string>& roots, VolumeResolver& resolver, Backend& backend) {
+namespace {
+Result transact(const std::vector<std::string>& roots, VolumeResolver& resolver, Backend& backend,
+                SnapshotCopy* copy) {
     Result result;
     bool started = false;
     bool finished = false;
+    bool copy_attempted = false;
+    bool copy_verified = false;
+    auto discard = [&]() {
+        if (!copy_attempted) return;
+        copy_attempted = false;
+        std::string ignored;
+        result.staging_discarded = copy->discard(ignored);
+        result.staged_verified = false;
+        result.staging_directory.clear();
+        if (!result.staging_discarded) {
+            result.staging_cleanup_error = "private staging cleanup incomplete";
+            if (result.error.empty()) result.error = result.staging_cleanup_error;
+        }
+    };
     // Backstop also covers allocations/exceptions after StartSnapshotSet.
     struct Owner {
         Backend& backend;
@@ -99,14 +115,42 @@ Result probe_volumes(const std::vector<std::string>& roots, VolumeResolver& reso
             if (!finished && result.error.empty()) result.error = "snapshot creation timeout";
             if (finished && !backend.verify_snapshot_set(result.snapshots, result.error) && result.error.empty())
                 result.error = "snapshot membership verification failed";
+            if (finished && result.error.empty() && copy) {
+                copy_attempted = true; // Includes a stage that throws or fails halfway.
+                if (!copy->stage(result.mappings, result.snapshots, backend, result.error)) {
+                    if (result.error.empty()) result.error = "snapshot inventory or copy failed";
+                } else if (result.error.empty() && !copy->verify(result.error)) {
+                    if (result.error.empty()) result.error = "staged byte verification failed";
+                }
+                if (result.error.empty() && !backend.verify_snapshot_set(result.snapshots, result.error))
+                    result.error = "held snapshot membership verification failed";
+                if (result.error.empty()) {
+                    result.staging_directory = copy->staging_directory();
+                    if (result.staging_directory.empty()) result.error = "private staging identity missing";
+                    else copy_verified = true;
+                }
+            }
         }
+        if (!result.error.empty()) discard();
         owner.release();
         if (!result.cleanup.complete && result.error.empty()) result.error = "snapshot cleanup incomplete";
-        result.ok = finished && result.error.empty() && result.cleanup.complete;
+        result.ok = finished && result.error.empty() && result.cleanup.complete && (!copy || copy_verified);
+        if (!result.ok) discard();
+        result.staged_verified = result.ok && copy_verified;
     } catch (...) {
-        result.error = "development probe exception";
+        result.error = "development snapshot transaction exception";
+        discard();
         owner.release();
     }
     return result;
+}
+}
+
+Result probe_volumes(const std::vector<std::string>& roots, VolumeResolver& resolver, Backend& backend) {
+    return transact(roots, resolver, backend, nullptr);
+}
+Result stage_snapshot_roots(const std::vector<std::string>& roots, VolumeResolver& resolver,
+                            Backend& backend, SnapshotCopy& copy) {
+    return transact(roots, resolver, backend, &copy);
 }
 }
