@@ -55,9 +55,12 @@ class LinuxPackagesTests(unittest.TestCase):
         bitwarden_metadata = patch.object(lp.bitwarden_tools, 'resolve_release', return_value=dict(BITWARDEN_RELEASE))
         bitwarden_metadata.start()
         self.addCleanup(bitwarden_metadata.stop)
-        bun_metadata = patch.object(lp.bun_tools, 'resolve_release', return_value={"version": "1.2.3", "sha256": "d" * 64})
-        bun_metadata.start()
-        self.addCleanup(bun_metadata.stop)
+        native_metadata = patch.object(lp, '_native_release', return_value={"version": "1.2.3", "sha256": "d" * 64})
+        native_metadata.start()
+        self.addCleanup(native_metadata.stop)
+        executables = patch.object(lp.shutil, 'which', side_effect=lambda name: '/synthetic/bin/' + name)
+        executables.start()
+        self.addCleanup(executables.stop)
 
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
@@ -331,13 +334,13 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertEqual(runner.call_count, 2)
 
     def test_unrelated_selection_does_not_claim_helper_coverage(self):
-        plan = self.helper_plan(["7zip19.00-helper", "7zip"])
-        runner = Mock(return_value=subprocess.CompletedProcess([], 0))
-        report = lp.execute(plan, ["example.com/tool"], runner=runner)
+        plan = self.helper_plan(["7zip19.00-helper", "7zip", "curl"])
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, stdout="Candidate: 1.0\n"))
+        report = lp.execute(plan, ["curl"], runner=runner)
         self.assertEqual(report["covered"], {})
         self.assertIn("7zip19.00-helper", report["skipped"])
         self.assertIn("7zip", report["skipped"])
-        self.assertEqual(report["executed"], ["example.com/tool"])
+        self.assertEqual(report["executed"], ["curl"])
 
     def test_full_execution_covers_helper_once_and_keeps_blocker_guard(self):
         plan = self.helper_plan(["7zip19.00-helper", "7zip"])
@@ -392,12 +395,12 @@ class LinuxPackagesTests(unittest.TestCase):
     def test_windows_vendor_and_variant_items_are_explicit_blockers(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
         blocked = {a.name: a.reason for a in plan.actions if a.status == "blocked"}
-        for item in ("ditto", "GPSoftware.DirectoryOpus", "cloudflared", "nodejs-lts", "mpv-git"):
+        for item in ("ditto", "bulk-crap-uninstaller", "GPSoftware.DirectoryOpus", "herdr", "mpv-git", "nuget"):
             self.assertIn(item, blocked); self.assertTrue(blocked[item])
         mapped = {a.name for a in plan.actions if a.status == 'planned'}
-        self.assertTrue({'qbittorrent', 'rclone', 'yt-dlp', 'syncplay'} <= mapped)
+        self.assertTrue({'qbittorrent', 'rclone', 'yt-dlp', 'syncplay', 'cloudflared', 'nodejs-lts'} <= mapped)
         for item in ('pwsh', 'discord'):
-            self.assertIn('No validated Linux', blocked[item])
+            self.assertIn('not validated' if item == 'pwsh' else 'no validated', blocked[item])
 
     def test_pip_freeze_required_for_backup_root_and_windows_lines_blocked(self):
         from tempfile import TemporaryDirectory
@@ -460,8 +463,9 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertIsInstance(next(a for a in invalid if a.name == "Vendor.Valid").name, str)
 
     def test_install_timeout_is_reported_and_never_shells(self):
-        plan = lp.Plan(True, "ubuntu", "x86_64", [lp.Action("pnpm", "tool", ["pnpm", "add", "--global", "--", "tool"])])
+        plan = lp.Plan(True, "ubuntu", "x86_64", [lp.Action("apt", "curl", ["apt-get", "install", "-y", "curl"])])
         def runner(command, **kwargs):
+            if command[0] == "apt-cache": return subprocess.CompletedProcess(command, 0, stdout="Candidate: 1.0\n")
             raise subprocess.TimeoutExpired(command, kwargs["timeout"])
         with self.assertRaisesRegex(RuntimeError, "timed out"):
             lp.execute(plan, runner=runner)
