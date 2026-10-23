@@ -54,3 +54,20 @@ Use the repository-required Go 1.27.3 toolchain, without changing `go.mod`. The 
 One test holds a dependency key-store call across actual WACLI wrapper close, then observes its in-memory session write and the real key guard's fake app-metadata write. It has no SQL container, so it demonstrates missing producer joining, not successful SQL writes after real database closure. The other closes the real dependency queue while a child node handler is blocked. It tests queue-close semantics directly, not a connected websocket. Both are counterexamples: passing tests confirm an unresolved boundary, **not** capture success. Future lifecycle fixes should replace them with positive drain regression tests rather than silently weakening their assertions.
 
 See the [complete producer lifecycle and exact remaining boundary](../../docs/wacli-snapshot-producer-lifecycle.md). Neither these diagnostics nor Mainframe's synthetic media-reference preservation test implements producer admission, dependency draining, media discovery/relocation, capture, or usable account restoration. No Windows run is implied.
+
+## Shutdown and approved-root counterexamples
+
+`0004-synthetic-shutdown-boundary-probes.patch` adds only diagnostic Go tests. Apply it after `0001` and `0003` (with `0002` optional) in a disposable checkout of the exact base above. It reuses `0003`'s fake version-store and bounded channel-wait helper; no runtime code, dependency or build tooling changes:
+
+```sh
+git apply --check /path/to/0004-synthetic-shutdown-boundary-probes.patch
+git apply /path/to/0004-synthetic-shutdown-boundary-probes.patch
+go test ./internal/wa ./cmd/wacli -run '^TestSnapshotShutdownProbe' -count=10 -v -timeout 90s
+go test -race ./internal/wa ./cmd/wacli -run '^TestSnapshotShutdownProbe' -count=10 -v -timeout 90s
+```
+
+Use Go 1.27.3, without editing `go.mod`. The key-share fixture runs the real detached dependency worker and WACLI key guard, then actual wrapper/container close followed by app-database close. A generic synthetic session SQL adapter pauses before or after its SQL effect; it stores no actual session keys and is not a real WhatsApp session schema. The accepted worker subsequently loses its SQL effect or fails its app-metadata continuation. Both disposable databases still pass integrity checks. This models the relative store-close ordering, not a full `App.Close` or connected-client integration test.
+
+The media fixture uses the real CLI path in a separate helper process against disposable synthetic metadata and verified cache bytes. It proves `--read-only media download --output` publishes outside the store despite a held store lock, verified by competing lock acquisition before and after. It opens no WhatsApp connection or session database. No real account, database, credentials, chats or personal media is accessed.
+
+Passing counterexamples mean the audited shutdown/root boundary remains unsafe; they do not certify capture or restore. Replace them with positive contract tests when the corresponding semantics are actually fixed. See [the shutdown feasibility result and complete required contract](../../docs/wacli-snapshot-shutdown-boundary.md). Capture remains disabled and no Windows runtime validation is claimed.

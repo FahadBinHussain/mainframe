@@ -1,0 +1,286 @@
+diff --git a/cmd/wacli/snapshot_shutdown_media_test.go b/cmd/wacli/snapshot_shutdown_media_test.go
+new file mode 100644
+index 0000000..322380b
+--- /dev/null
++++ b/cmd/wacli/snapshot_shutdown_media_test.go
+@@ -0,0 +1,93 @@
++package main
++
++import (
++	"crypto/sha256"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/lock"
++	"github.com/openclaw/wacli/internal/store"
++)
++
++// Diagnostic only: this is deliberately not a snapshot-safety test. It proves
++// that a cache-hit media download is a filesystem writer outside the store
++// lock's scope. Only synthetic metadata/bytes are used, with no real account,
++// credentials, chats, personal media or WhatsApp connection.
++func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
++	storeDir := t.TempDir()
++	sharedRoot := t.TempDir()
++	cachePath := filepath.Join(sharedRoot, "synthetic-cache.bin")
++	outputPath := filepath.Join(sharedRoot, "snapshot-output.bin")
++	payload := []byte("synthetic offline media")
++	hash := sha256.Sum256(payload)
++	if err := os.WriteFile(cachePath, payload, 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	db, err := store.Open(filepath.Join(storeDir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = db.Close() })
++	chat, id := "synthetic@s.whatsapp.net", "offline-media"
++	stamp := time.Unix(1700000000, 0).UTC()
++	if err := db.UpsertChat(chat, "dm", "Synthetic", stamp); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(store.UpsertMessageParams{
++		ChatJID: chat, MsgID: id, SenderJID: chat, Timestamp: stamp,
++		MediaType: "application", MimeType: "application/octet-stream",
++		FileSHA256: hash[:], FileLength: uint64(len(payload)),
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.MarkMediaDownloaded(chat, id, cachePath, stamp); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.Close(); err != nil {
++		t.Fatal(err)
++	}
++
++	lk, err := lock.Acquire(storeDir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lk.Release()
++	assertLocked := func() {
++		t.Helper()
++		contender, err := lock.Acquire(storeDir)
++		if err == nil {
++			_ = contender.Release()
++			t.Fatal("fixture did not retain exclusive store lock")
++		}
++		if !lock.IsLocked(err) {
++			t.Fatalf("expected lock contention, got %v", err)
++		}
++	}
++	assertLocked()
++	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
++		t.Fatalf("fixture output must not exist before CLI publication: %v", err)
++	}
++
++	stdout, stderr, err := runPresenceDelegateHelper(t, []string{
++		"--read-only", "--store", storeDir, "--json", "media", "download",
++		"--chat", chat, "--id", id, "--output", outputPath,
++	})
++	if err != nil {
++		t.Fatalf("offline cache download under held LOCK failed: %v stdout=%s stderr=%s", err, stdout, stderr)
++	}
++	if !strings.Contains(stdout, `"source":"cache"`) {
++		t.Fatalf("output did not report cache source: %s", stdout)
++	}
++	got, err := os.ReadFile(outputPath)
++	if err != nil {
++		t.Fatalf("explicit output was not created while LOCK was held: %v", err)
++	}
++	if string(got) != string(payload) {
++		t.Fatalf("explicit output = %q, want synthetic payload", got)
++	}
++	assertLocked()
++}
+diff --git a/internal/wa/snapshot_shutdown_boundary_test.go b/internal/wa/snapshot_shutdown_boundary_test.go
+new file mode 100644
+index 0000000..7637b56
+--- /dev/null
++++ b/internal/wa/snapshot_shutdown_boundary_test.go
+@@ -0,0 +1,181 @@
++package wa
++
++import (
++	"context"
++	"database/sql"
++	"path/filepath"
++	"strings"
++	"sync"
++	"testing"
++
++	appstore "github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow"
++	"go.mau.fi/whatsmeow/appstate"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/store"
++	"go.mau.fi/whatsmeow/store/sqlstore"
++	"go.mau.fi/whatsmeow/types"
++)
++
++// This adapter records a generic synthetic SQL effect, NOT session credentials
++// or the whatsmeow session schema. Only the container's real Close is exercised.
++type snapshotShutdownKeys struct {
++	store.AppStateSyncKeyStore
++	db          *sql.DB
++	commitFirst bool
++	entered     chan struct{}
++	release     chan struct{}
++	result      chan error
++}
++
++func (s *snapshotShutdownKeys) PutAppStateSyncKey(ctx context.Context, _ []byte, _ store.AppStateSyncKey) error {
++	write := func() error {
++		_, err := s.db.ExecContext(ctx, "UPDATE synthetic_effect SET value=1")
++		return err
++	}
++	var err error
++	if s.commitFirst {
++		err = write()
++	}
++	close(s.entered)
++	<-s.release
++	if !s.commitFirst {
++		err = write()
++	}
++	s.result <- err
++	return err
++}
++
++type snapshotShutdownMetadata struct {
++	AppStateKeyStateStore
++	result chan error
++}
++
++func (s *snapshotShutdownMetadata) ClearAppStateKeyUnavailable(ctx context.Context, account string, id []byte) error {
++	err := s.AppStateKeyStateStore.ClearAppStateKeyUnavailable(ctx, account, id)
++	s.result <- err
++	return err
++}
++
++// Passing means closing SQL is NOT a lossless accepted-work drain. The tests
++// run real detached SDK workers, WACLI's key guard and real SQLite close/errors,
++// but no connected client, paired account, real session schema or personal data.
++func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
++	for _, commitFirst := range []bool{false, true} {
++		name := "accepted_session_effect_lost"
++		if commitFirst {
++			name = "committed_session_effect_metadata_unfinished"
++		}
++		t.Run(name, func(t *testing.T) {
++			root := t.TempDir()
++			sessionPath := filepath.Join(root, "synthetic-session.db")
++			sessionDB, err := sql.Open("sqlite3", sessionPath)
++			if err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { _ = sessionDB.Close() })
++			if _, err := sessionDB.Exec("CREATE TABLE synthetic_effect(value INTEGER NOT NULL); INSERT INTO synthetic_effect VALUES(0)"); err != nil {
++				t.Fatal(err)
++			}
++			appPath := filepath.Join(root, "synthetic-app.db")
++			appDB, err := appstore.Open(appPath)
++			if err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { _ = appDB.Close() })
++			id := []byte("synthetic-id")
++			if err := appDB.MarkAppStateKeyUnavailable(t.Context(), "synthetic", id); err != nil {
++				t.Fatal(err)
++			}
++			keys := &snapshotShutdownKeys{db: sessionDB, commitFirst: commitFirst, entered: make(chan struct{}), release: make(chan struct{}), result: make(chan error, 1)}
++			metadata := &snapshotShutdownMetadata{AppStateKeyStateStore: appDB, result: make(chan error, 1)}
++			versions := &snapshotProbeVersions{remaining: len(appstate.AllPatchNames), done: make(chan struct{})}
++			guard := &appStateKeyGuard{AppStateSyncKeyStore: keys, state: metadata, account: "synthetic"}
++			cli := whatsmeow.NewClient(&store.Device{AppStateKeys: guard, AppState: versions}, nil)
++			wrapper := &Client{client: cli, container: sqlstore.NewWithDB(sessionDB, "sqlite3", nil)}
++			var once sync.Once
++			release := func() { once.Do(func() { close(keys.release) }) }
++			t.Cleanup(func() {
++				release()
++				wrapper.Close()
++				snapshotProbeAwait(t, versions.done, "detached worker cleanup")
++			})
++			ctx, cancel := context.WithCancel(context.Background())
++			cancel()
++			info := &types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true, Sender: types.JID{Device: 1}}}
++			msg := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{AppStateSyncKeyShare: &waE2E.AppStateSyncKeyShare{Keys: []*waE2E.AppStateSyncKey{{
++				KeyID: &waE2E.AppStateSyncKeyId{KeyID: id}, KeyData: &waE2E.AppStateSyncKeyData{KeyData: []byte("synthetic-only")},
++			}}}}}
++			if !cli.DangerousInternals().HandleProtocolMessage(ctx, info, msg) {
++				t.Fatal("synthetic work was not accepted")
++			}
++			snapshotProbeAwait(t, keys.entered, "accepted dependency key operation")
++			closed := make(chan struct{})
++			go func() { wrapper.Close(); close(closed) }()
++			snapshotProbeAwait(t, closed, "real session SQL close while producer is blocked")
++			// Match App.Close's relative order: wrapper/container before app SQL.
++			// This is not a full App.Close or connected-websocket integration test.
++			if err := appDB.Close(); err != nil {
++				t.Fatal(err)
++			}
++			release()
++			snapshotProbeAwait(t, versions.done, "SDK continuation after failed persistence")
++			keyErr := <-keys.result
++			if commitFirst {
++				if keyErr != nil {
++					t.Fatalf("fixture did not commit its first effect: %v", keyErr)
++				}
++				if err := <-metadata.result; err == nil || !strings.Contains(err.Error(), "database is closed") {
++					t.Fatalf("expected closed app SQL to reject accepted continuation, got %v", err)
++				}
++			} else {
++				if keyErr == nil || !strings.Contains(keyErr.Error(), "database is closed") {
++					t.Fatalf("expected closed session SQL to reject accepted effect, got %v", keyErr)
++				}
++				select {
++				case err := <-metadata.result:
++					t.Fatalf("metadata unexpectedly attempted after session failure: %v", err)
++				default:
++				}
++			}
++			// Reopen only for verification after the fixture worker has finished.
++			verify, err := sql.Open("sqlite3", sessionPath)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer verify.Close()
++			var effect int
++			if err := verify.QueryRow("SELECT value FROM synthetic_effect").Scan(&effect); err != nil {
++				t.Fatal(err)
++			}
++			want := 0
++			if commitFirst {
++				want = 1
++			}
++			if effect != want {
++				t.Fatalf("synthetic session effect=%d, want %d", effect, want)
++			}
++			for _, path := range []string{sessionPath, appPath} {
++				checkSQL, err := sql.Open("sqlite3", path)
++				if err != nil {
++					t.Fatal(err)
++				}
++				var integrity string
++				err = checkSQL.QueryRow("PRAGMA integrity_check").Scan(&integrity)
++				closeErr := checkSQL.Close()
++				if err != nil || closeErr != nil || integrity != "ok" {
++					t.Fatalf("fixture integrity=%q, query err=%v, close err=%v", integrity, err, closeErr)
++				}
++			}
++			check, err := appstore.OpenReadOnly(appPath)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer check.Close()
++			if unavailable, err := check.IsAppStateKeyUnavailable(t.Context(), "synthetic", id); err != nil || !unavailable {
++				t.Fatalf("unfinished metadata marker=%v, err=%v", unavailable, err)
++			}
++			t.Logf("both SQL handles closed without draining accepted work: session effect=%d, unavailable marker retained", effect)
++		})
++	}
++}
