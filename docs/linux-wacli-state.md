@@ -139,3 +139,12 @@ Tests use synthetic state and dummy SQLite only, including an uncheckpointed WAL
 that must block. AES round-trip tests need the optional provider and otherwise
 skip explicitly; missing-provider blocking is always tested. Tests do not imply
 a real account/runtime restore or cross-tool 7-Zip interoperability test.
+
+## Coordinated snapshot preparation remains separate
+
+`python3 wacli_state.py plan-coordinated-capture` exposes the new [preparation-only
+snapshot milestone](wacli-snapshot-preparation.md). It reads no source and exits
+3 with capture disabled. The private staged SQLite/candidate-encryption helpers
+are not a live-WAL capture backend or an accepted Windows restore format. The
+clean-store commands and all existing capture/activation restrictions above are
+unchanged; no Windows capture run has been validated.
