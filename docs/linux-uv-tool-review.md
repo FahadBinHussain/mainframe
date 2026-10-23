@@ -4,7 +4,7 @@ Graphifyy supports Linux; lack of a Linux release is not the blocker. The curren
 
 ## What the declarations actually say
 
-Both recovered control manifests declare the string `graphifyy`: `uv-allowed.json` and `uv-tools.json` contain no version. The repository allowlist also uses that string. The Linux planner reads the allowlist, not `uv-tools.json`, and preserves the original unpinned proposal `uv tool install -- graphifyy` as a **blocked** action. It does not silently replace the declaration with today's latest release. Neither allowlists nor backup/export behavior are changed here.
+The external offline recovery's `mainframe-quick.zip` recovered directory contains two control manifests declaring the string `graphifyy`: `uv-allowed.json` and `uv-tools.json`, with no version. These are external recovery evidence, not two tracked files in this checkout; `uv-tools.json` is not checked into the repository. The repository allowlist also uses that string. The Linux planner reads the allowlist, not `uv-tools.json`, and preserves the original unpinned proposal `uv tool install -- graphifyy` as a **blocked** action. It does not silently replace the declaration with today's latest release. Neither allowlists nor backup/export behavior are changed here.
 
 ## Published package and runtime evidence
 
@@ -21,7 +21,7 @@ The [versioned PyPI JSON](https://pypi.org/pypi/graphifyy/0.9.94/json) reports t
 
 The wheel is non-yanked, platform-independent Python code, usable on Linux subject to Python and dependencies. PyPI also publishes an sdist; an ordinary unqualified install is not a wheels-only contract. The digest above is publisher/index metadata, not a locally verified artifact digest or independent signature.
 
-The project's active default branch is **`v8`**, not `main`. Its [packaging source](https://github.com/Graphify-Labs/graphify/blob/v8/pyproject.toml), observed with Git blob `ef5cc326d7f1e1276815bf11a36943d6fbceb504`, agrees with the published version and dependency list. The historical `main` branch reports `0.1.14` and different requirements; it must not be used as the current release manifest. The source declares `setuptools>=83.0.0` / `setuptools.build_meta` for source builds and entry points `graphify` and `graphify-mcp`. Source inspection did not execute either entry point or a build backend.
+The project's default branch was **`v8`**, not `main`, when queried. The observed [immutable packaging-source Git blob](https://api.github.com/repos/Graphify-Labs/graphify/git/blobs/ef5cc326d7f1e1276815bf11a36943d6fbceb504) agrees with published `0.9.94` and its dependency list. Floating branch URLs can change and are not release identities. The historical `main` branch reports `0.1.14` and different requirements; it must not be used as the current release manifest. The observed source declares `setuptools>=83.0.0` / `setuptools.build_meta` for source builds and entry points `graphify` and `graphify-mcp`. Source inspection did not execute either entry point or a build backend.
 
 The base requirements are `networkx>=3.4`, `numpy>=1.21`, `rapidfuzz>=3.0`, conditional `tomli>=2.0.1` for Python <3.11, `tree-sitter>=0.25,<0.26`, and 25 tree-sitter grammar packages. All are ranges, not a complete exact hashed lock. Native dependencies require compatible implementation/ABI/architecture/libc wheel tags, independently of the root's `py3-none-any` tag.
 
