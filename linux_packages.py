@@ -27,6 +27,7 @@ import github_native_linux as github_native_tools
 import node_lts_linux as node_lts_tools
 import opencode2_linux as opencode2_tools
 import pnpm_global_plan as pnpm_global_tools
+import google_workspace_cli_linux as gws_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
 
@@ -112,7 +113,7 @@ class Action:
     status: str = "planned"
     reason: str = ""
     covered_by: str | None = None
-    archive: dict[str, str] | None = None
+    archive: dict[str, Any] | None = None
     sdk_layout: str | None = None
     acceptance_required: bool = False
     dry_plan: dict[str, Any] | None = None
@@ -124,10 +125,11 @@ class Plan:
     architecture: str
     actions: list[Action]
     blockers: list[str] = field(default_factory=list)
+    protected_roots: tuple[str, ...] = ()
     def to_dict(self) -> dict[str, Any]:
         return {"supported": self.supported, "distro": self.distro,
                 "architecture": self.architecture, "actions": [asdict(a) for a in self.actions],
-                "blockers": self.blockers}
+                "blockers": self.blockers, "protected_roots": list(self.protected_roots)}
 
 def _load(path: Path, default: Any) -> Any:
     if not path.is_file():
@@ -227,7 +229,8 @@ def _anydesk_action(architecture: str, blockers: list[str], source: str) -> Acti
                          "unattended password or service configuration is imported. Runtime is untested.")
 
 def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None = None, architecture: str | None = None,
-               *, pnpm_plan_config: dict[str, Any] | None = None) -> Plan:
+               *, pnpm_plan_config: dict[str, Any] | None = None,
+               gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
     supported = distro in {"debian", "ubuntu"} and architecture in {"x86_64", "aarch64"}
@@ -340,6 +343,26 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
     for name in pnpm.get("packages", []):
         reason = f"Invalid pnpm package name: {name!r}"
         if not _safe_arg(name): blockers.append(reason); actions.append(_blocked("pnpm", str(name), reason, "pnpm"))
+        elif name == "@googleworkspace/cli":
+            protected = [str(p.resolve()) for p in (repo, backup_root) if p is not None]
+            try:
+                release = gws_tools.resolve_release(architecture)
+                detail = {"route": "official-native-archive", "protected_roots": protected,
+                          "layout": None, "runtime_tested": False}
+                if gws_root is not None:
+                    _gws_protected_root(gws_root, protected)
+                    detail["layout"] = gws_tools.layout_plan(release, gws_root)
+            except (RuntimeError, OSError, ValueError, TypeError) as exc:
+                reason = f"{name}: official isolated Linux archive validation failed: {exc}"
+                blockers.append(reason)
+                actions.append(_blocked("gws-archive", name, reason, "pnpm"))
+            else:
+                actions.append(Action("gws-archive", name, version=release["version"],
+                                      source="pnpm", archive=release, dry_plan=detail,
+                                      reason="Same Google Workspace CLI via its officially recommended Linux archive; "
+                                             "npm wrapper, Node/pnpm and lifecycle downloader are not used (not skipped scripts). "
+                                             "Future install requires an explicit new --gws-root; no CLI invocation, PATH/profile, "
+                                             "credential import or account activation. Metadata/ELF checks are not runtime validation."))
         elif name == "vercel" and pnpm_plan_config is not None:
             runtime = {a.name: a.archive for a in actions if a.kind == "native-archive" and a.status == "planned"}
             try:
@@ -405,7 +428,17 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
     # Backup roots are data/control metadata, never implicit Python install inputs.
     # Preserve explicit curated repository planning without consuming legacy freezes.
     actions.extend(_requirements_actions(repo, blockers))
-    return Plan(True, distro, architecture, actions, blockers)
+    return Plan(True, distro, architecture, actions, blockers,
+                tuple(str(p.resolve()) for p in (repo, backup_root) if p is not None)
+                if any(a.kind == "gws-archive" for a in actions) else ())
+
+def _gws_protected_root(root: Path, protected: Iterable[str]) -> None:
+    """Reject source/backup overlap in addition to adapter HOME/system guards."""
+    path = Path(root).absolute()
+    for value in (str(Path(__file__).parent.resolve()), *protected):
+        other = Path(value).resolve()
+        if path == other or path in other.parents or other in path.parents:
+            raise ValueError("Google Workspace CLI root overlaps repository or backup source")
 
 def _apt_preflight(actions: list[Action], runner: Any) -> None:
     for action in actions:
@@ -436,7 +469,8 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
             *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False,
             anydesk_terms_accepted: bool = False, anydesk_service_allowed: bool = False,
             bitwarden_cli_root: Path | None = None,
-            native_roots: dict[str, Path] | None = None, bun_root: Path | None = None) -> dict[str, Any]:
+            native_roots: dict[str, Path] | None = None, bun_root: Path | None = None,
+            gws_root: Path | None = None) -> dict[str, Any]:
     if not plan.supported: raise RuntimeError("Unsupported host; no restore commands are permitted")
     actual = host_info()
     if actual != (plan.distro, plan.architecture):
@@ -459,6 +493,24 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     chosen = [a for a in plan.actions if a.status == "planned" and
               (not selected_set or a.name in selected_set or
                (a.kind in {"apt", "anydesk-deb"} and a.name in coverage_targets))]
+    for action in (a for a in chosen if a.kind == "gws-archive"):
+        if action.name != "@googleworkspace/cli":
+            raise RuntimeError("Google Workspace archive does not match selected product")
+        detail = action.dry_plan
+        context = plan.protected_roots
+        if (not isinstance(context, tuple) or not context or
+                any(not isinstance(p, str) or not p.startswith("/") or str(Path(p).resolve()) != p for p in context) or
+                not isinstance(detail, dict) or detail.get("route") != "official-native-archive" or
+                detail.get("protected_roots") != list(context) or "layout" not in detail or
+                not isinstance(action.archive, dict) or action.version != action.archive.get("version")):
+            raise RuntimeError("Google Workspace CLI requires complete, matching planner provenance and source protections")
+        if gws_root is None:
+            raise RuntimeError("Google Workspace CLI installation requires --gws-root pointing to a new directory")
+        layout = detail["layout"]
+        if layout is not None and (not isinstance(layout, dict) or layout.get("root") != str(Path(gws_root))):
+            raise RuntimeError("Google Workspace CLI execution root differs from the preview; re-plan the destination")
+        _gws_protected_root(gws_root, context)
+        gws_tools.validate_install(action.archive, gws_root)
     for action in (a for a in chosen if a.kind == "anydesk-deb"):
         anydesk_tools.validate_install(action.archive, accepted_terms=anydesk_terms_accepted,
                                        allow_service=anydesk_service_allowed)
@@ -493,10 +545,16 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
                 (not isinstance(action.archive, dict) or action.archive.get("name") != action.name)):
             raise RuntimeError(f"Native artifact product does not match selected package: {action.name}")
         _native_adapter(action.name).validate_install(action.archive, root)
+    if any(a.kind == "gws-archive" for a in chosen):
+        gws_path = Path(gws_root).absolute()
+        for raw in native_destinations:
+            other = Path(raw).absolute()
+            if gws_path == other or gws_path in other.parents or other in gws_path.parents:
+                raise RuntimeError("Google Workspace CLI and other packages must use non-overlapping installation roots")
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
     unsupported_commands = [a.name for a in chosen if a.kind not in {
-        "apt", "native-archive", "bun-archive", "bitwarden-cli", "anydesk-deb", "android-sdk-archive"}]
+        "apt", "native-archive", "bun-archive", "bitwarden-cli", "anydesk-deb", "android-sdk-archive", "gws-archive"}]
     if unsupported_commands:
         raise RuntimeError("Unvalidated command/runtime/destination preflight prevents changes: " + "; ".join(unsupported_commands))
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
@@ -512,6 +570,8 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
                 bitwarden_tools.install_release(action.archive, bitwarden_cli_root)
             elif action.kind in {"native-archive", "bun-archive"}:
                 _native_adapter(action.name).install_release(action.archive, native_roots[action.name])
+            elif action.kind == "gws-archive":
+                gws_tools.install_release(action.archive, gws_root)
             else:
                 result = runner(action.command, check=False, shell=False, timeout=300)
                 code = getattr(result, "returncode", result if isinstance(result, int) else 0)
@@ -545,6 +605,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="new explicit Bun directory; compatible alias for --native-root bun=PATH")
     ap.add_argument("--native-root", action="append", default=[], metavar="NAME=PATH",
                     help="explicit new root for one native package; repeat per product; no default home or PATH edits")
+    ap.add_argument("--gws-root", type=Path,
+                    help="explicit new Google Workspace CLI root; dry-plans isolated binary/state paths; never invokes npm or gws")
     ap.add_argument("--pnpm-plan-config", type=Path,
                     help="JSON containing explicit isolated roots for Vercel metadata-only planning; never enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
@@ -565,7 +627,7 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"Cannot read pnpm dry-plan config: {exc}")
         if not isinstance(options["pnpm_plan_config"], dict):
             ap.error("pnpm dry-plan config must be a JSON object")
-    plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, **options)
+    plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:
             print(json.dumps({"plan": plan.to_dict(), "error": "blockers present; use --select for an explicitly partial restore"}, indent=2)); return 2
@@ -575,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
                              anydesk_terms_accepted=args.anydesk_terms_accepted,
                              anydesk_service_allowed=args.anydesk_service_allowed,
                              bitwarden_cli_root=args.bitwarden_cli_root,
-                             native_roots=native_roots, bun_root=args.bun_root)
+                             native_roots=native_roots, bun_root=args.bun_root, gws_root=args.gws_root)
             output = {"plan": plan.to_dict(), "report": report}
         except PackageExecutionError as exc:
             print(json.dumps({"plan": plan.to_dict(), "error": str(exc), "report": exc.report}, indent=2)); return 1

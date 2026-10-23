@@ -109,7 +109,11 @@ aarch64** only. It accounts for every allowlisted item; unsupported software,
 unvalidated vendor sources, and variant/version drift are explicit blockers.
 APT executables and candidates are checked before executing any selected install.
 Global pnpm/uv/Go installs and Python rebuilds remain blocked until runtime/build,
-install-script policy and isolated-destination preflights are validated. The
+install-script policy and isolated-destination preflights are validated.
+`@googleworkspace/cli` has a separate [official native archive adapter](docs/linux-google-workspace-cli.md):
+no npm wrapper, Node/pnpm, downloader scripts or CLI invocation; future installation
+requires an explicit new `--gws-root`. Account/Windows-state activation is excluded.
+The
 automatic frozen Python snapshot is retired: backup no longer creates
 `pip-freeze.txt`, and Windows Full no longer installs it. A legacy
 `pip-freeze.txt`, when present in an older backup, remains restore control
@@ -252,6 +256,16 @@ Supplying roots alone is still a dry run. No PATH/profile, service, account,
 Windows-state, npm postinstall or automatic runtime activation is included.
 
 Bun also retains `--bun-root` as a compatible alias for `--native-root bun=PATH`.
+
+**Google Workspace CLI.** The unchanged `@googleworkspace/cli` allowlist entry
+resolves the registry's exact stable version to its official Linux GNU x86_64
+archive, matching the release asset digest and verified companion checksum.
+`python3 ./linux_packages.py --gws-root /absolute/new/gws-root` only previews
+isolated binary, HOME/config/cache/temp/work paths. Node/pnpm are explicitly not
+required for this native route; it is not a script-suppressed npm install.
+A future separately authorized partial install needs `--execute --select @googleworkspace/cli`
+as well as the new root. No binary execution, PATH/profile, account, credentials
+or Windows-state activation is included. See the [source and isolation contract](docs/linux-google-workspace-cli.md).
 
 Selected package installs are sequential, not transactional. Terms, destination,
 and APT metadata checks happen before installs, but a later download or install
