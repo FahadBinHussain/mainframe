@@ -47,3 +47,5 @@ Synthetic fixtures cover WAL-derived complete databases alongside unchanged raw 
 **No Windows run has occurred.** Windows ACL/share modes, `LockFileEx`, VSS coordination, actual multi-writer boundaries, disk exhaustion and Windows end-to-end publication still require the acceptance tests in [the capture safety contract](wacli-windows-capture-safety.md). The preparation receipt is not evidence that those tests or a source boundary have passed.
 
 After safe capture exists, full Windows-to-Linux restoration still needs the [separate schema, profile-selection, external-media relocation, activation and usability work](linux-wacli-windows-parity.md). `complete` remains false.
+
+The isolated [Windows-client VSS requester experiment](wacli-windows-client-vss.md) prepares a native single-set API path for review. It is not connected to capture, does not provide a held WACLI boundary, and does not satisfy any real-Windows acceptance gate. Writerless VSS remains crash-consistent only; the full producer drain is still required for an application-consistency claim.
