@@ -14,6 +14,8 @@ import tempfile
 import unicodedata
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from wacli_snapshot_protocol import PROTOCOL
+
 PREPARATION_PREFIX = 'WacliPreparation/v1/'
 
 
@@ -30,6 +32,9 @@ def capture_status():
                      'windows-capture-acceptance-run-required'],
         'preparation': 'private-staged-sqlite-and-encryption-only',
         'documentation': 'docs/wacli-snapshot-preparation.md',
+        'producer_protocol': PROTOCOL,
+        'producer_inspection': 'stdin-only-informational-never-authorizes-capture',
+        'producer_execution': False,
     }
 
 
@@ -255,7 +260,21 @@ def main(argv=None):
     commands.add_parser('plan', help='fixed capability report; reads no files')
     command = commands.add_parser('capture', help='BLOCKED: no verified boundary backend')
     command.add_argument('--source-root', required=True); command.add_argument('--destination', required=True)
+    commands.add_parser('check-producer', help='inspect bounded capability JSON on stdin; never enables capture')
     args = parser.parse_args(argv)
+    if args.operation == 'check-producer':
+        from wacli_snapshot_protocol import MAX_CAPABILITY_BYTES, ProducerProtocolError, inspect_producer
+        try:
+            report = inspect_producer(sys.stdin.buffer.read(MAX_CAPABILITY_BYTES + 1))
+        except (ProducerProtocolError, OSError) as error:
+            diagnostic = (str(error) if isinstance(error, ProducerProtocolError)
+                          else 'WACLI producer capability input unavailable.')
+            print(json.dumps({'status': 'blocked', 'capture_enabled': False,
+                              'complete': False, 'publishable': False,
+                              'source_read': False, 'snapshot_consumed': False,
+                              'error': diagnostic}, sort_keys=True))
+            return 2
+        print(json.dumps(report, sort_keys=True)); return 3
     report = capture(args.source_root, args.destination) if args.operation == 'capture' else capture_status()
     print(json.dumps(report, sort_keys=True)); return 3
 
