@@ -80,9 +80,11 @@ def verify(source, full_gate=False):
             run(['go', 'test', *race, './cmd/wacli', './internal/app', './internal/wa',
                  './internal/store', './internal/mediamembership',
                  '-run', manifest['wacli_test_pattern'], '-count=10', '-timeout=180s'], tree, env=env)
-            run(['go', 'test', *race, '.', '-run', manifest['dependency_test_pattern'],
+            run(['go', 'test', *race, '.', './socket', '-run', manifest['dependency_test_pattern'],
                  '-count=10', '-timeout=180s'], dependency, env=env)
         if full_gate:
+            run(['go', 'test', './...', '-timeout=180s'], dependency, env=env)
+            run(['go', 'vet', './...'], dependency, env=env)
             for command in ('format:check', 'lint', 'lint:deadcode', 'test', 'build', 'docs:site'):
                 run(['pnpm', command], tree, env=env)
         plan = json.loads(run(['go', 'run', './cmd/wacli', 'store', 'snapshot', 'plan'],
