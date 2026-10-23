@@ -1,0 +1,159 @@
+Subject: LOCAL SOURCE PROPOSAL: per-callback lifecycle lineage
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/callback_lifecycle_test.go b/callback_lifecycle_test.go
+index 14b979e..13c387b 100644
+--- a/callback_lifecycle_test.go
++++ b/callback_lifecycle_test.go
+@@ -77,0 +78,45 @@ func TestLifecycleContextCallbackErrorsAndPanicsSticky(t *testing.T) {
++func TestLifecycleCallbackContextFinishesPerCallback(t *testing.T) {
++	cli := syntheticLifecycleClient()
++	returned := make(chan context.Context, 1)
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	cli.AddEventHandlerWithContext(func(ctx context.Context, _ any) error {
++		returned <- ctx
++		return nil
++	})
++	cli.AddEventHandlerWithContext(func(context.Context, any) error {
++		close(entered)
++		<-release
++		return nil
++	})
++	done := make(chan bool, 1)
++	go func() { done <- cli.dispatchEventContext(context.Background(), "synthetic") }()
++	ctx := <-returned
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("second callback did not start")
++	}
++	if err := cli.launchLifecycle(ctx, func(context.Context) error { t.Error("escaped callback context admitted work"); return nil }); !errors.Is(err, ErrLifecycleScopeDone) {
++		t.Fatalf("escaped context admission=%v", err)
++	}
++	for _, begin := range []func(context.Context) (*LifecycleScope, error){cli.BeginScope, cli.BeginLifecycleScope} {
++		if scope, err := begin(ctx); !errors.Is(err, ErrLifecycleScopeDone) {
++			if scope != nil {
++				scope.Finish(nil)
++			}
++			t.Errorf("escaped callback context reopened public root admission: %v", err)
++		}
++	}
++	if _, scope, err := cli.BeginOperation(ctx); !errors.Is(err, ErrLifecycleScopeDone) {
++		if scope != nil {
++			scope.Finish(nil)
++		}
++		t.Errorf("escaped callback context reopened operation admission: %v", err)
++	}
++	close(release)
++	if <-done {
++		t.Fatal("callbacks unexpectedly failed")
++	}
++}
++
+diff --git a/client.go b/client.go
+index b45a858..73180a3 100644
+--- a/client.go
++++ b/client.go
+@@ -1085,0 +1086,39 @@ func (cli *Client) sendNode(ctx context.Context, node waBinary.Node) error {
++// dispatchEventHandler runs one callback under a distinct child scope. The
++// callback context is deliberately finished on every return path, so a context
++// retained by a callback cannot register work after that callback has returned.
++func (cli *Client) dispatchEventHandler(parent *LifecycleScope, ctx context.Context, handler wrappedEventHandler, evt any) (failed bool) {
++	callback, err := parent.Child()
++	if err != nil {
++		cli.lifecycle.recordError(err)
++		return true
++	}
++	ctx = cli.lifecycleContext(ctx, callback)
++	var callbackErr error
++	defer func() {
++		if recovered := recover(); recovered != nil {
++			if cause, ok := recovered.(error); ok {
++				callbackErr = fmt.Errorf("event handler panic: %w", cause)
++			} else {
++				callbackErr = fmt.Errorf("event handler panic: %v", recovered)
++			}
++			cli.Log.Errorf("Event handler panicked: %v\n%s", recovered, debug.Stack())
++			failed = true
++		}
++		if callbackErr != nil {
++			cli.lifecycle.recordError(callbackErr)
++			failed = true
++		}
++		callback.Finish(callbackErr)
++	}()
++	if handler.ctxfn != nil {
++		callbackErr = handler.ctxfn(ctx, evt)
++		if callbackErr != nil {
++			failed = true
++		}
++	} else if handler.fn != nil && !handler.fn(evt) {
++		callbackErr = fmt.Errorf("event handler rejected %T", evt)
++		failed = true
++	}
++	return failed
++}
++
+@@ -1100,13 +1138,0 @@ func (cli *Client) dispatchEventContext(ctx context.Context, evt any) (failed bo
+-	defer func() {
+-		if recovered := recover(); recovered != nil {
+-			var err error
+-			if cause, ok := recovered.(error); ok {
+-				err = fmt.Errorf("event handler panic: %w", cause)
+-			} else {
+-				err = fmt.Errorf("event handler panic: %v", recovered)
+-			}
+-			cli.lifecycle.recordError(err)
+-			cli.Log.Errorf("Event handler panicked: %v\n%s", recovered, debug.Stack())
+-			failed = true
+-		}
+-	}()
+@@ -1114,7 +1140 @@ func (cli *Client) dispatchEventContext(ctx context.Context, evt any) (failed bo
+-		if handler.ctxfn != nil {
+-			if err := handler.ctxfn(ctx, evt); err != nil {
+-				cli.lifecycle.recordError(err)
+-				return true
+-			}
+-		} else if handler.fn != nil && !handler.fn(evt) {
+-			cli.lifecycle.recordError(fmt.Errorf("event handler rejected %T", evt))
++		if cli.dispatchEventHandler(op, ctx, handler, evt) {
+diff --git a/lifecycle.go b/lifecycle.go
+index 4edb9b4..47bab99 100644
+--- a/lifecycle.go
++++ b/lifecycle.go
+@@ -74,2 +74,7 @@ var ErrLifecycleScopeDone = errors.New("whatsmeow lifecycle scope is finished")
+-// BeginLifecycleScope admits a root operation. The caller must call Finish,
+-// including on launch failure, and should use Child for causal descendants.
++// ErrLifecycleForeignScope reports a context carrying a scope owned by another client.
++// Strict APIs refuse this lineage rather than silently creating an unrelated root.
++var ErrLifecycleForeignScope = errors.New("whatsmeow lifecycle scope belongs to another client")
++
++// BeginLifecycleScope admits a root only when no lineage is supplied. A context
++// carrying accepted lineage derives a child; stale or foreign lineage cannot be
++// discarded to reopen root admission. The caller must always call Finish.
+@@ -80,0 +86,6 @@ func (cli *Client) BeginLifecycleScope(ctx context.Context) (*LifecycleScope, er
++		if parent, ok := ctx.Value(lifecycleContextKey{}).(*LifecycleScope); ok && parent != nil {
++			if parent.owner != cli.lifecycle {
++				return nil, ErrLifecycleForeignScope
++			}
++			return parent.Child()
++		}
+diff --git a/lifecycle_workers.go b/lifecycle_workers.go
+index 17aacdf..4f19568 100644
+--- a/lifecycle_workers.go
++++ b/lifecycle_workers.go
+@@ -22 +22,4 @@ func (cli *Client) scopeForContext(ctx context.Context) (*LifecycleScope, error)
+-		if parent, ok := ctx.Value(lifecycleContextKey{}).(*LifecycleScope); ok && parent != nil && parent.owner == cli.lifecycle {
++		if parent, ok := ctx.Value(lifecycleContextKey{}).(*LifecycleScope); ok && parent != nil {
++			if parent.owner != cli.lifecycle {
++				return nil, ErrLifecycleForeignScope
++			}
+diff --git a/lifecycle_workers_test.go b/lifecycle_workers_test.go
+index ef09477..bf58793 100644
+--- a/lifecycle_workers_test.go
++++ b/lifecycle_workers_test.go
+@@ -176 +176 @@ func TestLifecycleLaunchPanicAndForeignContextFailClosed(t *testing.T) {
+-	if err := cli.launchLifecycle(ctx, func(context.Context) error { t.Error("foreign scope reopened owner"); return nil }); !errors.Is(err, ErrLifecycleSealed) {
++	if err := cli.launchLifecycle(ctx, func(context.Context) error { t.Error("foreign scope reopened owner"); return nil }); !errors.Is(err, ErrLifecycleForeignScope) {
