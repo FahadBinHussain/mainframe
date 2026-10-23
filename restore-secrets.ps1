@@ -11,6 +11,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Report-WacliPayloadPreserved {
+    param([Parameter(Mandatory)][string]$ArchivePath)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = $null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+        $found = @($zip.Entries | Where-Object { $_.FullName -replace '\\','/' -match '(?i)(^|/)NativeState/wacli(/|$)' })
+        if ($found.Count -gt 0) {
+            Write-Warning 'Preserved WACLI NativeState/wacli payload detected; it is Linux-native state and is not activated or remapped into Windows accounts.'
+        }
+    } finally { if ($zip) { $zip.Dispose() } }
+}
+
 function Resolve-TemplateString {
     param([AllowNull()][string]$Value)
 
@@ -88,6 +101,7 @@ if (-not (Test-Path -LiteralPath $ManifestPath)) {
 if (-not (Test-Path -LiteralPath $ArchivePath)) {
     throw "Missing secrets archive: $ArchivePath"
 }
+Report-WacliPayloadPreserved -ArchivePath $ArchivePath
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $enabled = @($manifest.items | Where-Object { -not $_.Disabled })

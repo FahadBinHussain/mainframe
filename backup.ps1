@@ -165,6 +165,27 @@ function Get-MainframeAccountRoot {
     Join-Path $env:APPDATA "mainframe\accounts\$Service"
 }
 
+function Assert-WindowsWhatsappCaptureSafe {
+    param([Parameter(Mandatory)][string]$Source, [string]$Context = 'Windows account capture')
+    # Windows WhatsApp is a live SQLite tree, not a WACLI migration target.
+    # Inspect names only and block unless a consistent snapshot is proven.
+    $roots = @()
+    if ((Split-Path -Leaf $Source) -ieq 'whatsapp') {
+        $roots += $Source
+    } elseif (Test-Path -LiteralPath $Source -PathType Container) {
+        $roots += @(Get-ChildItem -LiteralPath $Source -Directory -Force -ErrorAction Stop |
+            Where-Object { $_.Name -ieq 'whatsapp' } | Select-Object -ExpandProperty FullName)
+    }
+    foreach ($root in $roots) {
+        $sqliteFiles = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop |
+            Where-Object { $_.Name -match '(?i)(-wal|-shm|-journal)$|\.(sqlite3?|db)(-wal|-shm|-journal)?$' })
+        if ($sqliteFiles.Count -gt 0) {
+            $names = ($sqliteFiles | Select-Object -First 6 -ExpandProperty Name) -join ', '
+            throw "$Context blocked for Windows WhatsApp subtree '$root': live SQLite state is not copied (metadata detected: $names). A consistent snapshot is required; no Windows-to-Linux/WACLI remap is attempted."
+        }
+    }
+}
+
 function Write-NativePersistArchive {
     param(
         [object[]]$Apps,
@@ -201,6 +222,7 @@ function Write-NativePersistArchive {
                     continue
                 }
 
+                Assert-WindowsWhatsappCaptureSafe -Source $source -Context "native persist $($app.Name)"
                 $destination = Join-Path $nativeDir $entry.ArchivePath
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
 
@@ -250,6 +272,7 @@ function Write-ToolSecretsArchive {
             Write-Warning "Secret path not found, skipping $($item.Name): $source"
             continue
         }
+        Assert-WindowsWhatsappCaptureSafe -Source $source -Context "secret $($item.Name)"
         $dest = Join-Path $secretsDir $item.ArchivePath
         Write-Host "Copying secret: $($item.Name)"
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
