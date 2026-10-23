@@ -22,3 +22,18 @@ The producer changes passed the complete repository gate using the already-prese
 A compiled CLI was also exercised against a temporary synthetic HOME and source containing only dummy files. Its plan bytes were consumed by Mainframe's inspector, which returned blocked exit 3 with no authority enabled. Create and override flags refused; synthetic file metadata and the empty temporary HOME remained unchanged. This tests command/consumer interoperability and refusal, not capture-boundary correctness or a usable account restoration.
 
 All tests use synthetic/offline fixtures. Windows lock cross-compilation, if performed by the repository test script, is not a Windows runtime test. No account backup/restore or Windows validation is implied. See [the matched protocol and remaining restoration gates](../../docs/wacli-snapshot-producer-protocol.md).
+
+## Synthetic writer-boundary diagnostic
+
+`0002-synthetic-writer-boundary-probe.patch` adds only a diagnostic Go test. Apply it after `0001` in a disposable checkout of the exact base above, never an installed tree:
+
+```sh
+git apply --check /path/to/0002-synthetic-writer-boundary-probe.patch
+git apply /path/to/0002-synthetic-writer-boundary-probe.patch
+go test ./cmd/wacli -run '^TestSnapshotBoundaryProbe' -count=10 -v -timeout 60s
+go test -race ./cmd/wacli -run '^TestSnapshotBoundaryProbe' -count=10 -v -timeout 60s
+```
+
+Use the repository-required Go toolchain, without weakening its version declaration. The test uses a temporary local IPC endpoint and an inert channel-gated executor; it does not construct an account app or open databases. It demonstrates that the current delegate stop returns while an accepted executor is still running. A passing probe confirms a missing handler join, **not** a safe snapshot boundary. If shutdown semantics are fixed, this counterexample should fail and be replaced by a proper drain regression as part of that fix. Windows runtime behavior is not covered.
+
+See [the precise source audit and Mainframe counterexamples](../../docs/wacli-snapshot-writer-boundary.md). Neither patch enables capture, and Mainframe never applies or runs either one automatically.
