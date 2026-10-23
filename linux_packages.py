@@ -375,14 +375,17 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                 blockers.append(reason)
                 actions.append(_blocked("pnpm", name, reason, "pnpm"))
             else:
-                reason = f"{name}: isolated metadata dry plan ready; installation remains blocked: " + "; ".join(detail["execution_blockers"])
+                reason = f"{name}: supported Linux Node CLI; metadata inventoried, not install-ready: " + "; ".join(detail["execution_blockers"])
                 blockers.append(reason)
                 actions.append(Action("pnpm", name, version=detail["package"]["version"],
                                       status="blocked", reason=reason, source="pnpm", dry_plan=detail))
         else:
             reason = f"{name}: pnpm/Node runtime, required install-script policy and explicit isolated global destination preflight are not validated; no live-home global install."
             if name == "vercel":
-                reason += " Supply --pnpm-plan-config with explicit isolated roots for a metadata-only Node CLI plan."
+                reason = ("vercel: supported Linux Node CLI; no reviewed pnpm-resolved full dependency/build closure "
+                          "to finalize exact-version lifecycle approval. Supply --pnpm-plan-config with explicit "
+                          "isolated roots for the metadata inventory and future runtime/path/executor gates; "
+                          "no package-manager execution or live-home global install.")
             blockers.append(reason)
             actions.append(Action("pnpm", name, ["pnpm", "add", "--global", "--", name], status="blocked", reason=reason, source="pnpm"))
     for item in uv.get("packages", []):
