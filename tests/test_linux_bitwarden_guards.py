@@ -4,6 +4,7 @@ import io
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 import urllib.request
@@ -17,6 +18,7 @@ import test_linux_bitwarden as fixtures
 from test_linux_bitwarden import Response, elf_fixture
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux filesystem publication fixtures")
 class BitwardenGuardTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -24,6 +26,13 @@ class BitwardenGuardTests(unittest.TestCase):
         self.parent = Path(temp.name)
         self.root = self.parent / "new"
         self.fixture = fixtures.BitwardenTests().release
+        patches = [patch.object(bw.platform, "system", return_value="Linux"),
+                   patch.object(bw.platform, "machine", return_value="x86_64"),
+                   patch.object(bw.platform, "libc_ver", return_value=("glibc", "2.0")),
+                   patch.object(lp, "host_info", return_value=("ubuntu", "x86_64"))]
+        for item in patches:
+            item.start()
+        self.addCleanup(lambda: [item.stop() for item in reversed(patches)])
 
     def metadata(self, version="3.4.5"):
         base = f"https://github.com/bitwarden/clients/releases/download/cli-v{version}/"
@@ -154,6 +163,25 @@ class BitwardenGuardTests(unittest.TestCase):
             bw._publish_noreplace(stage, self.root)
         self.assertEqual(sentinel.read_text(), "original")
         self.assertTrue(stage.is_dir())
+
+    @unittest.skipUnless(os.name == "posix" and Path("/proc/self/fd").is_dir(), "Linux procfs publication fixture")
+    def test_parent_path_substitution_cannot_redirect_publication(self):
+        parent = self.parent / "owned"
+        parent.mkdir()
+        moved = self.parent / "moved"
+        elsewhere = self.parent / "elsewhere"
+        elsewhere.mkdir()
+        payload = self.archive(elf_fixture())
+
+        def replace_parent(*args, **kwargs):
+            parent.rename(moved)
+            parent.symlink_to(elsewhere, target_is_directory=True)
+            return Response(payload)
+
+        with patch.object(bw, "_open", side_effect=replace_parent):
+            bw.install_release(self.fixture(payload), parent / "new")
+        self.assertEqual((moved / "new" / "bw").read_bytes(), elf_fixture())
+        self.assertEqual(list(elsewhere.iterdir()), [])
 
     def test_mixed_selection_preflight_blocks_every_install(self):
         plan = lp.Plan(True, "ubuntu", "x86_64", [

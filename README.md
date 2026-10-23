@@ -197,7 +197,10 @@ python3 ./linux_packages.py --execute --select bitwarden-cli \
 
 The native binary needs no Node/npm bootstrap. The adapter verifies the archive
 size and SHA-256 before accepting its executable; existing destinations and
-unsafe archives are refused. It does not change PATH or shell profiles, log in,
+unsafe archives are refused. Installation requires glibc, Linux `renameat2`,
+`/proc/self/fd`, and ancestors owned by root or the installing user. Staging and
+publication are anchored to an opened parent directory, not a later path lookup.
+It does not change PATH or shell profiles, log in,
 unlock a vault, read credentials, or import Windows Bitwarden state. Invoke
 `/path/to/new/bitwarden-cli/bw` manually after reviewing the installation.
 [Bitwarden's checksum guidance](https://bitwarden.com/help/security-faqs/)
