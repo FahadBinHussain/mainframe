@@ -1220,34 +1220,8 @@ foreach ($pkg in $uvPackages) {
 }
 Write-Host "Done: $($uvPackages.Count) uv tools"
 
-Update-Step 'Installing pip packages'
-# pip-freeze.txt (written by backup.ps1) is the ONLY pip manifest: site-packages is no
-# longer shipped in the backup, so a missing/empty file must abort the restore loudly
-# instead of leaving 150+ packages silently absent.
-$pipFreezeFile = Join-Path $BackupRoot 'pip-freeze.txt'
-if (-not (Test-Path -LiteralPath $pipFreezeFile)) {
-    throw "pip-freeze.txt missing from backup root: $pipFreezeFile - site-packages is not shipped, so pip packages cannot be restored from this backup (pre-2026-10-03 backup format?)"
-}
-$pipCmd = Get-Command pip -ErrorAction SilentlyContinue
-if (-not $pipCmd) {
-    throw 'pip command was not found after Scoop restore.'
-}
-$pipPackages = @(Get-Content -LiteralPath $pipFreezeFile | Where-Object { $_ -match '^[A-Za-z0-9]' })
-if ($pipPackages.Count -eq 0) {
-    throw "pip-freeze.txt has no package lines: $pipFreezeFile - refusing to continue with zero pip packages"
-}
-# the file starts with --extra-index-url for torch's +cpu wheels; pip reads that from the
-# requirements file, no flag needed here. one invocation, real exit code check.
-Write-Host "Installing $($pipPackages.Count) pip packages from pip-freeze.txt"
-$savedEap = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-& $pipCmd.Source install -r $pipFreezeFile 2>&1 | Out-Host
-$ErrorActionPreference = $savedEap
-if ($LASTEXITCODE -ne 0) {
-    throw "pip install -r pip-freeze.txt failed (exit $LASTEXITCODE) - see the pip output above for the failing package"
-}
-Write-Host "Done: $($pipPackages.Count) pip packages"
-
+# Legacy pip-freeze.txt is inert restore metadata, not user data or an install
+# input. Python/pip tooling remains available for explicit future package installs.
 Update-Step 'Restoring OBS Studio settings'
 $obsBackupDir = Join-Path $BackupRoot 'obs-studio'
 if (Test-Path -LiteralPath $obsBackupDir) {

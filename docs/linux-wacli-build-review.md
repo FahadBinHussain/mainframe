@@ -39,4 +39,11 @@ No actual root paths, compiler/toolchain provenance or verified complete depende
 
 ## Next item (not reviewed here)
 
-The next exact blocker outside Scoop/WinGet is `pip-freeze.txt`, source the recovered control manifest, currently blocked because it includes Windows-only requirements (including pywin32 when present). Python translation/environment work is outside this WACLI-only change.
+**Superseded historical context:** an earlier review treated `pip-freeze.txt`
+from the recovered control manifest as the next exact blocker because it could
+include Windows-only requirements (including pywin32). The automatic frozen
+snapshot is retired: legacy `pip-freeze.txt` is restore control metadata,
+excluded from user data, and ignored by the Linux planner with no action or
+blocker. Python translation/environment work remains outside this WACLI-only
+change; explicit repository requirements are planning-only and remain blocked
+pending preflight.

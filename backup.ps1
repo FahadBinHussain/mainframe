@@ -377,11 +377,9 @@ if ($SkipPersist) {
                 # Ditto's clip DB can be huge (2GB+); keep settings, skip the DB.
                 Invoke-RobocopyLockedAware -RobocopyArgs @($item.FullName, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XF', 'Ditto.db') -Context "persist ditto"
             } elseif ($item.Name -eq 'python312') {
-                # site-packages is pip-reinstallable (restore runs `pip install -r
-                # pip-freeze.txt`) and was 428 MB of the 491 MB persist zip, so it is NOT
-                # shipped. it holds no user data: 0 editable/local installs (no
-                # direct_url.json), only pip-generated .pth files. Scripts stays - entry
-                # points incl. pip.exe are what the restore pip step needs.
+                # Installed site-packages remain excluded; automatic Python package
+                # snapshots/restores are retired. Keep Scripts and Python/pip tooling
+                # available for separately reviewed, explicit future installs.
                 Invoke-RobocopyLockedAware -RobocopyArgs @($item.FullName, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', 'site-packages') -Context "persist python312"
             } else {
                 Invoke-RobocopyLockedAware -RobocopyArgs @($item.FullName, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL') -Context "persist $($item.Name)"
@@ -538,19 +536,6 @@ if (-not $pnpmGlobalBinDir) {
 }
 @{ globalBinDir = $pnpmGlobalBinDir } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $pnpmConfigFile -Encoding UTF8
 Write-Host "Exported pnpm global-bin-dir: $pnpmGlobalBinDir"
-
-Write-Host "Exporting pip freeze..."
-$pipFreezeFile = Join-Path $OutputDir 'pip-freeze.txt'
-$freezeLines = @(& pip list --format=freeze 2>$null | Where-Object { $_ -match '\S' })
-if ($LASTEXITCODE -ne 0 -or $freezeLines.Count -eq 0) {
-    throw "pip list --format=freeze failed (exit $LASTEXITCODE, $($freezeLines.Count) lines) - refusing to write an empty pip-freeze.txt; site-packages is NOT shipped anymore, so this file is the entire pip restore manifest"
-}
-# site-packages is excluded from the persist copy (python312 robocopy branch below), so
-# restore reinstalls from this file: it must carry exact versions AND the index torch /
-# torchvision were installed from (they have the +cpu local version tag, which PyPI lacks).
-$freezeText = (@('--extra-index-url https://download.pytorch.org/whl/cpu') + $freezeLines) -join "`r`n"
-[IO.File]::WriteAllText($pipFreezeFile, $freezeText + "`r`n")
-Write-Host "Exported $($freezeLines.Count) pip packages to pip-freeze.txt"
 
 Write-Host "Backing up OBS Studio settings..."
 $obsPersistConfig = Join-Path $persistPath 'obs-studio\config\obs-studio'
