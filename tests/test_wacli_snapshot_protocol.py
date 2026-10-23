@@ -45,6 +45,17 @@ class ProducerProtocolTests(unittest.TestCase):
         self.assertEqual(snapshot.capture_status()['producer_protocol'], protocol.PROTOCOL)
         self.assertIs(snapshot.capture_status()['producer_execution'], False)
 
+    def test_lifecycle_and_sealed_media_proposals_remain_non_authoritative(self):
+        with patch('builtins.open', side_effect=AssertionError('filesystem I/O')), \
+                patch.object(Path, 'stat', side_effect=AssertionError('source stat')), \
+                patch('subprocess.run', side_effect=AssertionError('producer execution')):
+            result = snapshot.capture(object(), object())
+        self.assertEqual(result['lifecycle_api'], 'source-proposal-incomplete-never-returns-held-boundary')
+        self.assertEqual(result['upstream_sdk_acceptance'], 'not-submitted-not-accepted')
+        self.assertIn('not-a-source-root-hold', result['media_policy'])
+        for key in ('capture_enabled', 'complete', 'publishable', 'source_read', 'producer_execution'):
+            self.assertIs(result[key], False)
+
     def test_each_required_field_missing_or_claimed_success_is_rejected(self):
         for key in blocked_plan():
             with self.subTest(key=key, case='missing'):

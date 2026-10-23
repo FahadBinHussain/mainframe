@@ -1,0 +1,444 @@
+diff --git a/client.go b/client.go
+index 15b5aab..08f6406 100644
+--- a/client.go
++++ b/client.go
+@@ -134,0 +135 @@ type Client struct {
++	lifecycle               *clientLifecycle
+@@ -303,0 +305 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
++		lifecycle:              newClientLifecycle(),
+@@ -598,0 +601,5 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
++	loopScope, err := cli.lifecycle.admit()
++	if err != nil {
++		fs.Close(0)
++		return err
++	}
+@@ -601 +608 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
+-	go cli.handlerQueueLoop(ctx, fs.Context(), queue, closeWait)
++	go cli.handlerQueueLoopWithScope(ctx, fs.Context(), queue, closeWait, loopScope)
+@@ -910,0 +918,13 @@ func (cli *Client) handlerQueueLoop(evtCtx, connCtx context.Context, queue chan
++	loopScope, err := cli.lifecycle.admit()
++	if err != nil {
++		close(closeWait)
++		return
++	}
++	cli.handlerQueueLoopWithScope(evtCtx, connCtx, queue, closeWait, loopScope)
++}
++
++// handlerQueueLoopWithScope runs a queue loop whose scope was admitted before
++// its goroutine was launched. It intentionally covers only the handler-loop
++// family; frame admission, overflow enqueue goroutines, and raw internals are
++// not claimed as complete lifecycle coverage.
++func (cli *Client) handlerQueueLoopWithScope(evtCtx, connCtx context.Context, queue chan *waBinary.Node, closeWait chan struct{}, loopScope *LifecycleScope) {
+@@ -913,0 +934 @@ func (cli *Client) handlerQueueLoop(evtCtx, connCtx context.Context, queue chan
++	var dropped bool
+@@ -918,0 +940 @@ func (cli *Client) handlerQueueLoop(evtCtx, connCtx context.Context, queue chan
++				dropped = true
+@@ -920 +941,0 @@ func (cli *Client) handlerQueueLoop(evtCtx, connCtx context.Context, queue chan
+-				// Everything else
+@@ -929,0 +951,5 @@ func (cli *Client) handlerQueueLoop(evtCtx, connCtx context.Context, queue chan
++		if dropped && connCtx.Err() != nil {
++			loopScope.Finish(connCtx.Err())
++		} else {
++			loopScope.Finish(nil)
++		}
+@@ -935,0 +962 @@ Loop:
++				dropped = true
+@@ -938,0 +966,5 @@ Loop:
++			child, err := loopScope.Child()
++			if err != nil {
++				cli.Log.Debugf("Skipping node after lifecycle scope closed: %v", err)
++				continue
++			}
+@@ -941 +973,9 @@ Loop:
+-			go func() {
++			go func(node *waBinary.Node, child *LifecycleScope) {
++				var handlerErr error
++				defer func() {
++					if recovered := recover(); recovered != nil {
++						handlerErr = fmt.Errorf("node handler panic: %v", recovered)
++					}
++					child.Finish(handlerErr)
++					close(doneChan)
++				}()
+@@ -944 +983,0 @@ Loop:
+-				close(doneChan)
+@@ -948 +987 @@ Loop:
+-			}()
++			}(node, child)
+diff --git a/handler_loop_lifecycle_test.go b/handler_loop_lifecycle_test.go
+new file mode 100644
+index 0000000..37ad3b2
+--- /dev/null
++++ b/handler_loop_lifecycle_test.go
+@@ -0,0 +1,98 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/store"
++)
++
++func TestSyntheticHandlerChildOutlivesQueueLoop(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	entered := make(chan struct{})
++	release := make(chan struct{})
++	cli.nodeHandlers["synthetic"] = func(context.Context, *binary.Node) {
++		close(entered)
++		<-release
++	}
++	scope, err := cli.BeginScope(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	queue := make(chan *binary.Node, 1)
++	closeWait := make(chan struct{})
++	connCtx, cancel := context.WithCancel(context.Background())
++	go cli.handlerQueueLoopWithScope(context.Background(), connCtx, queue, closeWait, scope)
++	queue <- &binary.Node{Tag: "synthetic"}
++	<-entered
++	cancel()
++	select {
++	case <-closeWait:
++	case <-time.After(time.Second):
++		t.Fatal("queue loop did not finish after cancellation")
++	}
++	drained := make(chan error, 1)
++	go func() { _, err := cli.BeginDrain(context.Background()); drained <- err }()
++	select {
++	case err := <-drained:
++		t.Fatalf("drain completed while handler was still running: %v", err)
++	case <-time.After(20 * time.Millisecond):
++	}
++	close(release)
++	select {
++	case err := <-drained:
++		if !errors.Is(err, ErrLifecycleCoverageIncomplete) {
++			t.Fatalf("expected explicit incomplete coverage, got %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not wait for actual handler return")
++	}
++}
++
++func TestSyntheticQueuedCancellationIsSticky(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	scope, err := cli.BeginScope(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	queue := make(chan *binary.Node, 1)
++	queue <- &binary.Node{Tag: "synthetic"}
++	closeWait := make(chan struct{})
++	connCtx, cancel := context.WithCancel(context.Background())
++	cancel()
++	go cli.handlerQueueLoopWithScope(context.Background(), connCtx, queue, closeWait, scope)
++	select {
++	case <-closeWait:
++	case <-time.After(time.Second):
++		t.Fatal("queue loop did not clean up canceled queue")
++	}
++	_, err = cli.BeginDrain(context.Background())
++	if !errors.Is(err, context.Canceled) {
++		t.Fatalf("expected sticky cancellation error, got %v", err)
++	}
++}
++
++func TestSyntheticDangerousInternalsQueueStillProcessesNodes(t *testing.T) {
++	cli := NewClient(&store.Device{}, nil)
++	processed := make(chan struct{})
++	cli.nodeHandlers["synthetic"] = func(context.Context, *binary.Node) { close(processed) }
++	queue := make(chan *binary.Node, 1)
++	closeWait := make(chan struct{})
++	connCtx, cancel := context.WithCancel(context.Background())
++	go cli.DangerousInternals().HandlerQueueLoop(context.Background(), connCtx, queue, closeWait)
++	queue <- &binary.Node{Tag: "synthetic"}
++	select {
++	case <-processed:
++	case <-time.After(time.Second):
++		t.Fatal("raw queue loop skipped injected node")
++	}
++	cancel()
++	select {
++	case <-closeWait:
++	case <-time.After(time.Second):
++		t.Fatal("raw queue loop did not close")
++	}
++}
+diff --git a/internals.go b/internals.go
+index d9ce814..6e90d4d 100644
+--- a/internals.go
++++ b/internals.go
+@@ -173,0 +174,7 @@ func (int *DangerousInternalClient) HandlerQueueLoop(evtCtx, connCtx context.Con
++// HandlerQueueLoopWithScope is a test-only escape hatch for exercising the
++// handler-loop family with an explicitly admitted scope. It does not claim
++// ownership of frame admission, overflow enqueue goroutines, or raw internals.
++func (int *DangerousInternalClient) HandlerQueueLoopWithScope(evtCtx, connCtx context.Context, queue chan *waBinary.Node, closeWait chan struct{}, scope *LifecycleScope) {
++	int.c.handlerQueueLoopWithScope(evtCtx, connCtx, queue, closeWait, scope)
++}
++
+diff --git a/lifecycle.go b/lifecycle.go
+new file mode 100644
+index 0000000..f97d164
+--- /dev/null
++++ b/lifecycle.go
+@@ -0,0 +1,181 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"sync"
++)
++
++// ErrLifecycleCoverageIncomplete is returned by BeginDrain because this pinned
++// SDK does not yet own every asynchronous client root. A nil HeldBoundary is
++// always returned with this error; callers must not treat a partial drain as a
++// whole-client capture frontier.
++var ErrLifecycleCoverageIncomplete = errors.New("whatsmeow lifecycle coverage is incomplete")
++
++// HeldBoundary is intentionally opaque. It is only returned when the SDK can
++// prove that every client root and accepted descendant is quiescent. The
++// current pinned SDK never returns one from BeginDrain.
++type HeldBoundary struct{ _ struct{} }
++
++type clientLifecycle struct {
++	mu     sync.Mutex
++	active int
++	sealed bool
++	done   chan struct{}
++	closed bool
++	err    error
++}
++
++func newClientLifecycle() *clientLifecycle { return &clientLifecycle{done: make(chan struct{})} }
++
++// LifecycleScope tracks one accepted asynchronous operation. Register a scope
++// before launching work; Child remains legal after root sealing while its
++// parent is live, but not after Finish.
++type LifecycleScope struct {
++	owner *clientLifecycle
++	done  bool
++}
++
++// Operation is the public name for a tracked lifecycle scope.
++type Operation = LifecycleScope
++
++func (l *clientLifecycle) admit() (*LifecycleScope, error) {
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if l.sealed {
++		return nil, ErrLifecycleSealed
++	}
++	l.active++
++	return &LifecycleScope{owner: l}, nil
++}
++
++// ErrLifecycleSealed reports root admission after BeginDrain has sealed.
++var ErrLifecycleSealed = errors.New("whatsmeow lifecycle admission is sealed")
++var ErrLifecycleScopeDone = errors.New("whatsmeow lifecycle scope is finished")
++
++// BeginLifecycleScope admits a root operation. The caller must call Finish,
++// including on launch failure, and should use Child for causal descendants.
++func (cli *Client) BeginLifecycleScope(ctx context.Context) (*LifecycleScope, error) {
++	if ctx != nil {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++	}
++	return cli.lifecycle.admit()
++}
++
++// BeginOperation admits a root operation and returns the context selected by
++// the caller together with its tracker. The context is returned for convenient
++// propagation; admission itself is still linearized independently.
++func (cli *Client) BeginOperation(ctx context.Context) (context.Context, *Operation, error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	op, err := cli.BeginLifecycleScope(ctx)
++	return ctx, op, err
++}
++
++// BeginScope is the concise alias for BeginLifecycleScope.
++func (cli *Client) BeginScope(ctx context.Context) (*LifecycleScope, error) {
++	return cli.BeginLifecycleScope(ctx)
++}
++
++// Child admits a causal descendant. It is linearized with Finish and therefore
++// cannot race into existence after its parent has finished.
++func (s *LifecycleScope) Child() (*LifecycleScope, error) {
++	if s == nil || s.owner == nil {
++		return nil, ErrLifecycleScopeDone
++	}
++	l := s.owner
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if s.done {
++		return nil, ErrLifecycleScopeDone
++	}
++	l.active++
++	return &LifecycleScope{owner: l}, nil
++}
++
++// Launch registers a child before starting its goroutine and retains its error.
++func (s *LifecycleScope) Launch(fn func(context.Context) error) error {
++	return s.LaunchContext(context.Background(), fn)
++}
++
++// LaunchContext registers a child before starting its goroutine.
++func (s *LifecycleScope) LaunchContext(ctx context.Context, fn func(context.Context) error) error {
++	child, err := s.Child()
++	if err != nil {
++		return err
++	}
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	go func() {
++		var workErr error
++		defer func() { child.Finish(workErr) }()
++		workErr = fn(ctx)
++	}()
++	return nil
++}
++
++// Finish releases this scope. It is idempotent and retains the first error.
++func (s *LifecycleScope) Finish(err error) {
++	if s == nil || s.owner == nil {
++		return
++	}
++	l := s.owner
++	l.mu.Lock()
++	defer l.mu.Unlock()
++	if s.done {
++		return
++	}
++	s.done = true
++	if l.err == nil && err != nil {
++		l.err = err
++	}
++	l.active--
++	l.completeLocked()
++}
++
++func (l *clientLifecycle) completeLocked() {
++	if l.sealed && l.active == 0 && !l.closed {
++		l.closed = true
++		close(l.done)
++	}
++}
++
++func (l *clientLifecycle) drain(ctx context.Context) error {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	l.mu.Lock()
++	l.sealed = true
++	l.completeLocked()
++	done := l.done
++	l.mu.Unlock()
++	select {
++	case <-done:
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		l.mu.Lock()
++		defer l.mu.Unlock()
++		return l.err
++	case <-ctx.Done():
++		return ctx.Err()
++	}
++}
++
++// BeginDrain seals all lifecycle roots known to this SDK and waits for accepted
++// scopes and the existing app-state key-share scopes. Since socket callbacks,
++// reconnects, timers, node handlers, and arbitrary callback-launched work are
++// not all registered yet, it deliberately returns ErrLifecycleCoverageIncomplete
++// rather than a successful whole-client held boundary.
++func (cli *Client) BeginDrain(ctx context.Context) (*HeldBoundary, error) {
++	genericErr := cli.lifecycle.drain(ctx)
++	keyErr := cli.appStateKeyShareDrain.drain(ctx)
++	if genericErr != nil || keyErr != nil {
++		return nil, errors.Join(genericErr, keyErr)
++	}
++	return nil, ErrLifecycleCoverageIncomplete
++}
+diff --git a/lifecycle_test.go b/lifecycle_test.go
+new file mode 100644
+index 0000000..78159ab
+--- /dev/null
++++ b/lifecycle_test.go
+@@ -0,0 +1,68 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++)
++
++func TestLifecycleOperationDescendantAndStickyError(t *testing.T) {
++	l := newClientLifecycle()
++	root, err := l.admit()
++	if err != nil {
++		t.Fatal(err)
++	}
++	drained := make(chan error, 1)
++	go func() { drained <- l.drain(context.Background()) }()
++	child, err := root.Child()
++	if err != nil {
++		t.Fatal(err)
++	}
++	root.Finish(nil)
++	if _, err := root.Child(); !errors.Is(err, ErrLifecycleScopeDone) {
++		t.Fatalf("late child=%v", err)
++	}
++	failure := errors.New("synthetic failure")
++	child.Finish(failure)
++	child.Finish(nil)
++	if err := <-drained; !errors.Is(err, failure) {
++		t.Fatalf("drain error=%v", err)
++	}
++	if err := l.drain(context.Background()); !errors.Is(err, failure) {
++		t.Fatalf("sticky error=%v", err)
++	}
++}
++
++func TestLifecycleDrainCancellationSealsAdmission(t *testing.T) {
++	l := newClientLifecycle()
++	root, err := l.admit()
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if !errors.Is(l.drain(ctx), context.Canceled) {
++		t.Fatal("canceled drain succeeded")
++	}
++	if _, err := l.admit(); !errors.Is(err, ErrLifecycleSealed) {
++		t.Fatalf("late admission=%v", err)
++	}
++	child, err := root.Child()
++	if err != nil {
++		t.Fatalf("accepted root could not create child after sealing: %v", err)
++	}
++	root.Finish(nil)
++	grandchild, err := child.Child()
++	if err != nil {
++		t.Fatalf("live child could not create grandchild after ancestor finished: %v", err)
++	}
++	child.Finish(nil)
++	grandchild.Finish(nil)
++	deadline := time.After(time.Second)
++	select {
++	case <-l.done:
++	case <-deadline:
++		t.Fatal("drain did not complete")
++	}
++}

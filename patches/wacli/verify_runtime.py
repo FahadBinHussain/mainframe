@@ -78,6 +78,7 @@ def verify(source, full_gate=False):
         # The local replace exists only in this temporary source tree.
         for race in ([], ['-race']):
             run(['go', 'test', *race, './cmd/wacli', './internal/app', './internal/wa',
+                 './internal/store', './internal/mediamembership',
                  '-run', manifest['wacli_test_pattern'], '-count=10', '-timeout=180s'], tree, env=env)
             run(['go', 'test', *race, '.', '-run', manifest['dependency_test_pattern'],
                  '-count=10', '-timeout=180s'], dependency, env=env)
