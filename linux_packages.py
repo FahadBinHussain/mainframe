@@ -150,17 +150,9 @@ def host_info() -> tuple[str, str]:
 def _safe_arg(value: Any) -> bool:
     return isinstance(value, str) and bool(value) and not value.startswith("-") and not any(c in value for c in "\x00\r\n")
 
-def _requirements_actions(root: Path, blockers: list[str], require_pip_freeze: bool = False) -> list[Action]:
-    freeze = root / "pip-freeze.txt"
-    files = [freeze] if freeze.is_file() else []
-    # requirements*.txt remains supported for hand-reviewed development fixtures;
-    # an actual backup root must use its canonical pip-freeze.txt manifest.
-    if not files and not require_pip_freeze:
-        files = [p for p in (root / "requirements.txt", root / "requirements-linux.txt") if p.is_file()]
-    if require_pip_freeze and (not freeze.is_file() or not freeze.read_text(encoding="utf-8").strip()):
-        reason = f"Required pip-freeze.txt is missing or empty in backup root: {root}"
-        blockers.append(reason)
-        return [Action("pip-venv", "pip-freeze.txt", status="blocked", reason=reason, source=str(freeze))]
+def _requirements_actions(root: Path, blockers: list[str]) -> list[Action]:
+    """Plan explicitly curated repository requirements, never legacy snapshots."""
+    files = [p for p in (root / "requirements.txt", root / "requirements-linux.txt") if p.is_file()]
     out: list[Action] = []
     for req in files:
         lines = [x.strip() for x in req.read_text(encoding="utf-8").splitlines()
@@ -410,8 +402,9 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                       "see docs/linux-wacli-build-review.md.")
         blockers.append(reason)
         actions.append(Action("go", path, cmd, version=version, tags=tags, status="blocked", reason=reason, source="go"))
-    root = backup_root or repo
-    actions.extend(_requirements_actions(root, blockers, require_pip_freeze=backup_root is not None))
+    # Backup roots are data/control metadata, never implicit Python install inputs.
+    # Preserve explicit curated repository planning without consuming legacy freezes.
+    actions.extend(_requirements_actions(repo, blockers))
     return Plan(True, distro, architecture, actions, blockers)
 
 def _apt_preflight(actions: list[Action], runner: Any) -> None:

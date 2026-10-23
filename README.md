@@ -109,8 +109,14 @@ aarch64** only. It accounts for every allowlisted item; unsupported software,
 unvalidated vendor sources, and variant/version drift are explicit blockers.
 APT executables and candidates are checked before executing any selected install.
 Global pnpm/uv/Go installs and Python rebuilds remain blocked until runtime/build,
-install-script policy and isolated-destination preflights are validated. Original
-package declarations and `pip-freeze.txt` remain intact.
+install-script policy and isolated-destination preflights are validated. The
+automatic frozen Python snapshot is retired: backup no longer creates
+`pip-freeze.txt`, and Windows Full no longer installs it. A legacy
+`pip-freeze.txt`, when present in an older backup, remains restore control
+metadata only; it is not user data and is not installed or treated as a Linux
+planner input. Explicit repository-only `requirements.txt` or
+`requirements-linux.txt` files may still be inspected for planning, but generic
+Python execution remains blocked pending the same preflights.
 
 Scoop's `7zip19.00-helper` is explicitly reported as `covered` by native `7zip`,
 with `covered_by: "7zip"` and no separate install command. This maps the extractor
@@ -121,7 +127,9 @@ check. Other blockers still prevent an unqualified full execution.
 
 ```bash
 python3 ./linux_packages.py
-# Add --backup-root /path/to/recovered/quick-root to include pip-freeze.txt.
+# Legacy pip-freeze.txt files in a backup are ignored; no Python action is planned.
+# Explicit repository requirements files are planning-only and remain blocked
+# until interpreter, dependency, install-script, and isolated-destination review.
 # --execute changes the machine; --select NAME permits only an explicitly
 # partial reviewed subset. Neither flag is needed for inspection.
 ```
@@ -330,7 +338,7 @@ The existing `da.gd/f85Bj` short link remains Windows-only and unchanged.
 - `restore-secrets.ps1` restores `tool-secrets.zip` and backs up overwritten targets first
 - `vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata-private\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
 - `account-contract.ps1` checks that every `*-account.ps1` helper keeps the shared mainframe account command contract
-- `scoop-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`, and `winget-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot. pip has no allowlist: backup writes every installed package pinned to `pip-freeze.txt` (plus the pytorch `+cpu` extra index) and restore runs `pip install -r` on it — `Lib\site-packages` itself is not shipped anymore (it held no user data, 0 editable installs)
+- `scoop-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`, and `winget-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot. The automatic frozen pip snapshot is retired: backup no longer creates `pip-freeze.txt`, and Windows Full no longer installs it. A legacy `pip-freeze.txt` remains restore control metadata only, excluded from user data and ignored by the Linux planner. Explicit repository-only `requirements.txt`/`requirements-linux.txt` files remain available for planning, but generic Python execution is blocked pending preflight; `Lib\site-packages` is not shipped.
 - `vercel-account.ps1` manages separate token-only Vercel CLI profiles by email
 - `neon-account.ps1` manages separate Neon CLI profiles by email using Neon CLI's per-profile config directory support
 - `gws-account.ps1` manages separate Google Workspace CLI profiles by email using `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; it also reuses those OAuth profiles for Google Search Console API commands

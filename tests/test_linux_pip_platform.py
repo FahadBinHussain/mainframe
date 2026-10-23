@@ -12,12 +12,12 @@ import linux_packages as lp
 class PipPlatformTests(unittest.TestCase):
     def actions(self, root):
         blockers = []
-        actions = lp._requirements_actions(root, blockers, require_pip_freeze=True)
+        actions = lp._requirements_actions(root, blockers)
         self.assertEqual(len(actions), 1)
         self.assertEqual(len(blockers), 1)
         action = actions[0]
-        self.assertEqual(action.name, 'pip-freeze.txt')
-        self.assertEqual(action.source, str(root / 'pip-freeze.txt'))
+        self.assertEqual(action.name, 'requirements.txt')
+        self.assertEqual(action.source, str(root / 'requirements.txt'))
         self.assertEqual(action.status, 'blocked')
         self.assertIsNone(action.command)
         self.assertIn('pywin32-ctypes wraps Windows DLL APIs', action.reason)
@@ -29,7 +29,7 @@ class PipPlatformTests(unittest.TestCase):
                     b'pywin32-ctypes==0.2.3\r\nidna==3.10\r\n')
         with TemporaryDirectory() as d:
             root = Path(d)
-            manifest = root / 'pip-freeze.txt'
+            manifest = root / 'requirements.txt'
             manifest.write_bytes(original)
             before = set(root.iterdir())
             self.actions(root)
@@ -44,7 +44,7 @@ class PipPlatformTests(unittest.TestCase):
             with self.subTest(requirement=requirement), TemporaryDirectory() as d:
                 root = Path(d)
                 original = (requirement + '\n').encode()
-                manifest = root / 'pip-freeze.txt'
+                manifest = root / 'requirements.txt'
                 manifest.write_bytes(original)
                 self.actions(root)
                 self.assertEqual(manifest.read_bytes(), original)
@@ -54,7 +54,7 @@ class PipPlatformTests(unittest.TestCase):
             root = Path(d)
             original = ('--extra-index-url https://synthetic-user:synthetic-token@private.invalid/simple\n'
                         'pywin32_ctypes @ https://private.invalid/private-artifact.whl\n')
-            (root / 'pip-freeze.txt').write_text(original)
+            (root / 'requirements.txt').write_text(original)
             actions, blockers = self.actions(root)
             report = json.dumps(lp.Plan(True, 'ubuntu', 'x86_64', actions, blockers).to_dict())
             for private in ('synthetic-user', 'synthetic-token', 'private.invalid', 'private-artifact'):
@@ -63,22 +63,22 @@ class PipPlatformTests(unittest.TestCase):
     def test_selected_pip_and_earlier_apt_rejected_before_any_command(self):
         with TemporaryDirectory() as d:
             root = Path(d)
-            (root / 'pip-freeze.txt').write_bytes(b'pywin32-ctypes==0.2.3\n')
+            (root / 'requirements.txt').write_bytes(b'pywin32-ctypes==0.2.3\n')
             actions, blockers = self.actions(root)
             apt = lp.Action('apt', 'curl', ['apt-get', 'install', '-y', 'curl'])
             plan = lp.Plan(True, 'ubuntu', 'x86_64', [apt] + actions, blockers)
             runner = Mock(side_effect=AssertionError('must not run'))
             with patch.object(lp, 'host_info', return_value=('ubuntu', 'x86_64')):
                 with self.assertRaises(RuntimeError):
-                    lp.execute(plan, ['curl', 'pip-freeze.txt'], runner=runner)
+                    lp.execute(plan, ['curl', 'requirements.txt'], runner=runner)
             runner.assert_not_called()
 
     def test_similarly_named_package_does_not_get_windows_api_diagnostic(self):
         with TemporaryDirectory() as d:
             root = Path(d)
-            (root / 'pip-freeze.txt').write_text('pywin32-ctypes-helper==1.0\n')
+            (root / 'requirements.txt').write_text('pywin32-ctypes-helper==1.0\n')
             blockers = []
-            actions = lp._requirements_actions(root, blockers, require_pip_freeze=True)
+            actions = lp._requirements_actions(root, blockers)
             self.assertTrue(all(a.status == 'blocked' for a in actions))
             self.assertNotIn('wraps Windows DLL APIs', ' '.join(blockers))
             self.assertIn('interpreter', blockers[0])

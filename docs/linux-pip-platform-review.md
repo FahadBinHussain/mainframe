@@ -1,6 +1,14 @@
-# Python restore: Windows API dependency remains blocked
+# Python restore: Windows API dependency remains blocked (historical review)
 
-The reviewed declaration is **`pywin32-ctypes==0.2.3`**, with no environment marker. Keep the whole Python environment rebuild explicitly blocked. The backup manifest is not edited, filtered, copied into a derived install manifest, or replaced. No package is dropped, no substitute is selected, and no installation, build or runtime probe is enabled.
+> **Superseded scope note:** this review predates retirement of the automatic
+> frozen pip snapshot. Backup no longer creates `pip-freeze.txt`, and Windows
+> Full no longer installs it. A legacy file in an older backup remains restore
+> control metadata, excluded from user data; the Linux planner ignores it with
+> no action or blocker. The explicit capability retained today is planning-only
+> inspection of repository `requirements.txt`/`requirements-linux.txt`, with
+> generic execution still blocked pending preflight.
+
+The reviewed declaration is **`pywin32-ctypes==0.2.3`**, with no environment marker. Keep the whole Python environment rebuild explicitly blocked. In the historical backup flow, the manifest was not edited, filtered, copied into a derived install manifest, or replaced. No package is dropped, no substitute is selected, and no installation, build or runtime probe is enabled.
 
 ## Why a universal wheel is not a Linux port
 
