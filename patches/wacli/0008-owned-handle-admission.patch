@@ -1,0 +1,573 @@
+Subject: LOCAL SOURCE PROPOSAL: owned handle effect admission
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/cmd/wacli/send_file.go b/cmd/wacli/send_file.go
+index 82ad320..4584cda 100644
+--- a/cmd/wacli/send_file.go
++++ b/cmd/wacli/send_file.go
+@@ -73,0 +74,30 @@ func sendFile(ctx context.Context, a interface {
++	var client interface {
++		textMessageSender
++		outboundTextResolver
++		Upload(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
++		UploadNewsletter(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
++		SendProtoMessageWithExtra(context.Context, types.JID, *waProto.Message, string) (types.MessageID, error)
++	} = a.WA()
++	if owned, ok := any(a).(interface {
++		OwnedWA(context.Context) (*app.OwnedWA, error)
++	}); ok {
++		var err error
++		client, err = owned.OwnedWA(ctx)
++		if err != nil {
++			return sendFileOutcome{}, err
++		}
++	}
++	upsertChat := func(jid, kind, name string, at time.Time) error { return a.DB().UpsertChat(jid, kind, name, at) }
++	upsertMessage := func(p store.UpsertMessageParams) error { return a.DB().UpsertMessage(p) }
++	upsertStatus := func(p store.UpsertStatusMessageParams) error { return a.DB().UpsertStatusMessage(p) }
++	if owned, ok := any(a).(interface {
++		OwnedDB(context.Context) (*app.OwnedDB, error)
++	}); ok {
++		db, err := owned.OwnedDB(ctx)
++		if err != nil {
++			return sendFileOutcome{}, err
++		}
++		upsertChat = func(jid, kind, name string, at time.Time) error { return db.UpsertChat(ctx, jid, kind, name, at) }
++		upsertMessage = func(p store.UpsertMessageParams) error { return db.UpsertMessage(ctx, p) }
++		upsertStatus = func(p store.UpsertStatusMessageParams) error { return db.UpsertStatusMessage(ctx, p) }
++	}
+@@ -110 +140 @@ func sendFile(ctx context.Context, a interface {
+-		replyContext, err = buildReplyContextInfo(ctx, a.WA(), a.DB(), to, opts.replyTo, opts.replyToSender)
++		replyContext, err = buildReplyContextInfo(ctx, client, a.DB(), to, opts.replyTo, opts.replyToSender)
+@@ -118 +148 @@ func sendFile(ctx context.Context, a interface {
+-		up, err = a.WA().UploadNewsletter(ctx, data, uploadType)
++		up, err = client.UploadNewsletter(ctx, data, uploadType)
+@@ -120 +150 @@ func sendFile(ctx context.Context, a interface {
+-		up, err = a.WA().Upload(ctx, data, uploadType)
++		up, err = client.Upload(ctx, data, uploadType)
+@@ -171 +201 @@ func sendFile(ctx context.Context, a interface {
+-		id, err = a.WA().SendProtoMessageWithExtra(ctx, to, msg, up.Handle)
++		id, err = client.SendProtoMessageWithExtra(ctx, to, msg, up.Handle)
+@@ -173 +203 @@ func sendFile(ctx context.Context, a interface {
+-		id, err = a.WA().SendProtoMessage(ctx, to, msg)
++		id, err = client.SendProtoMessage(ctx, to, msg)
+@@ -184 +214 @@ func sendFile(ctx context.Context, a interface {
+-		storeErr = a.DB().UpsertStatusMessage(store.UpsertStatusMessageParams{
++		storeErr = upsertStatus(store.UpsertStatusMessageParams{
+@@ -205 +235 @@ func sendFile(ctx context.Context, a interface {
+-			storedChat = canonicalOutboundChat(ctx, a.WA(), to)
++			storedChat = canonicalOutboundChat(ctx, client, to)
+@@ -207 +237 @@ func sendFile(ctx context.Context, a interface {
+-		chatName := a.WA().ResolveChatName(ctx, storedChat, "")
++		chatName := client.ResolveChatName(ctx, storedChat, "")
+@@ -209 +239 @@ func sendFile(ctx context.Context, a interface {
+-		if err := a.DB().UpsertChat(storedChat.String(), kind, chatName, now); err != nil {
++		if err := upsertChat(storedChat.String(), kind, chatName, now); err != nil {
+@@ -212 +242 @@ func sendFile(ctx context.Context, a interface {
+-		if err := a.DB().UpsertMessage(store.UpsertMessageParams{
++		if err := upsertMessage(store.UpsertMessageParams{
+@@ -222 +252 @@ func sendFile(ctx context.Context, a interface {
+-			QuotedSenderJID: canonicalOutboundQuoteSender(ctx, a.WA(), replyContext.GetParticipant()),
++			QuotedSenderJID: canonicalOutboundQuoteSender(ctx, client, replyContext.GetParticipant()),
+diff --git a/internal/app/drain.go b/internal/app/drain.go
+index c75daf4..8c5aa6a 100644
+--- a/internal/app/drain.go
++++ b/internal/app/drain.go
+@@ -15,0 +16 @@ var ErrOperationScopeDone = errors.New("WACLI operation scope is done")
++var ErrOperationForeignScope = errors.New("WACLI operation scope belongs to another owner")
+@@ -69 +70 @@ func (o *operationAdmission) beginScoped(ctx context.Context, cancelable, cancel
+-		parent = nil
++		return nil, nil, ErrOperationForeignScope
+diff --git a/internal/app/owned_db.go b/internal/app/owned_db.go
+new file mode 100644
+index 0000000..fcbcaa0
+--- /dev/null
++++ b/internal/app/owned_db.go
+@@ -0,0 +1,68 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++)
++
++// OwnedDB is the deliberately limited metadata-write facade used by file send.
++// It never exposes the underlying database; methods hold a child lease for the
++// complete database invocation.
++type OwnedDB struct {
++	db  *store.DB
++	app *App
++}
++
++func (a *App) OwnedDB(ctx context.Context) (*OwnedDB, error) {
++	if err := a.admitHandle(ctx); err != nil {
++		return nil, err
++	}
++	a.waMu.Lock()
++	closed := a.closed
++	a.waMu.Unlock()
++	if closed || a.db == nil {
++		return nil, ErrHandleRevoked
++	}
++	return &OwnedDB{db: a.db, app: a}, nil
++}
++
++func (d *OwnedDB) effect(ctx context.Context) (context.Context, func(error), error) {
++	if err := d.app.admitHandle(ctx); err != nil {
++		return nil, nil, err
++	}
++	child, finish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		return nil, nil, errors.Join(ErrHandleRevoked, err)
++	}
++	return child, finish, nil
++}
++
++func (d *OwnedDB) UpsertChat(ctx context.Context, jid, kind, name string, updatedAt time.Time) (err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.db.UpsertChat(jid, kind, name, updatedAt)
++}
++
++func (d *OwnedDB) UpsertMessage(ctx context.Context, p store.UpsertMessageParams) (err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.db.UpsertMessage(p)
++}
++
++func (d *OwnedDB) UpsertStatusMessage(ctx context.Context, p store.UpsertStatusMessageParams) (err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.db.UpsertStatusMessage(p)
++}
+diff --git a/internal/app/owned_wa.go b/internal/app/owned_wa.go
+new file mode 100644
+index 0000000..8df725f
+--- /dev/null
++++ b/internal/app/owned_wa.go
+@@ -0,0 +1,191 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"fmt"
++
++	"go.mau.fi/whatsmeow"
++	waProto "go.mau.fi/whatsmeow/binary/proto"
++	"go.mau.fi/whatsmeow/types"
++)
++
++// ErrHandleRevoked is returned before a client effect when its admission scope
++// is absent, canceled, finished, or stale.
++var ErrHandleRevoked = errors.New("WACLI borrowed handle admission is revoked")
++
++// OwnedWA is a narrow, non-escaping facade. Its SDK client is private.
++type OwnedWA struct {
++	client WAClient
++	app    *App
++	borrow context.Context
++}
++
++func (a *App) OwnedWA(ctx context.Context) (*OwnedWA, error) {
++	if err := a.admitHandle(ctx); err != nil {
++		return nil, err
++	}
++	a.waMu.Lock()
++	client := a.wa
++	closed := a.closed
++	a.waMu.Unlock()
++	if closed || client == nil {
++		return nil, ErrHandleRevoked
++	}
++	return &OwnedWA{client: client, app: a, borrow: ctx}, nil
++}
++
++func (a *App) admitHandle(ctx context.Context) error {
++	if ctx == nil {
++		return ErrHandleRevoked
++	}
++	scope, _ := ctx.Value(operationScopeKey{}).(*operationScope)
++	if scope == nil || scope.owner != &a.operations {
++		return ErrHandleRevoked
++	}
++	if err := ctx.Err(); err != nil {
++		return errors.Join(ErrHandleRevoked, err)
++	}
++	scope.owner.mu.Lock()
++	done := scope.done
++	scope.owner.mu.Unlock()
++	if done {
++		return ErrHandleRevoked
++	}
++	return nil
++}
++
++func (w *OwnedWA) effect(ctx context.Context) (context.Context, func(error), error) {
++	if err := w.app.admitHandle(ctx); err != nil {
++		return nil, nil, err
++	}
++	child, finish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		return nil, nil, errors.Join(ErrHandleRevoked, err)
++	}
++	return child, finish, nil
++}
++
++func (w *OwnedWA) SendText(ctx context.Context, to types.JID, text string) (id types.MessageID, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return "", err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SendText(ctx, to, text)
++}
++func (w *OwnedWA) SendProtoMessage(ctx context.Context, to types.JID, msg *waProto.Message) (id types.MessageID, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return "", err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SendProtoMessage(ctx, to, msg)
++}
++func (w *OwnedWA) SendProtoMessageWithExtra(ctx context.Context, to types.JID, msg *waProto.Message, mediaHandle string) (id types.MessageID, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return "", err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SendProtoMessageWithExtra(ctx, to, msg, mediaHandle)
++}
++func (w *OwnedWA) Upload(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (out whatsmeow.UploadResponse, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return whatsmeow.UploadResponse{}, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.Upload(ctx, data, mediaType)
++}
++func (w *OwnedWA) UploadNewsletter(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (out whatsmeow.UploadResponse, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return whatsmeow.UploadResponse{}, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.UploadNewsletter(ctx, data, mediaType)
++}
++func (w *OwnedWA) ResolveChatName(ctx context.Context, chat types.JID, pushName string) string {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		w.app.recordOwnedError(err)
++		return ""
++	}
++	var effectErr error
++	defer finishOwnedEffect(finish, &effectErr)
++	return w.client.ResolveChatName(ctx, chat, pushName)
++}
++func (w *OwnedWA) ResolvePNToLID(ctx context.Context, jid types.JID) (out types.JID) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		w.app.recordOwnedError(err)
++		return
++	}
++	var effectErr error
++	defer finishOwnedEffect(finish, &effectErr)
++	return w.client.ResolvePNToLID(ctx, jid)
++}
++func (w *OwnedWA) ResolveLIDToPN(ctx context.Context, jid types.JID) (out types.JID) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		w.app.recordOwnedError(err)
++		return
++	}
++	var effectErr error
++	defer finishOwnedEffect(finish, &effectErr)
++	return w.client.ResolveLIDToPN(ctx, jid)
++}
++func (w *OwnedWA) GetGroupInfo(ctx context.Context, jid types.JID) (out *types.GroupInfo, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.GetGroupInfo(ctx, jid)
++}
++
++// No-context compatibility readers are bound to the borrowing scope. Refusal
++// cannot be returned by their legacy signature, so it remains a drain error.
++func (w *OwnedWA) LinkedJID() string {
++	_, finish, err := w.effect(w.borrow)
++	if err != nil {
++		w.app.recordOwnedError(err)
++		return ""
++	}
++	var effectErr error
++	defer finishOwnedEffect(finish, &effectErr)
++	return w.client.LinkedJID()
++}
++func (w *OwnedWA) LinkedLID() string {
++	_, finish, err := w.effect(w.borrow)
++	if err != nil {
++		w.app.recordOwnedError(err)
++		return ""
++	}
++	var effectErr error
++	defer finishOwnedEffect(finish, &effectErr)
++	return w.client.LinkedLID()
++}
++
++func (a *App) recordOwnedError(err error) {
++	a.operations.mu.Lock()
++	defer a.operations.mu.Unlock()
++	if a.operations.err == nil {
++		a.operations.err = err
++	}
++}
++
++// Finish actual invocations even on panic, retaining the cause without changing
++// the caller's existing panic semantics.
++func finishOwnedEffect(finish func(error), effectErr *error) {
++	if recovered := recover(); recovered != nil {
++		if cause, ok := recovered.(error); ok {
++			finish(fmt.Errorf("owned handle effect panic: %w", cause))
++		} else {
++			finish(fmt.Errorf("owned handle effect panic: %v", recovered))
++		}
++		panic(recovered)
++	}
++	finish(*effectErr)
++}
+diff --git a/internal/app/owned_wa_test.go b/internal/app/owned_wa_test.go
+new file mode 100644
+index 0000000..084eec2
+--- /dev/null
++++ b/internal/app/owned_wa_test.go
+@@ -0,0 +1,215 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++type ownedProbeWA struct {
++	WAClient
++	calls   atomic.Int32
++	entered chan struct{}
++	release chan struct{}
++	failure error
++	panics  bool
++}
++
++func (w *ownedProbeWA) SendText(context.Context, types.JID, string) (types.MessageID, error) {
++	w.calls.Add(1)
++	if w.entered != nil {
++		close(w.entered)
++		<-w.release
++	}
++	if w.panics {
++		panic(w.failure)
++	}
++	return "synthetic-id", w.failure
++}
++func (*ownedProbeWA) Disconnect() {}
++func (*ownedProbeWA) Close()      {}
++
++func ownedTestApp(t *testing.T) (*App, *ownedProbeWA, context.Context, func(error)) {
++	t.Helper()
++	db, err := store.Open(filepath.Join(t.TempDir(), "synthetic.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = db.Close() })
++	probe := &ownedProbeWA{}
++	a := &App{db: db, wa: probe}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { finish(nil) })
++	return a, probe, ctx, finish
++}
++
++func TestOwnedBorrowedHandlesRefuseBeforeEffects(t *testing.T) {
++	for _, mode := range []string{"finished", "canceled", "foreign", "missing", "closed"} {
++		t.Run(mode, func(t *testing.T) {
++			a, probe, ctx, finish := ownedTestApp(t)
++			wa, err := a.OwnedWA(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			db, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			use := ctx
++			switch mode {
++			case "finished":
++				finish(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(ctx)
++				cancel()
++			case "foreign":
++				other := &App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "missing":
++				use = context.Background()
++			case "closed":
++				finish(nil)
++				if err := a.CloseWithError(); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if _, err := wa.SendText(use, types.JID{}, "synthetic"); !errors.Is(err, ErrHandleRevoked) {
++				t.Fatalf("WA admission: %v", err)
++			}
++			if err := db.UpsertChat(use, "synthetic", "private", "synthetic", time.Time{}); !errors.Is(err, ErrHandleRevoked) {
++				t.Fatalf("DB admission: %v", err)
++			}
++			if probe.calls.Load() != 0 {
++				t.Fatal("revoked borrowed WA reached effect")
++			}
++			if mode != "closed" {
++				if _, err := a.db.GetChat("synthetic"); err == nil {
++					t.Fatal("revoked borrowed DB wrote a row")
++				}
++			}
++		})
++	}
++}
++
++func TestOwnedAcceptedEffectHoldsCloseUntilActualReturn(t *testing.T) {
++	a, probe, ctx, finish := ownedTestApp(t)
++	probe.entered = make(chan struct{})
++	probe.release = make(chan struct{})
++	failure := errors.New("synthetic delayed effect error")
++	probe.failure = failure
++	wa, err := a.OwnedWA(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result := make(chan error, 1)
++	go func() { _, err := wa.SendText(ctx, types.JID{}, "synthetic"); result <- err }()
++	select {
++	case <-probe.entered:
++	case <-time.After(time.Second):
++		t.Fatal("effect not entered")
++	}
++	finish(nil)
++	closed := make(chan error, 1)
++	go func() { closed <- a.CloseWithError() }()
++	select {
++	case <-ctx.Done():
++	case <-time.After(time.Second):
++		t.Fatal("close did not cancel owned group")
++	}
++	select {
++	case err := <-closed:
++		t.Fatalf("close escaped active borrowed effect: %v", err)
++	default:
++	}
++	close(probe.release)
++	if err := <-result; !errors.Is(err, failure) {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-closed:
++		if !errors.Is(err, failure) {
++			t.Fatalf("close lost effect error: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("close failed to join")
++	}
++}
++
++func TestOwnedLiveDescendantAfterSealAndForeignRootRefusal(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	db, err := a.OwnedDB(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	canceled, cancel := context.WithCancel(context.Background())
++	cancel()
++	if held, err := a.BeginDrain(canceled); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("hold escaped: %v %v", held, err)
++	}
++	if err := db.UpsertChat(ctx, "synthetic", "private", "synthetic", time.Time{}); err != nil {
++		t.Fatalf("accepted lineage lost after seal: %v", err)
++	}
++	if _, _, err := a.BeginScopedOperation(context.Background()); !errors.Is(err, ErrOperationSealed) {
++		t.Fatal(err)
++	}
++	other := &App{}
++	if _, _, err := other.BeginScopedOperation(ctx); !errors.Is(err, ErrOperationForeignScope) {
++		t.Fatalf("foreign root reentry: %v", err)
++	}
++	finish(nil)
++	if err := db.UpsertChat(ctx, "late", "private", "late", time.Time{}); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatal(err)
++	}
++}
++
++func TestOwnedPanicRetainsFailureAndFinishesEffect(t *testing.T) {
++	a, probe, ctx, finish := ownedTestApp(t)
++	failure := errors.New("synthetic effect panic")
++	probe.failure = failure
++	probe.panics = true
++	wa, err := a.OwnedWA(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	func() {
++		defer func() {
++			if got := recover(); got != failure {
++				t.Fatalf("panic changed: %v", got)
++			}
++		}()
++		_, _ = wa.SendText(ctx, types.JID{}, "synthetic")
++	}()
++	finish(nil)
++	if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("panic cause/coverage lost: %v %v", held, err)
++	}
++}
++
++func TestOwnedLegacyRawDBRemainsExplicitCoverageGap(t *testing.T) {
++	a, _, _, finish := ownedTestApp(t)
++	raw := a.DB()
++	finish(nil)
++	held, err := a.BeginDrain(context.Background())
++	if held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("raw gap was certified: %v %v", held, err)
++	}
++	// A retained raw DB is intentionally a counterexample, not a successful hold.
++	if err := raw.UpsertChat("raw-gap", "private", "synthetic", time.Time{}); err != nil {
++		t.Fatal(err)
++	}
++}

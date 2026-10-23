@@ -86,6 +86,26 @@ class RuntimeSeriesTests(unittest.TestCase):
         self.assertIn('func (cli *Client) sealLifecycleRoots()', sdk.read_text())
         self.assertIn('socket/socket_lifecycle_test.go', sdk.read_text())
 
+    def test_owned_handle_and_callback_extensions_stay_pinned_and_tested(self):
+        """New admission regressions must run, not merely exist in patch text."""
+        manifest = json.loads((verifier.PATCHES / 'runtime-series.json').read_text())
+        extensions = (
+            ('wacli', '0008-owned-handle-admission.patch', 'wacli_test_pattern'),
+            ('whatsmeow', 'whatsmeow/0004-callback-lineage.patch', 'dependency_test_pattern'),
+        )
+        for group, name, pattern in extensions:
+            entries = [entry for entry in manifest[group] if entry['path'] == name]
+            self.assertEqual(len(entries), 1)
+            source = verifier.checked_artifact(entries[0]).read_text()
+            self.assertIn('unsubmitted and unaccepted upstream', source)
+            self.assertNotIn('diff --git a/go.mod', source)
+            self.assertNotIn('diff --git a/go.sum', source)
+            tests = re.findall(r'^\+func (Test\w+)\(t \*testing.T\)', source, re.MULTILINE)
+            self.assertTrue(tests, name)
+            for test in tests:
+                self.assertIsNotNone(re.search(manifest[pattern], test), test)
+        self.assertFalse(manifest['capture_enabled'])
+
     def test_changed_patch_and_unsafe_members_refuse(self):
         with tempfile.TemporaryDirectory() as temporary, patch.object(verifier, 'PATCHES', Path(temporary)):
             root = Path(temporary)
