@@ -24,6 +24,7 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from linux_restore import (CHUNK, MAX_MEMBER_BYTES, MAX_EXPANDED_BYTES,
                            secure_directory, safe_member,
                            link_or_special, stream_copy, make_private_dirs)
+from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 PREFIX = 'NativeState/wacli/'
 SIDECARS = ('-wal', '-shm', '-journal')
@@ -230,6 +231,7 @@ def capture(root, destination, password, quiesced=False):
                 raise StateError('Encrypted archive verification failed.')
             publish_tree(ready, destination, parent)
             return {'status': 'encrypted-state-preserved', 'entries': count, 'activation': 'not-performed',
+                    'restoration': restoration_status('explicit-native-root-encrypted'),
                     'coverage': 'explicit-root-only; external configured stores are not followed'}
     finally:
         os.close(parent)
@@ -280,9 +282,59 @@ def restore_unlocked(archive, destination):
                         if size != i.file_size:
                             raise StateError('State member verification failed.')
                 publish_tree(state, destination, parent)
-            return {'status': 'offline-state-staged', 'entries': len(members), 'activation': 'not-performed'}
+            return {'status': 'offline-state-staged', 'entries': len(members), 'activation': 'not-performed',
+                    'restoration': restoration_status('explicit-native-root-offline-staged')}
     finally:
         os.close(parent)
+
+
+def plan_windows_unlocked(archive):
+    """ZIP central-directory assessment ONLY. Never read members or open SQLite.
+
+    This is deliberately not a migration adapter: the existing archive contract
+    cannot prove producing versions, store completeness or SQLite consistency.
+    A plausible file pair must not promote the assessment to ready/complete.
+    """
+    archive = absolute_path(archive)
+    with opened_file(archive.parent, archive.name) as raw, ZipFile(raw) as z:
+        infos = z.infolist()
+        if len(infos) > 100000:
+            raise StateError('State archive exceeds safety limits.')
+        members = []
+        for i in infos:
+            normalized = i.filename.replace('\\', '/')
+            if normalized.casefold().startswith(WINDOWS_PREFIX.casefold()):
+                members.append(i)
+        seen, files = set(), set()
+        total = sidecars = 0
+        stores = {}
+        for i in members:
+            ok, norm = safe_member(i.filename)
+            key = unicodedata.normalize('NFC', norm or '').casefold()
+            if not ok or link_or_special(i) or i.flag_bits & 1 or key in seen:
+                raise StateError('Unsafe, duplicate or encrypted Windows state member.')
+            seen.add(key)
+            total += i.file_size
+            if i.file_size > MAX_MEMBER_BYTES or total > MAX_EXPANDED_BYTES:
+                raise StateError('State archive exceeds safety limits.')
+            if not i.is_dir():
+                files.add(key)
+                sidecars += Path(norm).name.casefold().endswith(SIDECARS)
+                name = Path(norm).name.casefold()
+                if name in ('session.db', 'wacli.db'):
+                    stores.setdefault(str(Path(key).parent), set()).add(name)
+        if any(str(p) in files for key in seen for p in Path(key).parents):
+            raise StateError('State archive has file/directory collisions.')
+    report = restoration_status('not-inspected')
+    report.update(status='blocked', assessment='zip-metadata-only',
+                  windows_entries=len(members), sqlite_sidecars=sidecars,
+                  candidate_store_pairs=sum(names == {'session.db', 'wacli.db'} for names in stores.values()),
+                  member_payloads_read=False,
+                  notice='Counts do not prove a WACLI store, schema, completeness, SQLite consistency or usable login; no data is extracted or converted.')
+    if not members:
+        report['blockers'].insert(0, {'code': 'windows-profile-not-visible',
+                                     'requires': 'An explicitly unlocked tool-secrets.zip with the standard Windows WhatsApp profile subtree; encrypted nested members are never opened.'})
+    return report
 
 
 def main(argv=None):
@@ -297,10 +349,17 @@ def main(argv=None):
     restore = sub.add_parser('restore-unlocked', help='explicit authorized unlocked ZIP -> NEW offline directory only')
     restore.add_argument('--archive', type=Path, required=True)
     restore.add_argument('--destination', type=Path, required=True)
+    windows = sub.add_parser('plan-windows-unlocked', help='metadata-only BLOCKED assessment; never extracts, migrates, installs or activates')
+    windows.add_argument('--archive', type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        if args.operation == 'plan':
-            result = {'status': 'metadata-only', 'entries': len(scan(args.state_root)), 'capture_requires': 'quiesced writers, existing store LOCKs, no sidecars, AES ZIP provider'}
+        if args.operation == 'plan-windows-unlocked':
+            print(json.dumps(plan_windows_unlocked(args.archive), sort_keys=True))
+            return 3  # incomplete, not a successful migration
+        elif args.operation == 'plan':
+            result = {'status': 'metadata-only', 'entries': len(scan(args.state_root)),
+                      'restoration': restoration_status('not-inspected'),
+                      'capture_requires': 'quiesced writers, existing store LOCKs, no sidecars, AES ZIP provider'}
         elif args.operation == 'capture':
             if not args.quiesced:
                 raise StateError('--quiesced is required; stop writers before capture.')

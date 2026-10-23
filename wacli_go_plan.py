@@ -1,5 +1,6 @@
 """WACLI's exact standard Linux install proposal; no probes or executor."""
 from __future__ import annotations
+from wacli_restore_contract import restoration_status
 
 
 def build_dry_plan(architecture: str) -> dict:
@@ -15,6 +16,7 @@ def build_dry_plan(architecture: str) -> dict:
         "execution_supported": False,
         "build_tested": False,
         "runtime_tested": False,
+        "restoration": restoration_status(),
         "paths": {
             "kind": "symbolic Go defaults; not effective-path observations",
             "GOBIN": "explicit absolute GOBIN, otherwise first GOPATH entry/bin (normally ~/go/bin)",
