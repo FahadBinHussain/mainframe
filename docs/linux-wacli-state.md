@@ -117,6 +117,14 @@ Windows profile. It is never mapped to Linux WACLI state without a separately
 proven schema migration. Windows restore preserves native payloads in its source
 archive and reports them as not activated.
 
+The [Windows parity review](linux-wacli-windows-parity.md) now records the
+exact capture gaps, both upstream schemas, absolute media-path semantics and
+profile-selection mismatch. A new `plan-windows-unlocked --archive /approved/unlocked/tool-secrets.zip`
+assessment reads ZIP metadata only and always remains blocked/incomplete; it
+does not supply missing provenance or snapshot consistency. Generic plans and
+native capture/export reports separate installation, preservation, migration,
+activation and usability, with `complete: false`.
+
 ## What still needs a separate action
 
 Normal install plus **explicit clean-store encrypted capture/offline restore**
