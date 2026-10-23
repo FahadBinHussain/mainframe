@@ -25,6 +25,10 @@
     {
       "path": "0006-lifecycle-api-and-sealed-media-membership.patch",
       "sha256": "433548969250094afcba700897f8331c83bd1b8f62aa2d99e08a3efd6f1d870f"
+    },
+    {
+      "path": "0007-causal-application-producers.patch",
+      "sha256": "c6abdd84ee6ee67cd9217614d2826a68e63bae2ea9fd3f144af8be4113349c65"
     }
   ],
   "whatsmeow": [
@@ -35,8 +39,14 @@
     {
       "path": "whatsmeow/0002-lifecycle-scopes-and-handler-drain.patch",
       "sha256": "7753deefbbfb1fb8e2ad7e678c9002b4f59c6a13d5dba5e7b30a0167d225989f"
+    },
+    {
+      "path": "whatsmeow/0003-causal-producer-admission.patch",
+      "sha256": "3b958a2a410d49c54cad16429daebc8cc5bca0464909d77e452e63b93d522a32"
     }
   ],
-  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestDrain|TestStage|TestEnumerateMediaMembership|TestStoreVerifyMedia|TestMediaDownload(ReadOnlyOutput|LockedStore))",
-  "dependency_test_pattern": "^Test(KeyShareDrain|Lifecycle|Synthetic)"
+  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestDrain|TestStage|TestEnumerateMediaMembership|TestStoreVerifyMedia|TestMediaDownload(ReadOnlyOutput|LockedStore)|TestOperation|TestAcceptedOperation|TestAddEventHandler)",
+  "dependency_test_pattern": "^Test(KeyShareDrain|Lifecycle|Synthetic|ProtocolLifecycle)",
+  "extension_status": "local-unsubmitted-unaccepted",
+  "capture_enabled": false
 }
