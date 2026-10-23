@@ -1,4 +1,4 @@
-"""Offline regression boundary for the exact still-blocked WACLI Go build."""
+"""Offline regression boundary for the exact planned WACLI proposal and disabled Go executor."""
 import json
 import os
 from pathlib import Path
@@ -39,7 +39,7 @@ class WacliReviewTests(unittest.TestCase):
             self.assertEqual(environment, dict(os.environ))
             return plan
 
-    def test_exact_pin_tags_source_and_original_command_remain_blocked(self):
+    def test_exact_pin_tags_source_and_standard_dry_plan(self):
         for architecture in ("x86_64", "aarch64"):
             with self.subTest(architecture=architecture):
                 plan = self.build(architecture=architecture)
@@ -47,21 +47,33 @@ class WacliReviewTests(unittest.TestCase):
                 self.assertEqual((action.name, action.version, action.tags, action.source),
                                  (PATH, "v0.15.0", ["sqlite_fts5"], "go"))
                 self.assertEqual(action.command, COMMAND)
-                self.assertEqual(action.status, "blocked")
+                self.assertEqual(action.status, "planned")
                 self.assertIsNone(action.archive)
-                self.assertIsNone(action.dry_plan)
-                self.assertIn(action.reason, plan.blockers)
-                for fragment in ("Go >=1.25.12", "CGO_ENABLED=1", "C compiler/libc", "bundled",
-                                 "v1.14.48", "not an external libsqlite3/FTS5 package",
-                                 "CGO_CFLAGS=-Wno-error=missing-braces", "provenance", "checksum",
-                                 "GOTOOLCHAIN=local", "GOBIN", "GOPATH", "GOMODCACHE", "GOCACHE",
-                                 "GOTMPDIR", "HOME/config", "missing/overlap/symlink", "GOENV/GOFLAGS/GOWORK",
-                                 "Official Go 1.25.12 Linux amd64/arm64", "all 31 declared module/go.mod",
-                                 "not verified archive bytes", "resolved Linux sqlite_fts5 build closure",
-                                 "Effective go env paths", "compiler/sysroot provenance remain unverified",
-                                 "toolchain/compiler execution is outside this dry-only review",
-                                 "No executor", "no live-home/PATH/cache changes"):
-                    self.assertIn(fragment, action.reason)
+                self.assertNotIn(action.reason, plan.blockers)
+                detail = action.dry_plan
+                self.assertEqual(detail["route"], "standard-linux-go-install")
+                self.assertTrue(detail["dry_only"])
+                for flag in ("execution_supported", "build_tested", "runtime_tested"):
+                    self.assertFalse(detail[flag])
+                self.assertIn("~/go/bin", detail["paths"]["GOBIN"])
+                self.assertIn("first GOPATH entry/pkg/mod", detail["paths"]["GOMODCACHE"])
+                self.assertIn("~/.cache/go-build", detail["paths"]["GOCACHE"])
+                self.assertIn("not effective-path", detail["paths"]["kind"])
+                prerequisites = detail["prerequisites"]
+                self.assertEqual(prerequisites["minimum_go"], "1.25.12")
+                self.assertEqual(prerequisites["environment"]["CGO_ENABLED"], "1")
+                self.assertEqual(prerequisites["environment"]["GOTOOLCHAIN"], "local")
+                self.assertEqual(prerequisites["environment"]["CGO_CFLAGS"], "-Wno-error=missing-braces")
+                self.assertEqual(prerequisites["environment"]["GOSUMDB"], "sum.golang.org")
+                self.assertIn("no external libsqlite3", prerequisites["sqlite"])
+                state = detail["state"]
+                self.assertTrue(state["separate_from_binary"])
+                self.assertEqual(state["default"], "~/.local/state/wacli")
+                self.assertEqual(state["legacy"], "~/.wacli")
+                self.assertIn("offline export", state["preservation"])
+                self.assertIn("live WAL capture", state["not_supported"])
+                self.assertIn("live account activation", state["not_supported"])
+                self.assertIn("Build/runtime not tested", action.reason)
 
     def test_other_versions_or_tags_do_not_borrow_exact_review(self):
         for declaration in (
@@ -120,12 +132,43 @@ class WacliReviewTests(unittest.TestCase):
             self.assertEqual((artifact["os"], artifact["kind"]), ("linux", "archive"))
             self.assertEqual(artifact["url"], "https://go.dev/dl/go1.25.12.linux-" + artifact["arch"] + ".tar.gz")
 
-    def test_selected_blocker_prevents_every_earlier_selected_mutation(self):
+    def test_plan_integrity_matches_recorded_evidence_not_host_verification(self):
+        observation = json.loads((Path(__file__).parents[1] /
+                                  "docs/linux-wacli-integrity-observation.json").read_text())
+        for architecture in ("x86_64", "aarch64"):
+            action = next(a for a in self.build(architecture=architecture).actions if a.kind == "go")
+            integrity = action.dry_plan["integrity"]
+            for field in ("module_sum", "go_mod_sum"):
+                self.assertEqual(integrity[field], observation["root_lookup"][field])
+            self.assertEqual(integrity["source_commit"], observation["proxy"]["source_commit"])
+            candidate = integrity["go_candidate"]
+            artifact = next(f for f in observation["go_distribution"]["files"] if f["url"] == candidate["url"])
+            for field in ("size", "sha256"):
+                self.assertEqual(candidate[field], artifact[field])
+            self.assertIn("ignores caller go.mod/go.sum", integrity["install_semantics"])
+            self.assertIn("not an enforced install lock", integrity["install_semantics"])
+            self.assertEqual(integrity["declared_checksum_pairs"], len(observation["requirements"]))
+            self.assertEqual(integrity["go_sum_records"], observation["counts"]["sum_entries"])
+
+    def test_go_rejected_before_other_adapter_preflight(self):
+        plan = self.build()
+        plan.actions.insert(0, lp.Action("gws-archive", "@googleworkspace/cli"))
+        runner = Mock()
+        with patch.object(lp, "host_info", return_value=("ubuntu", "x86_64")), \
+                patch.object(lp.gws_tools, "validate_install") as validate, \
+                patch.object(lp, "_apt_preflight") as apt:
+            with self.assertRaisesRegex(RuntimeError, "Go dry plan only"):
+                lp.execute(plan, ["curl", "@googleworkspace/cli", PATH], runner=runner)
+        validate.assert_not_called()
+        apt.assert_not_called()
+        runner.assert_not_called()
+
+    def test_selected_planned_go_prevents_every_earlier_selected_mutation(self):
         plan = self.build()
         runner = Mock()
         with patch.object(lp, "host_info", return_value=("ubuntu", "x86_64")), \
                 patch.object(lp, "_apt_preflight") as apt:
-            with self.assertRaisesRegex(RuntimeError, "Unresolved blockers"):
+            with self.assertRaisesRegex(RuntimeError, "Go dry plan only"):
                 lp.execute(plan, ["curl", PATH], runner=runner)
         apt.assert_not_called()
         runner.assert_not_called()
