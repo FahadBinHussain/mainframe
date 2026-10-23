@@ -21,14 +21,22 @@
     {
       "path": "0005-runtime-admission-and-keyshare-drain.patch",
       "sha256": "a5544cdf7494f97d05746ac321c82603f149a78b6f92b9a203da9e89b5102287"
+    },
+    {
+      "path": "0006-lifecycle-api-and-sealed-media-membership.patch",
+      "sha256": "433548969250094afcba700897f8331c83bd1b8f62aa2d99e08a3efd6f1d870f"
     }
   ],
   "whatsmeow": [
     {
       "path": "whatsmeow/0001-scoped-keyshare-drain.patch",
       "sha256": "e620b68bfa2a900060b6b50ed5c8873fe5965a85292472c6ddff9342d932f80a"
+    },
+    {
+      "path": "whatsmeow/0002-lifecycle-scopes-and-handler-drain.patch",
+      "sha256": "7753deefbbfb1fb8e2ad7e678c9002b4f59c6a13d5dba5e7b30a0167d225989f"
     }
   ],
-  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestMediaDownload(ReadOnlyOutput|LockedStore))",
-  "dependency_test_pattern": "^TestKeyShareDrain"
+  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestDrain|TestStage|TestEnumerateMediaMembership|TestStoreVerifyMedia|TestMediaDownload(ReadOnlyOutput|LockedStore))",
+  "dependency_test_pattern": "^Test(KeyShareDrain|Lifecycle|Synthetic)"
 }
