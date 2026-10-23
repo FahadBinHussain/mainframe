@@ -37,6 +37,10 @@
     {
       "path": "0009-owned-quote-and-handle-inventory.patch",
       "sha256": "9ed7ad74d4fe16344611bb16f1222879924f0eab861c23f023b939c021a15ee3"
+    },
+    {
+      "path": "0010-owned-command-reads.patch",
+      "sha256": "daab748114e9e368291b8652d801b96da392c69e1a09d35f8819a9480aa04026"
     }
   ],
   "whatsmeow": [

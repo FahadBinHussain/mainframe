@@ -1,14 +1,14 @@
 # WACLI raw-handle calls still needing ownership review
 
-The final nine-patch WACLI chain contains **212 production zero-argument accessor call sites: 110 `DB()` and 102 `WA()`**. Every entry remains conservatively `raw_escape` / **UNPROVEN**. This is a complete syntactic list of these calls, not a proof of lifecycle coverage.
+The final ten-patch WACLI chain contains **194 production zero-argument accessor call sites: 92 `DB()` and 102 `WA()`**. Every entry remains conservatively `raw_escape` / **UNPROVEN**. This is a complete syntactic list of these calls, not a proof of lifecycle coverage.
 
-The chain applies to WACLI `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b` with the four pinned whatsmeow patches. The [SHA-256 manifest](../patches/wacli/runtime-series.json) identifies the exact source artifacts; [patch 0009](../patches/wacli/0009-owned-quote-and-handle-inventory.patch) carries the AST regression and full machine-readable `cmd/wacli/testdata/owned_handle_inventory.json` fixture. Line numbers below refer to the reconstructed final source, not Mainframe files.
+The chain applies to WACLI `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b` with the four pinned whatsmeow patches. The [SHA-256 manifest](../patches/wacli/runtime-series.json) identifies the exact source artifacts; [patch 0009](../patches/wacli/0009-owned-quote-and-handle-inventory.patch) introduces and [patch 0010](../patches/wacli/0010-owned-command-reads.patch) updates the AST regression and full machine-readable `cmd/wacli/testdata/owned_handle_inventory.json` fixture. Line numbers below refer to the reconstructed final source, not Mainframe files.
 
 ## What changed, and what has not
 
-File and sticker sends select owned client and database facets before accessing a raw handle. Their quoted-message and media-metadata reads have per-invocation child leases. Their remaining raw accessor entries below are compatibility branches for non-owned callers, not evidence that those callers are fenced. Text-send helpers still use a raw reply adapter. No other command family is certified by this change.
+File and sticker sends select owned client and database facets before accessing a raw handle. Their quoted-message and media-metadata reads have per-invocation child leases. Their remaining raw accessor entries below are compatibility branches for non-owned callers, not evidence that those callers are fenced. Text-send helpers still use a raw reply adapter. Patch 0010 adds leased message-read and local archive-diagnostic facades. Their scoped command routes do not borrow raw handles; consistent page callbacks and synchronous resolver work stay private inside the invocation lease. This fences those application invocations, not arbitrary SDK descendants or output descriptors.
 
-Large remaining families include message reads/mutations, group administration, poll state, media download, contacts, cleanup, and profile/auth client operations. The internal `LocalResolver` return and chat-state handler removal also remain raw. A root command scope alone does not prove a borrowed handle or callback continuation is joined.
+Large remaining families include legacy message-mutation helpers, message mutations, group administration, poll state, media download, contacts, cleanup, and profile/auth client operations. The internal `LocalResolver` return and chat-state handler removal also remain raw. The migrated routes are message list/search/starred/show/context/export reads and changes; calls list, history coverage/fill planning, and store statistics. Export file publication remains a separate filesystem-ownership gap. A root command scope alone does not prove a borrowed handle or callback continuation is joined.
 
 Public SDK synchronous methods, SDK `Store` and `DangerousInternals`, application fields/direct store methods, previously borrowed handles, method values and aliases, arbitrary callbacks, drivers/descriptors and independent processes remain separate gaps. Both production drain APIs still refuse a held capture; capture, publication and usable restore remain disabled. No Windows runtime is claimed.
 
@@ -23,7 +23,6 @@ After source review only, regenerate the test fixture with `WACLI_UPDATE_OWNED_H
 | Final source file | DB | WA | Total |
 |---|---:|---:|---:|
 | `cmd/wacli/auth.go` | 0 | 3 | 3 |
-| `cmd/wacli/calls.go` | 1 | 0 | 1 |
 | `cmd/wacli/channels.go` | 3 | 5 | 8 |
 | `cmd/wacli/chats.go` | 3 | 0 | 3 |
 | `cmd/wacli/chats_cleanup.go` | 6 | 0 | 6 |
@@ -40,16 +39,12 @@ After source review only, regenerate the test fixture with `WACLI_UPDATE_OWNED_H
 | `cmd/wacli/groups_participants.go` | 2 | 3 | 5 |
 | `cmd/wacli/groups_prune.go` | 2 | 0 | 2 |
 | `cmd/wacli/groups_refresh_list.go` | 4 | 2 | 6 |
-| `cmd/wacli/history.go` | 2 | 0 | 2 |
 | `cmd/wacli/media_download.go` | 4 | 1 | 5 |
-| `cmd/wacli/messages_changes.go` | 1 | 0 | 1 |
 | `cmd/wacli/messages_delete.go` | 6 | 3 | 9 |
 | `cmd/wacli/messages_edit.go` | 1 | 1 | 2 |
 | `cmd/wacli/messages_forward.go` | 3 | 3 | 6 |
-| `cmd/wacli/messages_helpers.go` | 3 | 0 | 3 |
-| `cmd/wacli/messages_pages.go` | 2 | 0 | 2 |
+| `cmd/wacli/messages_helpers.go` | 2 | 0 | 2 |
 | `cmd/wacli/messages_purge.go` | 3 | 0 | 3 |
-| `cmd/wacli/messages_read.go` | 7 | 0 | 7 |
 | `cmd/wacli/poll_cmd.go` | 10 | 6 | 16 |
 | `cmd/wacli/presence.go` | 0 | 3 | 3 |
 | `cmd/wacli/profile.go` | 0 | 7 | 7 |
@@ -70,7 +65,6 @@ After source review only, regenerate the test fixture with `WACLI_UPDATE_OWNED_H
 | `cmd/wacli/send_voice_cmd.go` | 0 | 1 | 1 |
 | `cmd/wacli/store_cleanup.go` | 5 | 0 | 5 |
 | `cmd/wacli/store_media_membership.go` | 1 | 0 | 1 |
-| `cmd/wacli/store_stats.go` | 4 | 0 | 4 |
 | `internal/app/app.go` | 0 | 1 | 1 |
 | `internal/app/chat_state.go` | 0 | 1 | 1 |
 
@@ -83,7 +77,6 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/auth.go:281:14` | `newAuthStatusCmd` | `a.WA()` | 1 |
 | `cmd/wacli/auth.go:289:17` | `newAuthStatusCmd` | `a.WA()` | 2 |
 | `cmd/wacli/auth.go:356:14` | `newAuthLogoutCmd` | `a.WA()` | 1 |
-| `cmd/wacli/calls.go:66:18` | `newCallsListCmd` | `a.DB()` | 1 |
 | `cmd/wacli/channels.go:52:17` | `newChannelsListCmd` | `a.WA()` | 1 |
 | `cmd/wacli/channels.go:57:36` | `newChannelsListCmd` | `a.DB()` | 1 |
 | `cmd/wacli/channels.go:117:17` | `newChannelsInfoCmd` | `a.WA()` | 1 |
@@ -165,14 +158,11 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/groups_refresh_list.go:50:9` | `newGroupsRefreshCmd` | `a.DB()` | 2 |
 | `cmd/wacli/groups_refresh_list.go:52:14` | `newGroupsRefreshCmd` | `a.DB()` | 3 |
 | `cmd/wacli/groups_refresh_list.go:89:15` | `newGroupsListCmd` | `a.DB()` | 1 |
-| `cmd/wacli/history.go:48:21` | `newHistoryCoverageCmd` | `a.DB()` | 1 |
-| `cmd/wacli/history.go:98:21` | `newHistoryFillCmd` | `a.DB()` | 1 |
 | `cmd/wacli/media_download.go:57:24` | `downloadExactMedia` | `reader.DB()` | 1 |
 | `cmd/wacli/media_download.go:139:15` | `downloadExactMedia` | `roReader.DB()` | 2 |
 | `cmd/wacli/media_download.go:177:15` | `executeExactMediaDownload` | `a.DB()` | 1 |
 | `cmd/wacli/media_download.go:197:12` | `executeExactMediaDownload` | `a.WA()` | 1 |
 | `cmd/wacli/media_download.go:224:13` | `executeExactMediaDownload` | `a.DB()` | 2 |
-| `cmd/wacli/messages_changes.go:24:16` | `newMessagesChangesCmd` | `a.DB()` | 1 |
 | `cmd/wacli/messages_delete.go:74:25` | `newMessagesDeleteCmd` | `a.WA()` | 1 |
 | `cmd/wacli/messages_delete.go:78:24` | `newMessagesDeleteCmd` | `a.DB()` | 1 |
 | `cmd/wacli/messages_delete.go:85:16` | `newMessagesDeleteCmd` | `a.DB()` | 2 |
@@ -191,20 +181,10 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/messages_forward.go:92:14` | `newMessagesForwardCmd` | `a.DB()` | 2 |
 | `cmd/wacli/messages_forward.go:95:14` | `newMessagesForwardCmd` | `a.DB()` | 3 |
 | `cmd/wacli/messages_helpers.go:23:42` | `messageChatJIDFilter` | `a.DB()` | 1 |
-| `cmd/wacli/messages_helpers.go:77:49` | `resolveMessageSenderNames` | `a.DB()` | 1 |
-| `cmd/wacli/messages_helpers.go:202:37` | `loadMessageMutationTarget` | `a.DB()` | 1 |
-| `cmd/wacli/messages_pages.go:20:9` | `readListMessagePage` | `a.DB()` | 1 |
-| `cmd/wacli/messages_pages.go:40:9` | `readSearchMessagePage` | `a.DB()` | 1 |
+| `cmd/wacli/messages_helpers.go:105:37` | `loadMessageMutationTarget` | `a.DB()` | 1 |
 | `cmd/wacli/messages_purge.go:46:16` | `newMessagesPurgeCmd` | `a.DB()` | 1 |
 | `cmd/wacli/messages_purge.go:69:23` | `newMessagesPurgeCmd` | `a.DB()` | 2 |
 | `cmd/wacli/messages_purge.go:76:14` | `newMessagesPurgeCmd` | `a.DB()` | 3 |
-| `cmd/wacli/messages_read.go:59:41` | `newMessagesListCmd` | `a.DB()` | 1 |
-| `cmd/wacli/messages_read.go:139:39` | `newMessagesSearchCmd` | `a.DB()` | 1 |
-| `cmd/wacli/messages_read.go:183:8` | `newMessagesSearchCmd` | `a.DB()` | 2 |
-| `cmd/wacli/messages_read.go:234:17` | `newMessagesStarredCmd` | `a.DB()` | 1 |
-| `cmd/wacli/messages_read.go:249:18` | `newMessagesStarredCmd` | `a.DB()` | 2 |
-| `cmd/wacli/messages_read.go:288:37` | `newMessagesShowCmd` | `a.DB()` | 1 |
-| `cmd/wacli/messages_read.go:334:47` | `newMessagesContextCmd` | `a.DB()` | 1 |
 | `cmd/wacli/poll_cmd.go:103:33` | `newPollVoteCmd` | `a.WA()` | 1 |
 | `cmd/wacli/poll_cmd.go:122:12` | `newPollVoteCmd` | `a.WA()` | 2 |
 | `cmd/wacli/poll_cmd.go:231:13` | `buildPollVoteInfoForChats` | `a.DB()` | 1 |
@@ -286,9 +266,5 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/store_cleanup.go:96:17` | `newStoreCleanupCmd` | `a.DB()` | 4 |
 | `cmd/wacli/store_cleanup.go:97:15` | `newStoreCleanupCmd` | `a.DB()` | 5 |
 | `cmd/wacli/store_media_membership.go:27:20` | `newStoreVerifyMediaCmd` | `a.DB()` | 1 |
-| `cmd/wacli/store_stats.go:26:18` | `newStoreStatsCmd` | `a.DB()` | 1 |
-| `cmd/wacli/store_stats.go:31:19` | `newStoreStatsCmd` | `a.DB()` | 2 |
-| `cmd/wacli/store_stats.go:36:23` | `newStoreStatsCmd` | `a.DB()` | 3 |
-| `cmd/wacli/store_stats.go:41:26` | `newStoreStatsCmd` | `a.DB()` | 4 |
 | `internal/app/app.go:370:10` | `LocalResolver` | `a.WA()` | 1 |
 | `internal/app/chat_state.go:43:14` | `AddChatStatePersistenceHandler` | `a.WA()` | 1 |
