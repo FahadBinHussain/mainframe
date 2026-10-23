@@ -402,15 +402,16 @@ class LinuxPackagesTests(unittest.TestCase):
         for item in ('pwsh', 'discord'):
             self.assertIn('not validated' if item == 'pwsh' else 'no validated', blocked[item])
 
-    def test_pip_freeze_required_for_backup_root_and_windows_lines_blocked(self):
+    def test_pip_freeze_optional_and_ignored_for_backup_root(self):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
-            root = Path(d); plan = lp.build_plan(ROOT, backup_root=root, distro="ubuntu", architecture="x86_64")
-            self.assertTrue(any("pip-freeze.txt" in x for x in plan.blockers))
-            (root / "pip-freeze.txt").write_text("requests==2.32.0\npywin32==306\n")
-            plan = lp.build_plan(ROOT, backup_root=root, distro="ubuntu", architecture="x86_64")
-            self.assertTrue(any(a.status == "blocked" and a.name == "pip-freeze.txt" for a in plan.actions))
-            self.assertTrue(any("pywin32" in x for x in plan.blockers))
+            root = Path(d)
+            before = lp.build_plan(ROOT, backup_root=root, distro="ubuntu", architecture="x86_64")
+            (root / "pip-freeze.txt").write_text("synthetic-retired-package==1.0\n")
+            after = lp.build_plan(ROOT, backup_root=root, distro="ubuntu", architecture="x86_64")
+            self.assertEqual(before.to_dict(), after.to_dict())
+            self.assertFalse(any(a.kind in {"pip-venv", "pip-install"} for a in after.actions))
+            self.assertFalse(any("pip-freeze.txt" in x for x in after.blockers))
 
     def test_execute_rejects_unknown_select_and_blockers_before_runner(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")

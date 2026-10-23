@@ -84,6 +84,17 @@ class LinuxRestoreTests(unittest.TestCase):
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/unmapped/state.strange').read_bytes(), b'opaque')
         self.assertFalse(any((self.dest / 'home-staging').iterdir()))
 
+    def test_legacy_pip_snapshot_preserved_as_metadata_never_staged(self):
+        original = b'--extra-index-url https://synthetic.invalid/simple\r\nfixture-only==1.0\r\n'
+        self.archive([('pip-freeze.txt', original)])
+        before = lr.file_hash(self.backup / 'mainframe-quick.zip')
+        report = self.recover(True)
+        self.assertFalse(report['errors'])
+        self.assertEqual(report['entries'][0]['category'], 'metadata')
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/pip-freeze.txt').read_bytes(), original)
+        self.assertEqual(lr.file_hash(self.backup / 'mainframe-quick.zip'), before)
+        self.assertFalse(any((self.dest / 'home-staging').iterdir()))
+
     def test_nested_secrets_preserved_opaque(self):
         cipher = b'synthetic encrypted archive fixture, never a real credential'
         self.archive([('mainframe-secrets.zip', cipher)])
