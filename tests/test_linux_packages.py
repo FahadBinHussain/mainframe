@@ -31,6 +31,16 @@ ANDROID_RELEASE = {
     "terms_url": "https://developer.android.com/studio/terms.html",
 }
 
+BITWARDEN_RELEASE = {
+    "version": "2026.10.0",
+    "url": "https://github.com/bitwarden/clients/releases/download/cli-v2026.10.0/bw-oss-linux-2026.10.0.zip",
+    "sha256": "c" * 64,
+    "size": "1234",
+    "asset_name": "bw-oss-linux-2026.10.0.zip",
+    "manifest_source": "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/bitwarden-cli.json",
+    "release_source": "https://api.github.com/repos/bitwarden/clients/releases/tags/cli-v2026.10.0",
+}
+
 class LinuxPackagesTests(unittest.TestCase):
     def setUp(self):
         host = patch.object(lp, 'host_info', return_value=('ubuntu', 'x86_64'))
@@ -42,6 +52,9 @@ class LinuxPackagesTests(unittest.TestCase):
         anydesk_metadata = patch.object(lp.anydesk_tools, 'resolve_release', return_value=dict(ANYDESK_RELEASE))
         anydesk_metadata.start()
         self.addCleanup(anydesk_metadata.stop)
+        bitwarden_metadata = patch.object(lp.bitwarden_tools, 'resolve_release', return_value=dict(BITWARDEN_RELEASE))
+        bitwarden_metadata.start()
+        self.addCleanup(bitwarden_metadata.stop)
 
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
