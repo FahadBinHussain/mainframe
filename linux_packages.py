@@ -385,6 +385,18 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
         if tags: cmd.extend(["-tags", ",".join(tags)])
         cmd.append(f"{path}@{version}" if version else path)
         reason = f"{path}: pinned Go toolchain, CGO/native build prerequisites and explicit isolated GOBIN/cache destination preflight are not validated; no live-home build/install."
+        if path == "github.com/openclaw/wacli/cmd/wacli" and version == "v0.15.0" and tags == ["sqlite_fts5"]:
+            reason = (f"{path}@{version}: upstream requires Go >=1.25.12, CGO_ENABLED=1, "
+                      "a C compiler/libc development headers and sqlite_fts5 (bundled go-sqlite3 "
+                      "v1.14.48 SQLite, not an external libsqlite3/FTS5 package); upstream documents "
+                      "CGO_CFLAGS=-Wno-error=missing-braces. Exact existing Go/compiler provenance "
+                      "and native prerequisites, full dependency/checksum verification, GOTOOLCHAIN=local "
+                      "with no automatic toolchain download, and explicit isolated GOBIN, GOPATH, "
+                      "GOMODCACHE, GOCACHE, GOTMPDIR and HOME/config roots with missing/overlap/symlink "
+                      "rejection are not validated. Ambient GOENV/GOFLAGS/GOWORK/CGO/compiler settings "
+                      "must not override the reviewed build. No executor or cached-global-binary/release "
+                      "fallback; no live-home/PATH/cache changes or build/install; "
+                      "see docs/linux-wacli-build-review.md.")
         blockers.append(reason)
         actions.append(Action("go", path, cmd, version=version, tags=tags, status="blocked", reason=reason, source="go"))
     root = backup_root or repo
