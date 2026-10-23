@@ -184,3 +184,13 @@ Linux cannot reconstruct data omitted before ZIP creation. The source policy exc
 ## Correct interpretation of results
 
 Separate reporting must distinguish **raw bytes preserved**, **metadata preserved**, **candidate configs staged**, **packages rebuilt**, **items blocked by Windows-only/DPAPI/registry/task semantics**, and **items absent by deliberate backup exclusion**. Raw ZIP preservation can be complete while native restoration remains incomplete. A successful candidate copy or package command does not prove identical behavior. This release is therefore **data-preserving where listed and explicitly incomplete**, not a 100% Linux runtime and not an operationally identical Windows-machine restore.
+
+## WACLI normal-install user data
+
+Normal installation does not require a portable binary to preserve state.
+[The explicit WACLI state helper](linux-wacli-state.md) captures a caller-selected,
+quiesced Linux state root into the established AES-256 secret-envelope layout,
+or blocks if sidecars/locks/dependencies make that unsafe. Restoration is an
+explicit unlocked-archive export to a new offline destination. Ordinary recovery
+keeps that envelope opaque and does not automatically stage native state or map
+Windows WhatsApp profiles into a Linux account. Go build/install stays guarded.

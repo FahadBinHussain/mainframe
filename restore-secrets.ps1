@@ -11,6 +11,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Report-WacliPayloadPreserved {
+    param([Parameter(Mandatory)][string]$ArchivePath)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = $null
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+        $found = @($zip.Entries | Where-Object { $_.FullName -replace '\\','/' -match '(?i)(^|/)NativeState/wacli(/|$)' })
+        if ($found.Count -gt 0) {
+            Write-Warning 'Preserved WACLI NativeState/wacli payload detected; it is Linux-native state and is not activated or remapped into Windows accounts.'
+        }
+    } finally { if ($zip) { $zip.Dispose() } }
+}
+
 function Resolve-TemplateString {
     param([AllowNull()][string]$Value)
 
@@ -47,6 +60,24 @@ function Get-SafeArchivePath {
     }
 
     return $relative
+}
+
+function Test-WacliReservedArchiveSource {
+    param([Parameter(Mandatory)][string]$Source)
+
+    # Custom manifests must not make a Windows target receive NativeState/wacli
+    # itself, a descendant, or a parent directory containing that tree.
+    $normalized = $Source -replace '\\', '/'
+    if ($normalized -match '(?i)(^|/)NativeState/wacli(/|$)') {
+        return $true
+    }
+    if (Test-Path -LiteralPath $Source -PathType Container) {
+        $reserved = Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction Stop |
+            Where-Object { ($_.FullName -replace '\\', '/') -match '(?i)(^|/)NativeState/wacli(/|$)' } |
+            Select-Object -First 1
+        if ($reserved) { return $true }
+    }
+    return $false
 }
 
 function Copy-PathContents {
@@ -88,6 +119,7 @@ if (-not (Test-Path -LiteralPath $ManifestPath)) {
 if (-not (Test-Path -LiteralPath $ArchivePath)) {
     throw "Missing secrets archive: $ArchivePath"
 }
+Report-WacliPayloadPreserved -ArchivePath $ArchivePath
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 $enabled = @($manifest.items | Where-Object { -not $_.Disabled })
@@ -132,6 +164,11 @@ try {
 
         if (-not (Test-Path -LiteralPath $source)) {
             Write-Warning "Archive entry not found, skipping $($item.Name): $archiveRelativePath"
+            continue
+        }
+
+        if (Test-WacliReservedArchiveSource -Source $source) {
+            Write-Warning "Skipping secret item '$($item.Name)': archive source contains reserved NativeState/wacli payload; it is preserved and never copied to a Windows target."
             continue
         }
 
