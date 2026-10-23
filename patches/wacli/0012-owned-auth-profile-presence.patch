@@ -270,10 +270,10 @@ index 0000000..c29bb2e
 +}
 diff --git a/cmd/wacli/owned_session_cleanup.go b/cmd/wacli/owned_session_cleanup.go
 new file mode 100644
-index 0000000..3f442c1
+index 0000000..4f18a6f
 --- /dev/null
 +++ b/cmd/wacli/owned_session_cleanup.go
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,39 @@
 +package main
 +
 +import (
@@ -301,14 +301,24 @@ index 0000000..3f442c1
 +// Calling close first would wait forever for this very command token.
 +func finishOwnedSession(a *app.App, lk *lock.Lock, finish func(error), resultErr error) error {
 +	finish(resultErr)
-+	return errors.Join(resultErr, closeOwnedSession(a, lk))
++	return joinOwnedCommandAndClose(resultErr, closeOwnedSession(a, lk))
++}
++
++// The owner may have retained the exact command error during finish. Return
++// that close error intact instead of duplicating its message; distinct close
++// and lock failures must still survive alongside the command error.
++func joinOwnedCommandAndClose(resultErr, closeErr error) error {
++	if resultErr != nil && closeErr != nil && errors.Is(closeErr, resultErr) {
++		return closeErr
++	}
++	return errors.Join(resultErr, closeErr)
 +}
 diff --git a/cmd/wacli/owned_session_cleanup_test.go b/cmd/wacli/owned_session_cleanup_test.go
 new file mode 100644
-index 0000000..160bfe5
+index 0000000..6c7b240
 --- /dev/null
 +++ b/cmd/wacli/owned_session_cleanup_test.go
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,109 @@
 +package main
 +
 +import (
@@ -317,6 +327,7 @@ index 0000000..160bfe5
 +	"go/ast"
 +	"go/parser"
 +	"go/token"
++	"strings"
 +	"testing"
 +	"time"
 +
@@ -336,6 +347,9 @@ index 0000000..160bfe5
 +	case err := <-done:
 +		if !errors.Is(err, cause) {
 +			t.Fatalf("cleanup lost cause: %v", err)
++		}
++		if n := strings.Count(err.Error(), cause.Error()); n != 1 {
++			t.Fatalf("command failure printed %d times: %v", n, err)
 +		}
 +	case <-time.After(time.Second):
 +		finish(cause) // unblock an erroneous close-first implementation
@@ -373,6 +387,45 @@ index 0000000..160bfe5
 +	})
 +	if begins != 3 || finishes != 3 {
 +		t.Fatalf("auth scope/cleanup routes = %d/%d, want 3/3", begins, finishes)
++	}
++}
++
++func TestOwnedSessionJoinDeduplicatesOnlyContainedCommandError(t *testing.T) {
++	commandErr := errors.New("synthetic command failure")
++	closeErr := errors.New("synthetic distinct close failure")
++	for _, tc := range []struct {
++		name           string
++		command, close error
++		commandCount   int
++	}{
++		{"nil", nil, nil, 0},
++		{"command-only", commandErr, nil, 1},
++		{"close-only", nil, closeErr, 0},
++		{"same", commandErr, commandErr, 1},
++		{"contained-with-distinct-close", commandErr, errors.Join(commandErr, closeErr), 1},
++		{"distinct", commandErr, closeErr, 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got := joinOwnedCommandAndClose(tc.command, tc.close)
++			if tc.command != nil && !errors.Is(got, tc.command) {
++				t.Fatalf("lost command cause: %v", got)
++			}
++			if tc.close != nil && !errors.Is(got, tc.close) {
++				t.Fatalf("lost close cause: %v", got)
++			}
++			if tc.command == nil && tc.close == nil && got != nil {
++				t.Fatalf("nil errors became %v", got)
++			}
++			if got != nil && strings.Count(got.Error(), commandErr.Error()) != tc.commandCount {
++				t.Fatalf("duplicated/missing command diagnostic: %v", got)
++			}
++		})
++	}
++	// Equal text is not identity: retain both different error values.
++	other := errors.New(commandErr.Error())
++	got := joinOwnedCommandAndClose(commandErr, other)
++	if !errors.Is(got, commandErr) || !errors.Is(got, other) || strings.Count(got.Error(), commandErr.Error()) != 2 {
++		t.Fatalf("string-based deduplication discarded a distinct cause: %v", got)
 +	}
 +}
 diff --git a/cmd/wacli/presence.go b/cmd/wacli/presence.go
@@ -512,164 +565,162 @@ index 597800e..9c11efe 100644
 -func (f *fakePresenceWatchApp) WatchPresence(_ context.Context, jid types.JID, wait time.Duration) (*app.PresenceState, error) {
 +func (f *fakePresenceWatchApp) WatchPresenceOwned(_ context.Context, jid types.JID, wait time.Duration) (*app.PresenceState, error) {
 diff --git a/cmd/wacli/profile.go b/cmd/wacli/profile.go
-index 006fd25..7bcd15f 100644
+index 006fd25..f376866 100644
 --- a/cmd/wacli/profile.go
 +++ b/cmd/wacli/profile.go
-@@ -6,0 +7 @@ import (
-+	"errors"
-@@ -49 +50 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+@@ -49 +49 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -59,4 +60 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+@@ -59,4 +59 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel := withTimeout(context.Background(), flags)
 -			defer cancel()
 -
 -			a, lk, err := newApp(ctx, flags, true, false)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
-@@ -66,6 +64,3 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+@@ -66,6 +63,3 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
 -			defer closeApp(a, lk)
 -
 -			if err := a.EnsureAuthed(ctx); err != nil {
 -				return err
 -			}
 -			if err := a.Connect(ctx, false, nil); err != nil {
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
 +			if err != nil {
-@@ -75 +70 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+@@ -75 +69 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
 -			pictureID, err := a.WA().SetProfilePicture(ctx, imgBytes)
 +			pictureID, err := owned.SetProfilePicture(ctx, imgBytes)
-@@ -95 +90 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
+@@ -95 +89 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -99 +94,6 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
+@@ -99 +93,6 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
 +			if err != nil {
 +				return err
 +			}
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
-@@ -103,3 +103 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
+@@ -103,3 +102 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
 -			defer cancel()
 -			defer closeApp(a, lk)
 -			pictureID, err := a.WA().SetProfilePicture(ctx, nil)
 +			pictureID, err := owned.SetProfilePicture(ctx, nil)
-@@ -124 +122 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
+@@ -124 +121 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -132 +130 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
+@@ -132 +129 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
-@@ -136,3 +134,6 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
+@@ -136,3 +133,6 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
 -			defer cancel()
 -			defer closeApp(a, lk)
 -			if err := a.WA().SetStatusMessage(ctx, about); err != nil {
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
 +			if err != nil {
 +				return err
 +			}
 +			if err := owned.SetStatusMessage(ctx, about); err != nil {
-@@ -156 +157 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
+@@ -156 +156 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -164 +165,6 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
+@@ -164 +164,6 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
 +			if err != nil {
 +				return err
 +			}
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
-@@ -168,3 +174 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
+@@ -168,3 +173 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
 -			defer cancel()
 -			defer closeApp(a, lk)
 -			if err := a.WA().SetProfileName(ctx, name); err != nil {
 +			if err := owned.SetProfileName(ctx, name); err != nil {
-@@ -190 +194 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
+@@ -190 +193 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -198 +202 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
+@@ -198 +201 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
-@@ -202,3 +206,6 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
+@@ -202,3 +205,6 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
 -			defer cancel()
 -			defer closeApp(a, lk)
 -			info, err := a.WA().GetProfilePictureInfo(ctx, target, preview, existingID)
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
 +			if err != nil {
 +				return err
 +			}
 +			info, err := owned.GetProfilePictureInfo(ctx, target, preview, existingID)
-@@ -232 +239 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
+@@ -232 +238 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -240 +247,6 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
+@@ -240 +246,6 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
 +			if err != nil {
 +				return err
 +			}
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
-@@ -244,3 +256 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
+@@ -244,3 +255 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
 -			defer cancel()
 -			defer closeApp(a, lk)
 -			output, err := fetchProfileAbout(ctx, a.WA(), target)
 +			output, err := fetchProfileAbout(ctx, owned, target)
-@@ -267 +277 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+@@ -267 +276 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
 -		RunE: func(cmd *cobra.Command, args []string) error {
 +		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
-@@ -275 +285 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+@@ -275 +284 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
 -			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
 +			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
-@@ -279,3 +289,6 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+@@ -279,3 +288,6 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
 -			defer cancel()
 -			defer closeApp(a, lk)
 -			profile, err := a.WA().GetBusinessProfile(ctx, target)
-+			defer func() { resultErr = errors.Join(resultErr, cleanup(resultErr)) }()
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
 +			owned, err := a.OwnedWA(ctx)
 +			if err != nil {
 +				return err
 +			}
 +			profile, err := owned.GetBusinessProfile(ctx, target)
-@@ -297,3 +310,3 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+@@ -297,3 +309,3 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
 -func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, context.CancelFunc, *app.App, *lock.Lock, error) {
 -	ctx, cancel := withTimeout(context.Background(), flags)
 -	a, lk, err := newApp(ctx, flags, needLock, false)
 +func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, func(error) error, *app.App, *lock.Lock, error) {
 +	rootCtx, cancel := withTimeout(context.Background(), flags)
 +	a, lk, err := newApp(rootCtx, flags, needLock, false)
-@@ -304 +317,2 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+@@ -304 +316,2 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
 -	if err := a.EnsureAuthed(ctx); err != nil {
 +	ctx, finish, err := a.BeginScopedOperation(rootCtx)
 +	if err != nil {
-@@ -306,2 +320 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+@@ -306,2 +319 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
 -		closeApp(a, lk)
 -		return nil, nil, nil, nil, err
-+		return nil, nil, nil, nil, errors.Join(err, closeOwnedSession(a, lk))
-@@ -309 +322,3 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
++		return nil, nil, nil, nil, joinOwnedCommandAndClose(err, closeOwnedSession(a, lk))
+@@ -309 +321,3 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
 -	if err := a.Connect(ctx, false, nil); err != nil {
 +	auth, err := a.OwnedAuth(ctx)
 +	if err != nil {
 +		finish(err)
-@@ -311,2 +326,11 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+@@ -311,2 +325,11 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
 -		closeApp(a, lk)
 -		return nil, nil, nil, nil, err
-+		return nil, nil, nil, nil, errors.Join(err, closeOwnedSession(a, lk))
++		return nil, nil, nil, nil, joinOwnedCommandAndClose(err, closeOwnedSession(a, lk))
 +	}
 +	if err := auth.Connect(ctx); err != nil {
 +		finish(err)
 +		cancel()
-+		return nil, nil, nil, nil, errors.Join(err, closeOwnedSession(a, lk))
++		return nil, nil, nil, nil, joinOwnedCommandAndClose(err, closeOwnedSession(a, lk))
 +	}
 +	cleanup := func(resultErr error) error {
 +		cancel()
 +		finish(resultErr)
 +		return closeOwnedSession(a, lk)
-@@ -314 +338 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+@@ -314 +337 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
 -	return ctx, cancel, a, lk, nil
 +	return ctx, cleanup, a, lk, nil
 diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
