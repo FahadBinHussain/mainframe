@@ -32,11 +32,13 @@ python3 wacli_snapshot.py capture \
 
 Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The existing clean-closed native capture is unchanged; this new operation does not relax its sidecar checks. Both Windows backup guards remain unchanged, including the VSS-remapped guard.
 
-## Why no upstream command is being added yet
+## Upstream command proposal, not a snapshot backend
 
-The reviewed [WACLI v0.15.0 source](https://github.com/openclaw/wacli/tree/a020de724180d31eccfa5241d45443402d62fb06) has no coordinated snapshot command. Its `sync --once` waits for event idleness, not a global writer fence. `App.Close` closes separate stores, and the cooperative `LOCK` cannot fence unrelated SQLite or media writers. Adding an offline wrapper around those behaviors would give a misleading success signal, not the required guarantee.
+The earlier reviewed [WACLI v0.15.0 source](https://github.com/openclaw/wacli/tree/a020de724180d31eccfa5241d45443402d62fb06) has no coordinated snapshot command. Its `sync --once` waits for event idleness, not a global writer fence. `App.Close` closes separate stores, and the cooperative `LOCK` cannot fence unrelated SQLite or media writers. Adding an offline wrapper around those behaviors would give a misleading success signal, not the required guarantee.
 
-A future application-consistent backend would need a defined writer-fencing/draining protocol covering both DBs, app-state work, metadata, and all approved media inputs; an upstream change may be appropriate when that protocol is specified. A coordinated crash-consistent VSS backend is another possible route, but must cover every approved input volume and pass actual Windows tests. Neither backend is implemented here.
+A subsequent [paired producer proposal and Mainframe inspector](wacli-snapshot-producer-protocol.md) adds a reviewable patch against newer upstream source. Its plan is informational and its create command remains no-I/O blocked. The patch is not an upstream release or an accepted snapshot backend, and a matching capability document cannot authorize capture.
+
+A future application-consistent backend would need a defined writer-fencing/draining protocol covering both DBs, app-state work, metadata, and all approved media inputs. A coordinated crash-consistent VSS backend is another possible route for Windows, but must cover every approved input volume and pass actual Windows tests. A separately supported Linux-native route may use different methods and needs its own Linux boundary/round-trip acceptance, not a Windows run. No backend is implemented here.
 
 ## Tests and the next gate
 
