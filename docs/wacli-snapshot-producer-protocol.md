@@ -41,6 +41,8 @@ The stdin command expects a finite input document. It does not provide process s
 
 `session.db`, `wacli.db`, app-state/contact work, metadata and media do not share a single transaction. WACLI's cooperative `LOCK` excludes cooperating commands, not arbitrary SQLite or media writers. Event idleness and `App.Close()` are not evidence of a source-wide fence. Sequentially valid SQLite backups can still describe incompatible account states. Raw byte preservation and SQLite integrity checks are useful but cannot repair a torn source boundary.
 
+A [source-level writer audit and deterministic counterexamples](wacli-snapshot-writer-boundary.md) identify an unjoined delegated-handler shutdown path, dependency-owned asynchronous work, and external-media membership gaps. The diagnostic tests demonstrate why capture must remain blocked; they do not implement a backend.
+
 A useful future producer must establish and hold a reviewed boundary across all approved inputs, drain in-flight work, preserve originals including sidecars, and create derived databases separately. Membership, source/build evidence and consistency guarantees must be validated independently; a producer's own success string is not authority. The detailed [capture safety requirements](wacli-windows-capture-safety.md) and [non-publishable preparation implementation](wacli-snapshot-preparation.md) remain in force.
 
 ## Linux can use a different supported method
