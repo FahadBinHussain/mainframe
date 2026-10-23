@@ -37,7 +37,10 @@ def epoch(path):
 
 
 class SnapshotBoundaryCounterexamples(unittest.TestCase):
+    """Demonstrate unsafe source combinations without authorizing capture."""
+
     def assert_uncertified(self, receipt):
+        """Require preparation to retain every fail-closed capability marker."""
         self.assertEqual(receipt['status'], 'PREPARATION')
         self.assertEqual(receipt['boundary'], 'UNVERIFIED')
         self.assertEqual(receipt['cross_database_consistency'], 'NOT_CERTIFIED')
@@ -109,6 +112,38 @@ class SnapshotBoundaryCounterexamples(unittest.TestCase):
             with closing(sqlite3.connect(root / 'prepared/derived/wacli.db')) as con:
                 self.assertEqual(con.execute('SELECT local_path FROM synthetic_media_reference').fetchone(),
                                  (str(external),))
+
+    def test_reference_preservation_is_not_media_resolution_or_relocation(self):
+        """Preserve reference rows without resolving missing or external bytes."""
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            stage = root / 'private-stage'; stage.mkdir(mode=0o700)
+            database(stack, stage / 'session.db')
+            messages = database(stack, stage / 'wacli.db')
+            missing = root / 'missing-local.bin'
+            external = root / 'external-local.bin'; external.write_bytes(b'external')
+            alias = root / 'external-alias.bin'; alias.write_bytes(b'alias')
+            output_only = root / 'unreferenced-output.bin'; output_only.write_bytes(b'output-only')
+            # Generic fixture schema, NOT a WACLI media parser or migration test.
+            # A NULL path represents remote-only, not proof of remotely available bytes.
+            references = [('remote-only', None), ('missing-local', str(missing)),
+                          ('external-local', str(external)), ('local-alias', str(alias))]
+            messages.execute('CREATE TABLE synthetic_media_membership(kind TEXT, local_path TEXT)')
+            messages.executemany('INSERT INTO synthetic_media_membership VALUES (?, ?)', references)
+            messages.commit()
+            receipt = _prepare_staged_snapshot(stage, root / 'prepared')
+            self.assert_uncertified(receipt)
+            with closing(sqlite3.connect(root / 'prepared/derived/wacli.db')) as con:
+                self.assertEqual(con.execute('SELECT kind, local_path FROM synthetic_media_membership '
+                                             'ORDER BY rowid').fetchall(), references)
+            # Preparation neither discovers external/alias/output-only bytes nor repairs
+            # missing local bytes, downloads remote-only data, or relocates references.
+            self.assertFalse(missing.exists())
+            for path, content in ((external, b'external'), (alias, b'alias'),
+                                  (output_only, b'output-only')):
+                self.assertEqual(path.read_bytes(), content)
+                self.assertNotIn(path.name, {member['path'] for member in receipt['raw_members']})
+                self.assertFalse((root / 'prepared/originals' / path.name).exists())
 
 
 if __name__ == '__main__':

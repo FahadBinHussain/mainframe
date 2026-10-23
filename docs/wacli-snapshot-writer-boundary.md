@@ -2,6 +2,8 @@
 
 **There is no working coordinated snapshot backend yet.** Mainframe PR #33 and the paired WACLI patch describe a blocked capability, not a snapshot. This follow-up adds reproducible counterexamples and a source audit; it does not enable capture, certify media membership, or make a Linux account restore usable.
 
+The subsequent [producer-wide lifecycle investigation](wacli-snapshot-producer-lifecycle.md) adds direct dependency counterexamples: queue closure can precede node-handler completion, and a detached key-share producer can outlive WACLI wrapper close and reach both session and app-metadata persistence entry points. It also traces local drains, media aliases and read-only external output. Those findings strengthen the blockers below; they do not enable capture.
+
 ## The concrete shutdown gap
 
 At WACLI proposal commit `a46c1511744a943ffb8da700f954093de5b6c1b9`, based on upstream `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b`, the delegate server starts a goroutine for each accepted request. Its stop function closes the listener and waits for the accept loop only. It does not join the accepted handlers or their executors: [upstream send_ipc.go, lines 184–219](https://github.com/openclaw/wacli/blob/5578d1b6892f50a8f2329b11a6b6e27a1a81f88b/cmd/wacli/send_ipc.go#L184-L219).
