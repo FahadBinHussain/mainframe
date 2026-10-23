@@ -397,10 +397,15 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
         else:
             pin_reason = "Unpinned declaration; no exact release is selected. " if not version else ""
             reason = (f"{name}: {pin_reason}Python interpreter provenance/version/ABI and the complete "
-                      "marker-resolved dependency wheel set with hashes are not validated; a root wheel "
-                      "alone does not exclude dependency builds. Explicit isolated tool, executable-bin, "
+                      "marker-resolved dependency wheel set with hashes are not validated for a reviewed target "
+                      "Python patch/ABI, architecture and libc; a root wheel "
+                      "alone does not exclude dependency builds. Public PyPI/hashed PEP 658 metadata can "
+                      "establish a target-specific candidate graph without package execution, but cannot "
+                      "verify wheel bytes or interpreter provenance. No metadata observation is an install lock. "
+                      "Explicit isolated tool, executable-bin, "
                       "cache, config and Python runtime roots (plus temporary/state routing), missing/overlap "
-                      "rejection and a no-build/no-Python-download policy are not implemented. "
+                      "rejection, effective-path equality checks under a clean child environment and a "
+                      "no-build/no-Python-download policy are not implemented. "
                       "Unvalidated destination preflight; no live-home tool install; "
                       "see docs/linux-uv-tool-review.md.")
             blockers.append(reason)
