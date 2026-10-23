@@ -1,0 +1,524 @@
+{
+  "module": "github.com/openclaw/wacli",
+  "version": "v0.15.0",
+  "root_metadata": {
+    "go_mod": {
+      "url": "https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.mod",
+      "sha256": "08a77be1ece0c9506385ad33d83ea6294b7874c73ebc850d53e68cbff4fbb6aa"
+    },
+    "go_sum": {
+      "url": "https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.sum",
+      "sha256": "b7322e32b5799611a6fcae37e72a24597c021e59819b67e09744dac710d3221c"
+    }
+  },
+  "root_lookup": {
+    "url": "https://sum.golang.org/lookup/github.com/openclaw/wacli@v0.15.0",
+    "module_sum": "h1:7FAcz3o4zSlMvgDcWlhjpmwpkLwLKMY4bWnOopv2FXA=",
+    "go_mod_sum": "h1:D5vWmRbYq/RK9ZPLyfdirrkAJVX/noLioSasjliT1MM="
+  },
+  "proxy": {
+    "info_url": "https://proxy.golang.org/github.com/openclaw/wacli/@v/v0.15.0.info",
+    "info_json": {
+      "Version": "v0.15.0",
+      "Time": "2026-07-23T13:08:37Z",
+      "Origin": {
+        "VCS": "git",
+        "URL": "https://github.com/openclaw/wacli",
+        "Hash": "a020de724180d31eccfa5241d45443402d62fb06",
+        "Ref": "refs/tags/v0.15.0"
+      }
+    },
+    "mod_url": "https://proxy.golang.org/github.com/openclaw/wacli/@v/v0.15.0.mod",
+    "mod_sha256": "08a77be1ece0c9506385ad33d83ea6294b7874c73ebc850d53e68cbff4fbb6aa",
+    "source_commit": "a020de724180d31eccfa5241d45443402d62fb06",
+    "raw_go_mod_sha256": "08a77be1ece0c9506385ad33d83ea6294b7874c73ebc850d53e68cbff4fbb6aa",
+    "matches_raw_pinned_go_mod": true
+  },
+  "requirements": [
+    {
+      "path": "github.com/mattn/go-sqlite3",
+      "version": "v1.14.48",
+      "indirect": false,
+      "module_sum": "h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=",
+      "go_mod_sum": "h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/mattn/go-sqlite3@v1.14.48",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=",
+        "lookup_go_mod_sum": "h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w="
+      }
+    },
+    {
+      "path": "github.com/mdp/qrterminal/v3",
+      "version": "v3.2.1",
+      "indirect": false,
+      "module_sum": "h1:6+yQjiiOsSuXT5n9/m60E54vdgFsw0zhADHhHLrFet4=",
+      "go_mod_sum": "h1:jOTmXvnBsMy5xqLniO0R++Jmjs2sTm9dFSuQ5kpz/SU=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/mdp/qrterminal/v3@v3.2.1",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:6+yQjiiOsSuXT5n9/m60E54vdgFsw0zhADHhHLrFet4=",
+        "lookup_go_mod_sum": "h1:jOTmXvnBsMy5xqLniO0R++Jmjs2sTm9dFSuQ5kpz/SU="
+      }
+    },
+    {
+      "path": "github.com/spf13/cobra",
+      "version": "v1.10.2",
+      "indirect": false,
+      "module_sum": "h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=",
+      "go_mod_sum": "h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/spf13/cobra@v1.10.2",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=",
+        "lookup_go_mod_sum": "h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4="
+      }
+    },
+    {
+      "path": "go.mau.fi/whatsmeow",
+      "version": "v0.0.0-20260718134955-fac667d55293",
+      "indirect": false,
+      "module_sum": "h1:tQ2HAlFBB6KidkNqnTHvQ67WLZPNEZbjAQKviAHJr/M=",
+      "go_mod_sum": "h1:Iy/xVSuVU2payR26MB1hv0UZUWRraEn4qKZ7+VRHulg=",
+      "lookup_url": "https://sum.golang.org/lookup/go.mau.fi/whatsmeow@v0.0.0-20260718134955-fac667d55293",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:tQ2HAlFBB6KidkNqnTHvQ67WLZPNEZbjAQKviAHJr/M=",
+        "lookup_go_mod_sum": "h1:Iy/xVSuVU2payR26MB1hv0UZUWRraEn4qKZ7+VRHulg="
+      }
+    },
+    {
+      "path": "golang.org/x/net",
+      "version": "v0.57.0",
+      "indirect": false,
+      "module_sum": "h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=",
+      "go_mod_sum": "h1:KpXc8iv+r3XplLAG/f7Jsf9RPszJzdR0f58q9vGOuEU=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/net@v0.57.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:K5+3DljvIuDG9/Jv9rvyMywYNFCQ9RSUY6OOTTkT+tE=",
+        "lookup_go_mod_sum": "h1:KpXc8iv+r3XplLAG/f7Jsf9RPszJzdR0f58q9vGOuEU="
+      }
+    },
+    {
+      "path": "golang.org/x/sys",
+      "version": "v0.47.0",
+      "indirect": false,
+      "module_sum": "h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
+      "go_mod_sum": "h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/sys@v0.47.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
+        "lookup_go_mod_sum": "h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw="
+      }
+    },
+    {
+      "path": "golang.org/x/term",
+      "version": "v0.45.0",
+      "indirect": false,
+      "module_sum": "h1:NwWyBmoJCbfTHpxrWoZ9C6/VxOf7ic219I8xZZFdrf0=",
+      "go_mod_sum": "h1:9aqxs0blBcrm/n0L9QW0aRVD+ktan8ssZromtqJC43w=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/term@v0.45.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:NwWyBmoJCbfTHpxrWoZ9C6/VxOf7ic219I8xZZFdrf0=",
+        "lookup_go_mod_sum": "h1:9aqxs0blBcrm/n0L9QW0aRVD+ktan8ssZromtqJC43w="
+      }
+    },
+    {
+      "path": "google.golang.org/protobuf",
+      "version": "v1.36.11",
+      "indirect": false,
+      "module_sum": "h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=",
+      "go_mod_sum": "h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco=",
+      "lookup_url": "https://sum.golang.org/lookup/google.golang.org/protobuf@v1.36.11",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:fV6ZwhNocDyBLK0dj+fg8ektcVegBBuEolpbTQyBNVE=",
+        "lookup_go_mod_sum": "h1:HTf+CrKn2C3g5S8VImy6tdcUvCska2kB7j23XfzDpco="
+      }
+    },
+    {
+      "path": "gopkg.in/yaml.v3",
+      "version": "v3.0.1",
+      "indirect": false,
+      "module_sum": "h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=",
+      "go_mod_sum": "h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=",
+      "lookup_url": "https://sum.golang.org/lookup/gopkg.in/yaml.v3@v3.0.1",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=",
+        "lookup_go_mod_sum": "h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM="
+      }
+    },
+    {
+      "path": "filippo.io/edwards25519",
+      "version": "v1.2.0",
+      "indirect": true,
+      "module_sum": "h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=",
+      "go_mod_sum": "h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=",
+      "lookup_url": "https://sum.golang.org/lookup/filippo.io/edwards25519@v1.2.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=",
+        "lookup_go_mod_sum": "h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc="
+      }
+    },
+    {
+      "path": "github.com/beeper/argo-go",
+      "version": "v1.1.2",
+      "indirect": true,
+      "module_sum": "h1:UQI2G8F+NLfGTOmTUI0254pGKx/HUU/etbUGTJv91Fs=",
+      "go_mod_sum": "h1:M+LJAnyowKVQ6Rdj6XYGEn+qcVFkb3R/MUpqkGR0hM4=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/beeper/argo-go@v1.1.2",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:UQI2G8F+NLfGTOmTUI0254pGKx/HUU/etbUGTJv91Fs=",
+        "lookup_go_mod_sum": "h1:M+LJAnyowKVQ6Rdj6XYGEn+qcVFkb3R/MUpqkGR0hM4="
+      }
+    },
+    {
+      "path": "github.com/coder/websocket",
+      "version": "v1.8.15",
+      "indirect": true,
+      "module_sum": "h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=",
+      "go_mod_sum": "h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/coder/websocket@v1.8.15",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=",
+        "lookup_go_mod_sum": "h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg="
+      }
+    },
+    {
+      "path": "github.com/elliotchance/orderedmap/v3",
+      "version": "v3.1.0",
+      "indirect": true,
+      "module_sum": "h1:j4DJ5ObEmMBt/lcwIecKcoRxIQUEnw0L804lXYDt/pg=",
+      "go_mod_sum": "h1:G+Hc2RwaZvJMcS4JpGCOyViCnGeKf0bTYCGTO4uhjSo=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/elliotchance/orderedmap/v3@v3.1.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:j4DJ5ObEmMBt/lcwIecKcoRxIQUEnw0L804lXYDt/pg=",
+        "lookup_go_mod_sum": "h1:G+Hc2RwaZvJMcS4JpGCOyViCnGeKf0bTYCGTO4uhjSo="
+      }
+    },
+    {
+      "path": "github.com/google/uuid",
+      "version": "v1.6.0",
+      "indirect": true,
+      "module_sum": "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+      "go_mod_sum": "h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/google/uuid@v1.6.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=",
+        "lookup_go_mod_sum": "h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo="
+      }
+    },
+    {
+      "path": "github.com/inconshreveable/mousetrap",
+      "version": "v1.1.0",
+      "indirect": true,
+      "module_sum": "h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=",
+      "go_mod_sum": "h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/inconshreveable/mousetrap@v1.1.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=",
+        "lookup_go_mod_sum": "h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw="
+      }
+    },
+    {
+      "path": "github.com/kr/pretty",
+      "version": "v0.1.0",
+      "indirect": true,
+      "module_sum": "h1:L/CwN0zerZDmRFUapSPitk6f+Q3+0za1rQkzVuMiMFI=",
+      "go_mod_sum": "h1:dAy3ld7l9f0ibDNOQOHHMYYIIbhfbHSm3C4ZsoJORNo=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/kr/pretty@v0.1.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:L/CwN0zerZDmRFUapSPitk6f+Q3+0za1rQkzVuMiMFI=",
+        "lookup_go_mod_sum": "h1:dAy3ld7l9f0ibDNOQOHHMYYIIbhfbHSm3C4ZsoJORNo="
+      }
+    },
+    {
+      "path": "github.com/mattn/go-colorable",
+      "version": "v0.1.14",
+      "indirect": true,
+      "module_sum": "h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=",
+      "go_mod_sum": "h1:6LmQG8QLFO4G5z1gPvYEzlUgJ2wF+stgPZH1UqBm1s8=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/mattn/go-colorable@v0.1.14",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:9A9LHSqF/7dyVVX6g0U9cwm9pG3kP9gSzcuIPHPsaIE=",
+        "lookup_go_mod_sum": "h1:6LmQG8QLFO4G5z1gPvYEzlUgJ2wF+stgPZH1UqBm1s8="
+      }
+    },
+    {
+      "path": "github.com/mattn/go-isatty",
+      "version": "v0.0.22",
+      "indirect": true,
+      "module_sum": "h1:j8l17JJ9i6VGPUFUYoTUKPSgKe/83EYU2zBC7YNKMw4=",
+      "go_mod_sum": "h1:ZXfXG4SQHsB/w3ZeOYbR0PrPwLy+n6xiMrJlRFqopa4=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/mattn/go-isatty@v0.0.22",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:j8l17JJ9i6VGPUFUYoTUKPSgKe/83EYU2zBC7YNKMw4=",
+        "lookup_go_mod_sum": "h1:ZXfXG4SQHsB/w3ZeOYbR0PrPwLy+n6xiMrJlRFqopa4="
+      }
+    },
+    {
+      "path": "github.com/petermattis/goid",
+      "version": "v0.0.0-20260713124913-97594f28f5ca",
+      "indirect": true,
+      "module_sum": "h1:GHSUVE4yOgX4E7kTRzpxCPbCOYkd3Kj8Dgdod30OI1E=",
+      "go_mod_sum": "h1:pxMtw7cyUw6B2bRH0ZBANSPg+AoSud1I1iyJHI69jH4=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/petermattis/goid@v0.0.0-20260713124913-97594f28f5ca",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:GHSUVE4yOgX4E7kTRzpxCPbCOYkd3Kj8Dgdod30OI1E=",
+        "lookup_go_mod_sum": "h1:pxMtw7cyUw6B2bRH0ZBANSPg+AoSud1I1iyJHI69jH4="
+      }
+    },
+    {
+      "path": "github.com/rs/zerolog",
+      "version": "v1.35.1",
+      "indirect": true,
+      "module_sum": "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI=",
+      "go_mod_sum": "h1:EjML9kdfa/RMA7h/6z6pYmq1ykOuA8/mjWaEvGI+jcw=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/rs/zerolog@v1.35.1",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:m7xQeoiLIiV0BCEY4Hs+j2NG4Gp2o2KPKmhnnLiazKI=",
+        "lookup_go_mod_sum": "h1:EjML9kdfa/RMA7h/6z6pYmq1ykOuA8/mjWaEvGI+jcw="
+      }
+    },
+    {
+      "path": "github.com/sergi/go-diff",
+      "version": "v1.4.0",
+      "indirect": true,
+      "module_sum": "h1:n/SP9D5ad1fORl+llWyN+D6qoUETXNZARKjyY2/KVCw=",
+      "go_mod_sum": "h1:A0bzQcvG0E7Rwjx0REVgAGH58e96+X0MeOfepqsbeW4=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/sergi/go-diff@v1.4.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:n/SP9D5ad1fORl+llWyN+D6qoUETXNZARKjyY2/KVCw=",
+        "lookup_go_mod_sum": "h1:A0bzQcvG0E7Rwjx0REVgAGH58e96+X0MeOfepqsbeW4="
+      }
+    },
+    {
+      "path": "github.com/spf13/pflag",
+      "version": "v1.0.10",
+      "indirect": true,
+      "module_sum": "h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=",
+      "go_mod_sum": "h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/spf13/pflag@v1.0.10",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=",
+        "lookup_go_mod_sum": "h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg="
+      }
+    },
+    {
+      "path": "github.com/vektah/gqlparser/v2",
+      "version": "v2.5.33",
+      "indirect": true,
+      "module_sum": "h1:lRp8aIeNUNbimf/axZd7ETg24q06hBtPaas+TcvI/7E=",
+      "go_mod_sum": "h1:c1I28gSOVNzlfc4WuDlqU7voQnsqI6OG2amkBAFmgts=",
+      "lookup_url": "https://sum.golang.org/lookup/github.com/vektah/gqlparser/v2@v2.5.33",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:lRp8aIeNUNbimf/axZd7ETg24q06hBtPaas+TcvI/7E=",
+        "lookup_go_mod_sum": "h1:c1I28gSOVNzlfc4WuDlqU7voQnsqI6OG2amkBAFmgts="
+      }
+    },
+    {
+      "path": "go.mau.fi/libsignal",
+      "version": "v0.2.2",
+      "indirect": true,
+      "module_sum": "h1:QV+XdzQkm3x3aSG7FcqfGSZuFXz83pRZPBFaPygHbOU=",
+      "go_mod_sum": "h1:CRlIQg2J8uYTfDFvNoO8/KcZjs5cey0vbc6oj/bssY0=",
+      "lookup_url": "https://sum.golang.org/lookup/go.mau.fi/libsignal@v0.2.2",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:QV+XdzQkm3x3aSG7FcqfGSZuFXz83pRZPBFaPygHbOU=",
+        "lookup_go_mod_sum": "h1:CRlIQg2J8uYTfDFvNoO8/KcZjs5cey0vbc6oj/bssY0="
+      }
+    },
+    {
+      "path": "go.mau.fi/util",
+      "version": "v0.9.12-0.20260717235539-f9ffa7eca58d",
+      "indirect": true,
+      "module_sum": "h1:bUGRidYrauEwLoBvGLLPPQ0lgQUecT0z/ND+vHz07jM=",
+      "go_mod_sum": "h1:xunp/oIQfFD68HHcNHfG0pOiHkvEtDhTweeIwKJ//+Q=",
+      "lookup_url": "https://sum.golang.org/lookup/go.mau.fi/util@v0.9.12-0.20260717235539-f9ffa7eca58d",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:bUGRidYrauEwLoBvGLLPPQ0lgQUecT0z/ND+vHz07jM=",
+        "lookup_go_mod_sum": "h1:xunp/oIQfFD68HHcNHfG0pOiHkvEtDhTweeIwKJ//+Q="
+      }
+    },
+    {
+      "path": "golang.org/x/crypto",
+      "version": "v0.54.0",
+      "indirect": true,
+      "module_sum": "h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=",
+      "go_mod_sum": "h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/crypto@v0.54.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:YLIA59K4fiNzHzjnZt2tUJQjQtUWfWbeHBqKtk3eScw=",
+        "lookup_go_mod_sum": "h1:KWL8ny2AZdGR2cWmzeHrp2azQPGogOv+HeQaVEXC2dk="
+      }
+    },
+    {
+      "path": "golang.org/x/exp",
+      "version": "v0.0.0-20260709172345-9ea1abe57597",
+      "indirect": true,
+      "module_sum": "h1:qLvzZeaANDgyVOA8pyHCOStGlXn0rseXma+GQjeuv2g=",
+      "go_mod_sum": "h1:EdfpwwqSu+0Li0mzskwHU6FWDV3t9Q+RZDo3QMUtL3Q=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/exp@v0.0.0-20260709172345-9ea1abe57597",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:qLvzZeaANDgyVOA8pyHCOStGlXn0rseXma+GQjeuv2g=",
+        "lookup_go_mod_sum": "h1:EdfpwwqSu+0Li0mzskwHU6FWDV3t9Q+RZDo3QMUtL3Q="
+      }
+    },
+    {
+      "path": "golang.org/x/sync",
+      "version": "v0.22.0",
+      "indirect": true,
+      "module_sum": "h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=",
+      "go_mod_sum": "h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/sync@v0.22.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=",
+        "lookup_go_mod_sum": "h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0="
+      }
+    },
+    {
+      "path": "golang.org/x/text",
+      "version": "v0.40.0",
+      "indirect": true,
+      "module_sum": "h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=",
+      "go_mod_sum": "h1:hpnzDAfGV753zIKo+wk3u1bVKCGPbrnF7+7LBF/UHVY=",
+      "lookup_url": "https://sum.golang.org/lookup/golang.org/x/text@v0.40.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:Ub2Z6/xjgF1WrYQz2nuITOEegKFtiIy+rieRJ5lHZKs=",
+        "lookup_go_mod_sum": "h1:hpnzDAfGV753zIKo+wk3u1bVKCGPbrnF7+7LBF/UHVY="
+      }
+    },
+    {
+      "path": "gopkg.in/check.v1",
+      "version": "v1.0.0-20190902080502-41f04d3bba15",
+      "indirect": true,
+      "module_sum": "h1:YR8cESwS4TdDjEe65xsg0ogRM/Nc3DYOhEAlW+xobZo=",
+      "go_mod_sum": "h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=",
+      "lookup_url": "https://sum.golang.org/lookup/gopkg.in/check.v1@v1.0.0-20190902080502-41f04d3bba15",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:YR8cESwS4TdDjEe65xsg0ogRM/Nc3DYOhEAlW+xobZo=",
+        "lookup_go_mod_sum": "h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0="
+      }
+    },
+    {
+      "path": "rsc.io/qr",
+      "version": "v0.2.0",
+      "indirect": true,
+      "module_sum": "h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=",
+      "go_mod_sum": "h1:IF+uZjkb9fqyeF/4tlBoynqmQxUoPfWEKh921coOuXs=",
+      "lookup_url": "https://sum.golang.org/lookup/rsc.io/qr@v0.2.0",
+      "matches": {
+        "module": true,
+        "go_mod": true,
+        "lookup_module_sum": "h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=",
+        "lookup_go_mod_sum": "h1:IF+uZjkb9fqyeF/4tlBoynqmQxUoPfWEKh921coOuXs="
+      }
+    }
+  ],
+  "counts": {
+    "root_require_entries": 31,
+    "root_require_expected": 31,
+    "root_require_direct": 9,
+    "root_require_indirect": 22,
+    "sum_entries": 89,
+    "sum_entries_expected": 89,
+    "sum_module_h1_entries": 39,
+    "sum_module_h1_expected": 39,
+    "sum_go_mod_h1_entries": 50,
+    "sum_go_mod_h1_expected": 50
+  },
+  "provenance_note": "Text equality only; signature/Merkle inclusion and archive bytes were not verified. No resolved graph assertion; no recursive traversal; pruned graph is not treated as missing. Earlier audit: root tag object 51f8c4a41df7eaf6a4342140679679a29b58be18 resolves a020de724180d31eccfa5241d45443402d62fb06; root Go minimum 1.25.12.",
+  "failures": [],
+  "go_distribution": {
+    "metadata_url": "https://go.dev/dl/?mode=json&include=all",
+    "version": "go1.25.12",
+    "files": [
+      {
+        "filename": "go1.25.12.linux-amd64.tar.gz",
+        "os": "linux",
+        "arch": "amd64",
+        "version": "go1.25.12",
+        "sha256": "234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1",
+        "size": 59856753,
+        "kind": "archive",
+        "url": "https://go.dev/dl/go1.25.12.linux-amd64.tar.gz"
+      },
+      {
+        "filename": "go1.25.12.linux-arm64.tar.gz",
+        "os": "linux",
+        "arch": "arm64",
+        "version": "go1.25.12",
+        "sha256": "8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2",
+        "size": 57351753,
+        "kind": "archive",
+        "url": "https://go.dev/dl/go1.25.12.linux-arm64.tar.gz"
+      }
+    ]
+  },
+  "verification": {
+    "toolchain_archive_bytes": false,
+    "module_archive_bytes": false,
+    "sumdb_signature_and_merkle_proofs": false,
+    "resolved_linux_build_closure": false,
+    "compiler_sysroot_provenance": false,
+    "effective_paths": false,
+    "build": false,
+    "wacli_runtime": false
+  },
+  "status": "blocked"
+}
