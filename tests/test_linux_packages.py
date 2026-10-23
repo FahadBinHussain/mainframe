@@ -53,6 +53,21 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertIn("github.com/openclaw/wacli/cmd/wacli", names)
         self.assertTrue(all(a.status in {"planned", "blocked", "covered"} for a in plan.actions))
 
+    def test_autohotkey_removed_from_both_allowlists_and_dry_plan(self):
+        scoop = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
+        winget = [x["id"] for x in json.loads((ROOT / "winget-allowed.json").read_text())["packages"]]
+        self.assertNotIn("autohotkey", scoop)
+        self.assertNotIn("AutoHotkey.AutoHotkey", winget)
+        output = io.StringIO()
+        with patch.object(lp, "execute") as execute, contextlib.redirect_stdout(output):
+            status = lp.main(["--repo", str(ROOT)])
+        execute.assert_not_called()
+        self.assertIn(status, (0, 3))
+        plan = json.loads(output.getvalue())
+        for action in plan["actions"]:
+            self.assertNotIn("autohotkey", json.dumps(action).lower())
+        self.assertFalse(any("autohotkey" in reason.lower() for reason in plan["blockers"]))
+
     def helper_plan(self, apps, winget=None):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
