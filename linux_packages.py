@@ -366,7 +366,14 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
         if not _safe_arg(name) or (version is not None and not _safe_arg(version)):
             reason = f"Invalid uv package or version: {item!r}"; blockers.append(reason); actions.append(_blocked("uv", str(name), reason, "uv"))
         else:
-            reason = f"{name}: Python/runtime dependencies and explicit isolated uv tool/cache destination preflight are not validated; no live-home tool install."
+            pin_reason = "Unpinned declaration; no exact release is selected. " if not version else ""
+            reason = (f"{name}: {pin_reason}Python interpreter provenance/version/ABI and the complete "
+                      "marker-resolved dependency wheel set with hashes are not validated; a root wheel "
+                      "alone does not exclude dependency builds. Explicit isolated tool, executable-bin, "
+                      "cache, config and Python runtime roots (plus temporary/state routing), missing/overlap "
+                      "rejection and a no-build/no-Python-download policy are not implemented. "
+                      "Unvalidated destination preflight; no live-home tool install; "
+                      "see docs/linux-uv-tool-review.md.")
             blockers.append(reason)
             actions.append(Action("uv", name, ["uv", "tool", "install", "--", spec], version=version, status="blocked", reason=reason, source="uv"))
     for item in go.get("packages", []):
