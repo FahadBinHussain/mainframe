@@ -1,8 +1,14 @@
 # WACLI: normal installation, recoverable user data
 
-Portability is not required to preserve user data. Keep the normal Go-installed
-binary (normally `~/go/bin/wacli`) separate from the state backup. This feature
-preserves a caller-selected state directory, not a portable executable.
+The WACLI declaration is **planned** with dry-plan metadata
+`standard-linux-go-install`; planned does not mean tested, installed, or
+executable. Portability is not required to preserve user data. Keep the normal
+Go-installed binary (normally `~/go/bin/wacli`) separate from the state backup.
+With normal explicit `GOBIN`, Go uses that destination; otherwise it uses the
+first `GOPATH/bin` (normally `~/go/bin`) and normal module/build caches. No
+portable or isolated-`HOME` requirement applies to this plan. All execution is
+disabled before adapter preflight: this feature never installs, builds, runs,
+or activates WACLI.
 
 ## What is covered
 
@@ -74,6 +80,14 @@ machine backup or published. Existing backup/archive bytes are never modified.
 Use the existing authorized archive/publication workflow deliberately if a
 combined release is required; never replace a machine's existing secret envelope
 with this single-root envelope (that would lose other secret items).
+
+## PR28: explicit stopped capture and NEW offline export
+
+PR28 remains caller-selected and stopped: the caller stops WACLI and every
+other writer, captures a clean closed state into the encrypted envelope, and
+explicitly requests a **NEW offline export**. It adds no live-WAL capture,
+SQLite migration, account activation, or automatic full-backup integration.
+The envelope is not silently merged into a machine backup.
 
 ## Explicit offline restoration
 

@@ -127,7 +127,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Bitwarden CLI (`bitwarden-cli`) | Debian/Ubuntu glibc x86_64 resolves the current Scoop manifest's exact OSS version to the matching official `bw-oss-linux` release asset, requiring unique published metadata, size and GitHub SHA-256 digest. No default non-OSS/npm substitution or Windows checksum reuse. Dry planning reads public metadata only; a future install requires `--execute --select bitwarden-cli --bitwarden-cli-root <new-directory>`, validates integrity and rejects unsafe archives/destinations. No Node/npm bootstrap, PATH/profile modification, vault login/unlock, credential access or Windows account-state import. Other architectures block; actual binary/runtime behavior remains untested. |
 | pnpm globals/config | Windows records `@googleworkspace/cli`, `vercel`, and the global bin directory. Linux plans `pnpm add --global` per allowlist and must normalize the bin directory; native dependencies and authentication remain review items. |
 | uv tools | Windows records `graphifyy`; Linux plans `uv tool install graphifyy` without assuming Windows entry points or indexes. |
-| Go global | Linux plans `go install github.com/openclaw/wacli/cmd/wacli@v0.15.0` with `sqlite_fts5`; compiler/CGO dependencies and resulting binary behavior require review. |
+| Go global | Linux plans the normal `go install github.com/openclaw/wacli/cmd/wacli@v0.15.0` with `sqlite_fts5` as dry-plan metadata `standard-linux-go-install`; normal explicit `GOBIN` or first `GOPATH/bin` (normally `~/go/bin`) and normal module/build caches apply. No portable/isolated HOME requirement. Execution is disabled before adapter preflight; compiler/CGO dependencies and resulting binary behavior remain untested. |
 | pip environment | **Superseded historical review:** older Windows backups may contain `pip-freeze.txt` as restore control metadata, but it is excluded from user data and ignored by the Linux planner with no action or blocker. Windows Full no longer installs it. Explicit repository-only `requirements.txt`/`requirements-linux.txt` files may be inspected for planning; generic Python execution remains blocked pending interpreter, dependency, install-script, and isolated-destination preflight. |
 | Private source clone/fork patchers | Windows full restore clones or fast-forward-pulls the mainframe and private automation repositories. Its alist/Ditto/opencode patch-build actions require the relevant private patcher source; the opencode fork patcher is version-guarded. Linux recovery does not clone private repositories, run private patchers, or fabricate credentials. These are blocked/unimplemented native actions. |
 | Pinned opencode v2 | Windows restore recognizes `opencode2` as the pinned v2 install and refuses to run the v1 fork patcher against it because that would overwrite v2; it only runs the v1 patcher when v1 is installed and v2 is absent. Linux stages opencode config/skills/plugins only, excludes `node_modules`, and does not install or activate the v2 runtime. |
@@ -187,10 +187,14 @@ Separate reporting must distinguish **raw bytes preserved**, **metadata preserve
 
 ## WACLI normal-install user data
 
-Normal installation does not require a portable binary to preserve state.
+Normal installation does not require a portable binary to preserve state. The
+planned WACLI install is not tested or executable, and does not grant runtime
+or state activation permission.
 [The explicit WACLI state helper](linux-wacli-state.md) captures a caller-selected,
 quiesced Linux state root into the established AES-256 secret-envelope layout,
 or blocks if sidecars/locks/dependencies make that unsafe. Restoration is an
-explicit unlocked-archive export to a new offline destination. Ordinary recovery
+explicit unlocked-archive export to a **NEW** offline destination after PR28's
+caller-selected clean-state encrypted capture. There is no live-WAL capture,
+migration, activation, or automatic full-backup integration. Ordinary recovery
 keeps that envelope opaque and does not automatically stage native state or map
 Windows WhatsApp profiles into a Linux account. Go build/install stays guarded.
