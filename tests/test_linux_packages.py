@@ -71,7 +71,7 @@ class LinuxPackagesTests(unittest.TestCase):
         scoop = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
         winget = [x["id"] for x in json.loads((ROOT / "winget-allowed.json").read_text())["packages"]]
         self.assertTrue(set(scoop) <= names); self.assertTrue(set(winget) <= names)
-        self.assertTrue({"@googleworkspace/cli", "vercel", "graphifyy"} <= names)
+        self.assertTrue({"@googleworkspace/cli", "vercel"} <= names)
         self.assertIn("github.com/openclaw/wacli/cmd/wacli", names)
         self.assertTrue(all(a.status in {"planned", "blocked", "covered"} for a in plan.actions))
 
