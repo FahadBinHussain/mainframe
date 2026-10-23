@@ -37,3 +37,20 @@ go test -race ./cmd/wacli -run '^TestSnapshotBoundaryProbe' -count=10 -v -timeou
 Use the repository-required Go toolchain, without weakening its version declaration. The test uses a temporary local IPC endpoint and an inert channel-gated executor; it does not construct an account app or open databases. It demonstrates that the current delegate stop returns while an accepted executor is still running. A passing probe confirms a missing handler join, **not** a safe snapshot boundary. If shutdown semantics are fixed, this counterexample should fail and be replaced by a proper drain regression as part of that fix. Windows runtime behavior is not covered.
 
 See [the precise source audit and Mainframe counterexamples](../../docs/wacli-snapshot-writer-boundary.md). Neither patch enables capture, and Mainframe never applies or runs either one automatically.
+
+## Dependency admission/drain counterexamples
+
+`0003-synthetic-dependency-boundary-probes.patch` adds two diagnostic tests under `internal/wa`. Apply it after `0001` (and optionally `0002`) to the same disposable checkout of base `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b`; it changes no production code or dependency versions:
+
+```sh
+git apply --check /path/to/0003-synthetic-dependency-boundary-probes.patch
+git apply /path/to/0003-synthetic-dependency-boundary-probes.patch
+go test ./internal/wa -run '^TestSnapshotDependencyProbe' -count=10 -v -timeout 90s
+go test -race ./internal/wa -run '^TestSnapshotDependencyProbe' -count=10 -v -timeout 90s
+```
+
+Use the repository-required Go 1.27.3 toolchain, without changing `go.mod`. The tests use pinned whatsmeow `v0.0.0-20261017175727-b2b1e71d45e2` and in-memory fake persistence endpoints. No SQL database, network connection, account, credential or personal media is opened. Test-only `DangerousInternals` injects synthetic input into the real protocol handler/queue. The first fixture requires no identity; the second has a dummy in-memory JID solely to pass the node parser, with no paired session or authentication.
+
+One test holds a dependency key-store call across actual WACLI wrapper close, then observes its in-memory session write and the real key guard's fake app-metadata write. It has no SQL container, so it demonstrates missing producer joining, not successful SQL writes after real database closure. The other closes the real dependency queue while a child node handler is blocked. It tests queue-close semantics directly, not a connected websocket. Both are counterexamples: passing tests confirm an unresolved boundary, **not** capture success. Future lifecycle fixes should replace them with positive drain regression tests rather than silently weakening their assertions.
+
+See the [complete producer lifecycle and exact remaining boundary](../../docs/wacli-snapshot-producer-lifecycle.md). Neither these diagnostics nor Mainframe's synthetic media-reference preservation test implements producer admission, dependency draining, media discovery/relocation, capture, or usable account restoration. No Windows run is implied.

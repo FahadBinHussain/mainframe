@@ -1,0 +1,160 @@
+diff --git a/internal/wa/snapshot_dependency_boundary_test.go b/internal/wa/snapshot_dependency_boundary_test.go
+new file mode 100644
+index 0000000..f4ff6dc
+--- /dev/null
++++ b/internal/wa/snapshot_dependency_boundary_test.go
+@@ -0,0 +1,154 @@
++package wa
++
++import (
++	"context"
++	"sync"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow"
++	"go.mau.fi/whatsmeow/appstate"
++	waBinary "go.mau.fi/whatsmeow/binary"
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/store"
++	"go.mau.fi/whatsmeow/types"
++	"go.mau.fi/whatsmeow/types/events"
++)
++
++// These are counterexamples for the pinned SDK, NOT snapshot safety tests.
++// No SQL store, socket, account, credentials, or media is opened. DangerousInternals
++// is used only to deliver synthetic input to the real dependency producer paths.
++func snapshotProbeAwait(t *testing.T, ch <-chan struct{}, what string) {
++	t.Helper()
++	select {
++	case <-ch:
++	case <-time.After(5 * time.Second):
++		t.Fatalf("timed out waiting for %s", what)
++	}
++}
++
++type snapshotProbeKeys struct {
++	store.AppStateSyncKeyStore // unexpected calls panic instead of touching real state
++	entered                    chan struct{}
++	release                    chan struct{}
++	written                    chan struct{}
++	ctxErr                     error
++}
++
++func (s *snapshotProbeKeys) PutAppStateSyncKey(ctx context.Context, _ []byte, _ store.AppStateSyncKey) error {
++	s.ctxErr = ctx.Err()
++	close(s.entered)
++	<-s.release
++	// This in-memory effect stands in for the dependency-owned session write.
++	close(s.written)
++	return nil
++}
++
++type snapshotProbeVersions struct {
++	store.AppStateStore
++	remaining int
++	done      chan struct{}
++}
++
++func (s *snapshotProbeVersions) GetAppStateVersion(context.Context, string) (uint64, [128]byte, error) {
++	s.remaining--
++	if s.remaining == 0 {
++		close(s.done)
++	}
++	// Already-synced collections prevent any network fetch.
++	return 1, [128]byte{}, nil
++}
++
++type snapshotProbeMetadata struct {
++	AppStateKeyStateStore
++	cleared chan struct{}
++}
++
++func (s *snapshotProbeMetadata) ClearAppStateKeyUnavailable(context.Context, string, []byte) error {
++	close(s.cleared)
++	return nil
++}
++
++func TestSnapshotDependencyProbeKeyWriterOutlivesWrapperClose(t *testing.T) {
++	keys := &snapshotProbeKeys{entered: make(chan struct{}), release: make(chan struct{}), written: make(chan struct{})}
++	versions := &snapshotProbeVersions{remaining: len(appstate.AllPatchNames), done: make(chan struct{})}
++	metadata := &snapshotProbeMetadata{cleared: make(chan struct{})}
++	guard := &appStateKeyGuard{AppStateSyncKeyStore: keys, state: metadata, account: "synthetic"}
++	cli := whatsmeow.NewClient(&store.Device{AppStateKeys: guard, AppState: versions}, nil)
++	wrapper := &Client{client: cli}
++	var once sync.Once
++	release := func() { once.Do(func() { close(keys.release) }) }
++	t.Cleanup(func() {
++		release()
++		wrapper.Close()
++	})
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel() // handleProtocolMessage deliberately passes WithoutCancel to its worker.
++	info := &types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true, Sender: types.JID{Device: 1}}}
++	msg := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{
++		AppStateSyncKeyShare: &waE2E.AppStateSyncKeyShare{Keys: []*waE2E.AppStateSyncKey{{
++			KeyID:   &waE2E.AppStateSyncKeyId{KeyID: []byte("synthetic-id")},
++			KeyData: &waE2E.AppStateSyncKeyData{KeyData: []byte("synthetic-only")},
++		}}},
++	}}
++	if !cli.DangerousInternals().HandleProtocolMessage(ctx, info, msg) {
++		t.Fatal("synthetic protocol input was not accepted")
++	}
++	snapshotProbeAwait(t, keys.entered, "dependency key-store admission")
++	if keys.ctxErr != nil {
++		t.Fatal("expected detached worker to retain an uncanceled context")
++	}
++	closed := make(chan struct{})
++	go func() { wrapper.Close(); close(closed) }()
++	snapshotProbeAwait(t, closed, "wrapper Close while key writer is blocked")
++	select {
++	case <-keys.written:
++		t.Fatal("fixture write completed before release")
++	default:
++	}
++	release()
++	snapshotProbeAwait(t, keys.written, "write after wrapper Close returned")
++	snapshotProbeAwait(t, metadata.cleared, "WACLI metadata write after wrapper Close returned")
++	snapshotProbeAwait(t, versions.done, "post-write dependency continuation")
++}
++
++func TestSnapshotDependencyProbeQueueCloseIsNotNodeJoin(t *testing.T) {
++	id := types.JID{User: "synthetic-self", Server: types.DefaultUserServer}
++	cli := whatsmeow.NewClient(&store.Device{ID: &id}, nil)
++	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	var once sync.Once
++	unblock := func() { once.Do(func() { close(release) }) }
++	cli.AddEventHandler(func(evt any) {
++		if _, ok := evt.(*events.ChatPresence); ok {
++			close(entered)
++			<-release
++			close(finished)
++		}
++	})
++	connCtx, cancel := context.WithCancel(context.Background())
++	queue := make(chan *waBinary.Node, 1)
++	queueClosed := make(chan struct{})
++	loopDone := make(chan struct{})
++	go func() {
++		cli.DangerousInternals().HandlerQueueLoop(context.Background(), connCtx, queue, queueClosed)
++		close(loopDone)
++	}()
++	t.Cleanup(func() {
++		cancel()
++		unblock()
++		snapshotProbeAwait(t, loopDone, "queue loop cleanup")
++	})
++	queue <- &waBinary.Node{Tag: "chatstate", Attrs: waBinary.Attrs{
++		"from": types.JID{User: "synthetic", Server: types.DefaultUserServer},
++	}, Content: []waBinary.Node{{Tag: "composing"}}}
++	snapshotProbeAwait(t, entered, "node event handler admission")
++	cancel()
++	snapshotProbeAwait(t, queueClosed, "dependency queue-close signal")
++	select {
++	case <-finished:
++		t.Fatal("fixture node handler completed before release")
++	default:
++	}
++	unblock()
++	snapshotProbeAwait(t, finished, "node handler after queue-close signal")
++}
