@@ -29,6 +29,10 @@
     {
       "path": "0007-causal-application-producers.patch",
       "sha256": "9f7cc4dbe2695f361ea2e30ffb94a8bf14d4b0ed2a44554056e3decbb4c3600f"
+    },
+    {
+      "path": "0008-owned-handle-admission.patch",
+      "sha256": "1f2e810a3954d9600bad79c9f77ce6dedc8424efd090536fb07e69009fa7e4bc"
     }
   ],
   "whatsmeow": [
@@ -43,9 +47,13 @@
     {
       "path": "whatsmeow/0003-causal-producer-admission.patch",
       "sha256": "a11c51d62000e9f030080b6cc0109f692c9935adb94db9e98faa18b52cc0386d"
+    },
+    {
+      "path": "whatsmeow/0004-callback-lineage.patch",
+      "sha256": "be34e74c0dfb6db95c098db4e640be4e935b16ee3d02f9c58036b935619e931b"
     }
   ],
-  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestDrain|TestStage|TestEnumerateMediaMembership|TestStoreVerifyMedia|TestMediaDownload(ReadOnlyOutput|LockedStore)|TestOperation|TestAcceptedOperation|TestAddEventHandler|TestMediaWorkerSurvivesPanic)",
+  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestDrain|TestStage|TestEnumerateMediaMembership|TestStoreVerifyMedia|TestMediaDownload(ReadOnlyOutput|LockedStore)|TestOperation|TestAcceptedOperation|TestAddEventHandler|TestMediaWorkerSurvivesPanic|TestOwned)",
   "dependency_test_pattern": "^Test(KeyShareDrain|Lifecycle|Synthetic|ProtocolLifecycle)",
   "extension_status": "local-unsubmitted-unaccepted",
   "capture_enabled": false
