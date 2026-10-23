@@ -1,69 +1,109 @@
-# WACLI: exact Linux build review
+# WACLI exact Linux build review
 
-## Result: keep the build blocked
+## Status: planned, not tested or executable
 
-The tracked `go-allowed.json` and the external recovery control manifest both select `github.com/openclaw/wacli/cmd/wacli@v0.15.0` with exactly `sqlite_fts5`. The planner preserves that declaration and proposed command. It does not build, run, install, download a toolchain, or substitute a prebuilt release or an existing global binary. No allowlist, backup, secret, PATH or home/cache configuration changes are made.
+The exact declaration remains `github.com/openclaw/wacli/cmd/wacli@v0.15.0`
+with `sqlite_fts5`. Its planner status is **planned**, with dry-plan metadata
+`standard-linux-go-install`. This describes a normal Linux Go installation, not
+a portable binary or an isolated-`HOME` contract. Normal explicit `GOBIN`
+controls the binary destination; otherwise Go uses the first `GOPATH/bin`
+(normally `~/go/bin`). Normal module and build caches are retained. No
+portable/isolated HOME requirement is part of this plan.
 
-Linux support and a valid version pin are established. A generic `go install` is still not a safe executable restore action: the current planner has no reviewed Go/compiler/dependency or isolated-destination contract. Explicitly setting GOBIN alone would not isolate module, build, temporary and configuration writes. This review adds precise diagnostics, authoritative metadata observations and offline regression tests, not a Go executor or a validated build plan. The remaining gap is not an unavailable official Go checksum: it is verified toolchain/compiler content and effective paths, plus the actual resolved Linux build dependency closure.
+Execution is categorically disabled before any adapter preflight: no toolchain,
+module, compiler, archive, install, build, runtime, or state operation has been
+performed. No allowlist, backup, secret, PATH, HOME, cache, or profile changes
+are made. **Planned does not mean tested, installed, or executable.**
 
-## Exact source and module metadata
+The old complex isolation contract is superseded for the current WACLI review;
+it may be cited as design history, but it is not a mandatory condition of this
+normal-install dry plan. The existing observation status `blocked` is a
+historical integrity/execution observation, not the status of this dry plan.
 
-The official [v0.15.0 release](https://github.com/openclaw/wacli/releases/tag/v0.15.0) publishes Linux amd64 and arm64 artifacts, but the declaration selects source `go`, not those artifacts. The [annotated tag](https://api.github.com/repos/openclaw/wacli/git/tags/51f8c4a41df7eaf6a4342140679679a29b58be18) resolves to commit `a020de724180d31eccfa5241d45443402d62fb06`; GitHub reports the tag signature verified. That is source provenance evidence, not a checksum of a locally built executable.
+## Source, module, and build prerequisites
 
-The pinned [go.mod](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.mod) declares module `github.com/openclaw/wacli`, **Go 1.25.12**, and `github.com/mattn/go-sqlite3 v1.14.48`. There are no replace/exclude directives. The [README](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/README.md) independently requires Go 1.25.12 or newer. The inspected direct dependency go directives do not exceed that minimum. The pinned whatsmeow module recommends `toolchain go1.26.5`; a dependency's suggested toolchain is not itself a new minimum or a reason to silently select 1.26.5.
+The [v0.15.0 release](https://github.com/openclaw/wacli/releases/tag/v0.15.0)
+publishes Linux amd64 and arm64 artifacts, but this declaration selects source
+Go, not a prebuilt release. Its [annotated tag](https://api.github.com/repos/openclaw/wacli/git/tags/51f8c4a41df7eaf6a4342140679679a29b58be18)
+resolves to commit `a020de724180d31eccfa5241d45443402d62fb06`; GitHub reports
+the tag signature verified. This is source provenance, not a locally built
+executable checksum.
 
-The sqlite dependency's [proxy metadata](https://proxy.golang.org/github.com/mattn/go-sqlite3/@v/v1.14.48.info) records origin commit `0cfec603061a73376109c4a6178e38f86b544dd6`; its [module file](https://proxy.golang.org/github.com/mattn/go-sqlite3/@v/v1.14.48.mod) declares Go 1.21. The public [checksum record](https://sum.golang.org/lookup/github.com/mattn/go-sqlite3@v1.14.48) matches the pinned [WACLI go.sum](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.sum):
+The pinned [go.mod](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.mod)
+declares module `github.com/openclaw/wacli`, **Go 1.25.12**, and
+`github.com/mattn/go-sqlite3 v1.14.48`, with no replace/exclude directives. The
+[README](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/README.md)
+also requires Go 1.25.12 or newer. A dependency's suggested `toolchain go1.26.5`
+does not silently select 1.26.5.
 
-- Module: `h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=`.
-- go.mod: `h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=`.
+The README requires `CGO_ENABLED=1`, a C compiler, and
+`CGO_CFLAGS=-Wno-error=missing-braces`; Debian/Ubuntu `build-essential` is only
+a recommendation. The non-CGO guard blocks CGO-disabled builds. The Linux
+release configuration uses CGO and `sqlite_fts5` for amd64/arm64, with
+`aarch64-linux-gnu-gcc` for arm64 cross-builds. The selected go-sqlite3 release
+bundles the SQLite C amalgamation; its FTS5 option enables `SQLITE_ENABLE_FTS5`
+and links `-lm`. A compatible native compiler/linker, libc development
+headers, and libm linkage are prerequisites. A separate system libsqlite3 or
+FTS5 package is **not** required; adding the `libsqlite3` tag would be a
+different build. Optional ffmpeg is not a compile prerequisite.
 
-These metadata checks are not verification of downloaded archives, a complete resolved transitive dependency closure, or a local build. Go module h1 sums are not release archive SHA-256 hashes.
+## Official Go candidate metadata
 
-## CGO and SQLite FTS5 requirements
-
-The versioned README requires **CGO_ENABLED=1**, a C compiler, and `CGO_CFLAGS=-Wno-error=missing-braces`; it recommends Debian/Ubuntu `build-essential`. Its [non-CGO guard](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/cmd/wacli/cgo_required.go) deliberately prevents CGO-disabled builds. The [Linux release configuration](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/.goreleaser-linux-windows.yaml) uses CGO and `sqlite_fts5` for amd64/arm64; arm64 cross-building uses `aarch64-linux-gnu-gcc`. This is platform support evidence, not target-host runtime validation.
-
-The selected go-sqlite3 version uses its [bundled SQLite C amalgamation](https://raw.githubusercontent.com/mattn/go-sqlite3/v1.14.48/sqlite3.go). Its [FTS5 option](https://raw.githubusercontent.com/mattn/go-sqlite3/v1.14.48/sqlite3_opt_fts5.go) adds `SQLITE_ENABLE_FTS5` and links `-lm`. It therefore needs a compatible native compiler/linker, libc development headers and math-library linkage, **not a separate system libsqlite3/FTS5 package**. Selecting the additional `libsqlite3` tag would be a different build and is outside this review. The optional runtime media helper ffmpeg is not a prerequisite for compiling this declaration.
-
-## Official Go distribution metadata is available
-
-The official [Go release JSON](https://go.dev/dl/?mode=json&include=all) identifies these exact Go **1.25.12** native Linux archives:
+The official [Go release JSON](https://go.dev/dl/?mode=json&include=all)
+contains these exact Go **1.25.12** native Linux candidates:
 
 | Target | Official filename | Bytes | SHA-256 |
 | --- | --- | ---: | --- |
 | x86_64 / amd64 | `go1.25.12.linux-amd64.tar.gz` | 59856753 | `234828b7a89e0e303d2556310ee549fbcf253d28de937bac3da13d6294262ac1` |
 | aarch64 / arm64 | `go1.25.12.linux-arm64.tar.gz` | 57351753 | `8b5884aef89600aef5b0b051fb971f11f49bb996521e911f30f02a66884f7bd2` |
 
-The exact artifact URLs are `https://go.dev/dl/` followed by the listed filename. These are authoritative download metadata, **not downloaded or locally verified toolchain bytes**, and 1.25.12 is a reviewed minimum-version candidate, not a claim that it is the currently supported/security-preferred release. No toolchain version on PATH is selected. Later versions require their own exact provenance review; `>=1.25.12` is not a floating toolchain pin. An existing installation would need provenance for its complete tree, not just a hash of `bin/go`.
+These are official metadata observations of a **candidate**, not downloaded or
+locally verified bytes, a selected host toolchain, or a security-preferred
+version. Later versions require their own provenance review; `>=1.25.12` is
+not a floating pin. No toolchain on PATH is selected.
 
-## Dependency integrity: declared hashes are not a build lock
+## Dependency evidence and its limits
 
-The pinned [go.mod](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.mod) lists **31 exact requirements: 9 direct and 22 indirect**. The pinned [go.sum](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.sum) contains **89 records: 39 module-content h1 sums and 50 go.mod h1 sums**. All 31 declared requirements have both records. The machine-readable [metadata observation](linux-wacli-integrity-observation.json) records the official Go archive metadata, root provenance, fetched text hashes and each declared module's comparison with public checksum lookup text. The observation is review evidence only; the planner does not fetch it or use it to enable execution.
+The root module's v0.15.0 checksum-database lookup records module
+`h1:7FAcz3o4zSlMvgDcWlhjpmwpkLwLKMY4bWnOopv2FXA=` and go.mod
+`h1:D5vWmRbYq/RK9ZPLyfdirrkAJVX/noLioSasjliT1MM=`. The root module declares
+**31 exact requirements (9 direct, 22 indirect)** and
+its [go.sum](https://raw.githubusercontent.com/openclaw/wacli/v0.15.0/go.sum)
+contains **89 records (39 module-content h1 and 50 go.mod h1 records)**; every
+declared requirement has both records. For go-sqlite3, public checksum lookup
+matches the root file: module `h1:7XHIgl0a8HwOaiK4E47ozLkST78rR9+OtNGx27D/TFs=`
+and go.mod `h1:6JTjA44L93a0QCyJef5YvlPoKXntQPjzWv5gtm9sB6w=`. The root module's
+version/commit and h1 evidence remain separate checks: a working tree is not
+authenticated by its own go.sum.
 
-A go.sum is not a lockfile or proof of the complete platform/tag-specific build set. Recursive `require` traversal can include older, pruned, test-only or otherwise unused versions; counting those as missing build dependencies would be misleading. The exact selected set still needs Go's MVS/lazy package-loading semantics and Linux/CGO/`sqlite_fts5` source selection. No such Go package loading or source-content verification was performed. The main module must separately be checked against its own approved root checksum: its working tree is not validated by its own go.sum.
+These are text and metadata observations, not signed proof, downloaded-byte
+verification, a complete platform/tag-specific build closure, or a local
+build. Equality between go.sum h1 strings and checksum-database lookup text is
+not a verified signature or Merkle inclusion/consistency proof. A future Go
+sumdb verifier must fail closed if authentication, content, or the reviewed
+resolved graph cannot be established. `go mod verify` alone does not download
+missing content or establish the initial trust chain.
 
-[Checksum database lookup](https://go.dev/ref/mod#authenticating) text contains a record and signed tree description. Equality of its h1 strings with go.sum is **not** a verified signature, Merkle inclusion/consistency proof or verification of a downloaded archive. The exact Go distribution embeds [the sum.golang.org verifier key](https://raw.githubusercontent.com/golang/go/go1.25.12/src/cmd/go/internal/modfetch/key.go). A future trusted verifier must authenticate records and content, then compare the actual resolved graph to the reviewed manifest. `go mod verify` alone checks downloaded cache consistency; it neither downloads all absent content nor establishes a complete initial trust chain. See [the module reference](https://go.dev/ref/mod#go-mod-verify).
+Version-suffixed `go install package@version` ignores the caller's go.mod and
+go.sum; the upstream root go.sum is evidence, not an install lock. A future
+adapter must therefore review the command's resolved graph and content rather
+than claim that the caller's module files govern it. `GOTOOLCHAIN=local` must
+be used so Go cannot auto-download another toolchain.
 
-## Why no adapter is enabled
+## Adapter and recovery boundary
 
-The source/tag, declared checksums and official toolchain archive checksums are available. A truly actionable dry build plan still requires a verified existing native Go/compiler/sysroot, a complete resolved build graph/content-integrity manifest, actual approved isolation paths and fail-loud effective-path results. Checking effective Go paths executes the toolchain, and validating native CGO suitability may invoke compiler/linker probes. Those checks and module-content downloads are expressly outside this review. The source is not declared unreproducible; reproducibility and runtime/build suitability have **not been established**. Therefore no WACLI plan adapter, executor or install command is promoted from blocked.
+The dry plan records the normal command shape, including explicit
+`GOBIN` when supplied and the original `sqlite_fts5` tag. It does not perform
+effective-path checks, download metadata/content, invoke Go or a compiler, or
+validate libc/libm/sysroot suitability. Those checks remain preflight work, and
+all execution stays disabled before that preflight.
 
-## Isolation contract (design only, not implemented or validated)
+PR28 is explicit and stopped: the caller selects and stops all writers, makes
+a clean-state encrypted capture, and may perform a **NEW offline export**.
+There is no live-WAL capture, migration, account activation, or automatic
+full-backup integration. The state helper preserves raw state only and grants
+no installation permission; see [WACLI state](linux-wacli-state.md).
 
-A future dry-plan adapter must require an explicit root map, not supply home defaults. One possible shape is **distinct sibling** new directories `<parent>/bin`, `gopath`, `modules`, `build-cache`, `go-temp`, `process-temp`, `home`, `config`, `state`, `data`, `xdg-cache`, and `work`. These are placeholders, not selected paths. An existing verified toolchain and compiler/sysroot are separate read-only inputs, outside every write root. No root may contain another: in particular GOMODCACHE is not nested inside GOPATH, and XDG directories are not nested inside HOME. The work root will contain only the verified exact root-module source; GOBIN is the sole proposed output root.
-
-Before even earlier selected package operations, require every writable root to be explicitly supplied, absolute, normalized, new and pairwise non-overlapping. Reject source/repository, recovered payload, backup, live HOME and system-root overlap in either direction; reject symlinks in the destination or any ancestor, non-directory or unsafe-writable ancestors, and aliases resolving to the same location. Recheck immediately before use; future creation/publication needs no-follow, descriptor-relative and no-replace handling to avoid check/use races. A path declaration alone is not process containment.
-
-Construct a fresh child environment rather than copying `os.environ`. Route `GOBIN`, `GOPATH`, `GOMODCACHE`, `GOCACHE`, `GOTMPDIR`, `TMPDIR` (and `TMP`/`TEMP` if exposed), `HOME`, all four XDG roots to their respective roots. Telemetry is derived inside `<config>/go/telemetry`; `GOTELEMETRY` and `GOTELEMETRYDIR` are reported values, not supported environment overrides in this exact toolchain. A future authorized setup must seed the isolated telemetry mode file to `off` before the first Go process and check both reported values, without touching live configuration. See the [exact telemetry path/mode implementation](https://raw.githubusercontent.com/golang/go/go1.25.12/src/cmd/vendor/golang.org/x/telemetry/internal/telemetry/dir.go). Use `GOENV=off`, `GOWORK=off`, `GO111MODULE=on`, `GOTOOLCHAIN=local`, explicit `GOROOT`, `GOOS=linux`, native `GOARCH` and baseline `GOAMD64=v1` for amd64. Fix `GOFLAGS=-mod=readonly`; any build arguments must preserve that constraint and only the original `sqlite_fts5` tag. Set `CGO_ENABLED=1`, absolute reviewed `CC`, explicit `CGO_CFLAGS=-Wno-error=missing-braces` and reviewed remaining C/CPP/CXX/FF/LD flags. Do not inherit compiler wrappers, `GOCACHEPROG`, `GOEXPERIMENT`, `GOFIPS140`, `GODEBUG`, `CGO_*_ALLOW`/`DISALLOW`, linker/preload or compiler search-path injection, proxy credentials, SSH or VCS helpers. Any required subprocess PATH is child-only, a fixed reviewed compiler/binutils search path; never modify the caller's PATH or profiles. Compiler drivers may still invoke their own `cc1`, assembler, linker, libraries or sysroot: approving only the CC executable is not enough.
-
-Pin `GOPROXY=https://proxy.golang.org` with no `direct` or alternate fallback, `GOSUMDB=sum.golang.org` (the official Go distribution embeds its verifier key), `GOVCS=*:off`, `GOAUTH=off`, and explicitly empty `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, `GOINSECURE`. Metadata fetched over HTTPS and text equality with a sumdb lookup are evidence, not a verified signed-log inclusion proof or a locally verified module archive. Never disable checksum verification to make a build pass. A root-module working tree must independently be bound to the reviewed tag/commit and root h1 sum, because the main module is not authenticated by its own go.sum. Verify all dependency content against the reviewed manifest and signed checksum service before an offline compilation stage; deny network in that stage. Never run `go generate`, tests or WACLI as an inferred build hook.
-
-**Future effective checks must be fail-loud, not today's claims.** After verifying the complete toolchain bytes, use its absolute `bin/go`, the fresh environment and the isolated source CWD for a named-key `go env -json` query. Compare every requested key for exact equality, including `GOROOT`, `GOTOOLDIR`, `GOVERSION`, `GOHOSTOS`, `GOHOSTARCH`, `GOOS`, `GOARCH`, `GOBIN`, `GOPATH`, `GOMODCACHE`, `GOCACHE`, `GOTMPDIR`, `GOENV`, `GOWORK`, `GOMOD`, `GOTOOLCHAIN`, checksum/network policy, `GOTELEMETRY=off`, the config-derived `GOTELEMETRYDIR`, `CC` and `CGO_ENABLED`. Require `GOMOD=<work>/go.mod` and `GOTOOLDIR` inside the verified GOROOT; missing keys, extra unexpected values, auto-selected toolchains, host/target mismatch and any path escape abort before downloads or compilation. Independently compare HOME/XDG/temp and supplied compiler flags in the child environment: `go env` does not report every OS variable.
-
-Do not run a bare `go env -json` as a supposedly passive probe: [the exact Go 1.25.12 implementation](https://raw.githubusercontent.com/golang/go/go1.25.12/src/cmd/go/internal/envcmd/env.go) calls costly C-flag/build initialization for an all-variable query or certain requested compiler-flag fields. That can invoke compiler checks. Even the restricted effective-path query executes Go and is outside this task's no-toolchain-execution boundary. No such probes or compiler/link tests were run here. A later authorized validation must also establish the native compiler/binutils/libc headers/libm/sysroot provenance and suitability, not assume it from `build-essential` or a file on PATH.
-
-A future proposal could build `./cmd/wacli` from that verified source using the absolute pinned Go binary and `-mod=readonly -tags sqlite_fts5 -o <bin>/wacli`. This describes the boundary, not a runnable restore command or an executor. Do not use `go build package@version`; it is not a supported equivalent. Do not assume a caller-side lock governs `go install package@version`: [version-suffixed installation ignores the caller's module](https://go.dev/ref/mod#go-install). Reproducible source selection is not a claim of bit-identical CGO output or runtime validity.
-
-## Safety boundary retained
-
-The exact original declaration and `go install -tags sqlite_fts5 github.com/openclaw/wacli/cmd/wacli@v0.15.0` proposal stay visible and blocked. No actual toolchain/dependencies are downloaded, no Go/compiler/WACLI processes are run, and no build/install occurs. Forged planned Go actions still fail before any earlier selected APT preflight or mutation. Other versions/tags cannot borrow this exact review. No allowlists, recovered backup, secrets, private removed list, HOME, PATH or profiles are changed; no later Scoop/WinGet item is reviewed.
+The original declaration and proposed `go install -tags sqlite_fts5
+github.com/openclaw/wacli/cmd/wacli@v0.15.0` remain visible for planning, not
+execution. No prebuilt release or existing global binary is substituted.
