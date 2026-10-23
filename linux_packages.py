@@ -175,7 +175,7 @@ def _requirements_actions(root: Path, blockers: list[str], require_pip_freeze: b
         for line in lines:
             # Inspect only the normalized project name, never include raw
             # requirements (which can contain private URLs/options) in reports.
-            match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s*(?:\[|[<>=!~;@]|$))", line)
+            match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s*(?:\[|[<>=!~;@#]|$))", line)
             package = re.sub(r"[-_.]+", "-", match[1]).lower() if match else ""
             if package in {"pywin32", "pypiwin32", "windows-curses", "pywin32-ctypes"} or any(marker in line.lower() for marker in ('win_amd64.whl', 'win32.whl', 'file:///c:', 'file:///d:', ' @ c:', ' @ d:')):
                 bad.append(line)

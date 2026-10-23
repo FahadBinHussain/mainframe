@@ -39,6 +39,7 @@ class PipPlatformTests(unittest.TestCase):
     def test_normalized_project_names_and_markers_remain_blocked(self):
         for requirement in ('PyWin32_Ctypes==0.2.3', 'pywin32.ctypes==0.2.3',
                             'pywin32-ctypes[example]>=0.2.3',
+                            'pywin32-ctypes # synthetic inline comment',
                             'pywin32-ctypes==0.2.3; sys_platform == "win32"'):
             with self.subTest(requirement=requirement), TemporaryDirectory() as d:
                 root = Path(d)
