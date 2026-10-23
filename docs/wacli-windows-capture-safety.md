@@ -52,3 +52,5 @@ The following is a **proposed v1 contract**, not a format emitted or accepted by
 The next implementation needs a synthetic Windows test environment with the required existing SQLite and AES archive dependencies, plus an agreed verifiable capture boundary/provenance policy. Until that exists, this is a safe blocked result, not the first successful full source backup.
 
 Even after that gate passes, [the remaining migration gaps](linux-wacli-windows-parity.md) remain: complete schema compatibility, Windows account/config selection, external media preservation and path mapping, non-overwriting activation, and functional local/search/media/linked-device validation. None is performed or claimed here.
+
+The subsequent [snapshot preparation milestone](wacli-snapshot-preparation.md) adds a private staged SQLite engine and candidate AES integration, with a no-I/O blocked public preflight. It does not implement a boundary backend, accept a trusted capture receipt, change either Windows guard, or establish Windows validation. The proposed v1 capture contract above remains unimplemented.
