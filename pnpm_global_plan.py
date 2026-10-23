@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Metadata-only global pnpm plans. No executor, subprocess, mkdir or config writes.
+
+This is deliberately not a dependency solver or a process sandbox. Registry
+metadata and proposed paths do not prove installed runtimes or contain scripts.
+"""
+from __future__ import annotations
+
+import concurrent.futures
+import re
+from pathlib import Path
+from typing import Any, Mapping
+from urllib.parse import quote
+
+import github_native_linux as native
+import node_lts_linux as node
+import opencode2_linux as registry
+
+REGISTRY = "https://registry.npmjs.org"
+ROOT_KEYS = {"node", "pnpm", "pnpm_home", "global", "bin", "store", "cache",
+             "config", "state", "data", "home", "temp", "work"}
+VERSION = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\Z")
+NAME = re.compile(r"(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*\Z")
+HOOKS = {"preinstall", "install", "postinstall"}
+MAX_DIRECT = 128
+
+
+def _version(value: Any) -> tuple[int, int, int]:
+    if not isinstance(value, str) or not VERSION.fullmatch(value):
+        raise ValueError("Missing or unsafe exact stable version")
+    return tuple(int(v) for v in value.split("."))
+
+
+def satisfies(version: str, requirement: Any) -> bool:
+    """Conservative engine evaluator; unknown grammar fails, never guesses."""
+    actual = _version(version)
+    if not isinstance(requirement, str) or not requirement.strip():
+        raise ValueError("Missing Node engine requirement")
+    alternatives = []
+    for branch in requirement.split("||"):
+        parts = re.findall(r"(>=|<=|>|<|=|\^|~)?\s*(\d+(?:\.\d+){0,2})", branch)
+        remainder = re.sub(r"(>=|<=|>|<|=|\^|~)?\s*\d+(?:\.\d+){0,2}", "", branch)
+        if not parts or remainder.strip():
+            raise ValueError(f"Unsupported Node engine requirement: {requirement!r}")
+        checks = []
+        for op, raw in parts:
+            values = tuple(int(v) for v in raw.split("."))
+            target = values + (0,) * (3 - len(values))
+            if op == ">=": good = actual >= target
+            elif op == ">": good = actual > target
+            elif op == "<=": good = actual <= target
+            elif op == "<": good = actual < target
+            elif op in {"^", "~"}:
+                if op == "~": upper = (target[0], target[1] + 1, 0)
+                elif target[0]: upper = (target[0] + 1, 0, 0)
+                elif target[1]: upper = (0, target[1] + 1, 0)
+                else: upper = (0, 0, target[2] + 1)
+                good = target <= actual < upper
+            else: good = actual[:len(values)] == values
+            checks.append(good)
+        alternatives.append(all(checks))
+    return any(alternatives)
+
+
+def validate_roots(values: Any, protected: tuple[Path, ...] = ()) -> dict[str, str]:
+    if not isinstance(values, Mapping) or set(values) != ROOT_KEYS:
+        raise ValueError("Explicit isolation roots required: " + ", ".join(sorted(ROOT_KEYS)))
+    roots = {}
+    for key, raw in values.items():
+        if (not isinstance(raw, str) or not raw.startswith("/") or
+                any(c in raw for c in "\x00\r\n") or "//" in raw or
+                any(p in {".", "..", "~"} for p in raw.split("/"))):
+            raise ValueError(f"Unsafe absolute isolation root: {key}")
+        path = Path(raw)
+        if str(path) != raw or len(path.parts) < 3:
+            raise ValueError(f"Unsafe isolation root: {key}")
+        # No system directories, live HOME, repo, or backup payload as a root.
+        for forbidden in (Path.home(), Path("/etc"), Path("/usr"), Path("/bin"),
+                          Path("/sbin"), Path("/lib"), Path("/lib64"), Path("/dev"),
+                          Path("/proc"), Path("/sys"), Path("/boot"), *protected):
+            forbidden = forbidden.absolute()
+            if path == forbidden or path in forbidden.parents or forbidden in path.parents:
+                raise ValueError(f"Isolation root overlaps a protected path: {key}")
+        if path.exists() or path.is_symlink():
+            raise ValueError(f"Isolation root must be new, not existing: {key}")
+        for parent in path.parents:
+            if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                raise ValueError(f"Unsafe isolation parent: {key}")
+        roots[key] = raw
+    paths = list(map(Path, roots.values()))
+    for i, path in enumerate(paths):
+        if any(path == other or path in other.parents or other in path.parents for other in paths[i + 1:]):
+            raise ValueError("Isolation roots must be distinct and non-overlapping")
+    return roots
+
+
+def manifest(name: str, selector: str = "latest") -> dict[str, Any]:
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        raise ValueError("Invalid registry package name")
+    if selector != "latest": _version(selector)
+    source = f"{REGISTRY}/{quote(name, safe='@/')}/{selector}"
+    meta = registry._json(source)
+    if not isinstance(meta, Mapping) or meta.get("name") != name:
+        raise ValueError("Registry source/package identity mismatch")
+    version = meta.get("version"); _version(version)
+    if selector != "latest" and version != selector:
+        raise ValueError("Registry version mismatch")
+    dist = meta.get("dist")
+    url = f"{REGISTRY}/{name}/-/{name.rsplit('/', 1)[-1]}-{version}.tgz"
+    if not isinstance(dist, Mapping) or dist.get("tarball") != url:
+        raise ValueError("Missing or unsafe registry tarball source")
+    integrity = registry._integrity(dist.get("integrity"))
+    for key in ("scripts", "dependencies", "optionalDependencies", "engines"):
+        if key in meta and not isinstance(meta[key], Mapping):
+            raise ValueError(f"Invalid registry {key}")
+    scripts = meta.get("scripts", {})
+    if any(not isinstance(k, str) or not isinstance(v, str) or not v or
+           any(c in v for c in "\x00\r\n") for k, v in scripts.items()):
+        raise ValueError("Invalid registry script metadata")
+    for key in ("dependencies", "optionalDependencies"):
+        if any(not isinstance(k, str) or not NAME.fullmatch(k) or
+               not isinstance(v, str) or not v or any(c in v for c in "\x00\r\n")
+               for k, v in meta.get(key, {}).items()):
+            raise ValueError("Invalid registry dependency metadata")
+    return {"name": name, "version": version,
+            "source": f"{REGISTRY}/{name}/{version}", "selector_source": source,
+            "tarball": url, "integrity": integrity,
+            "engines": dict(meta.get("engines", {})),
+            "install_scripts": {k: v for k, v in scripts.items() if k in HOOKS},
+            "dependencies": dict(meta.get("dependencies", {})),
+            "optional_dependencies": dict(meta.get("optionalDependencies", {})),
+            "bin": meta.get("bin")}
+
+
+def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
+                   *, architecture: str, protected: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Validate proposed future roots/runtime metadata; never inspect credentials.
+
+    Only exact direct dependencies are inspected. Non-exact and transitive
+    dependencies are explicit execution prerequisites, not silently resolved.
+    """
+    if architecture != "x86_64":
+        raise ValueError("Runtime adapters only validate Linux glibc x86_64")
+    if not isinstance(config, Mapping) or set(config) != {"roots"}:
+        raise ValueError("pnpm dry-plan config must contain only explicit roots")
+    roots = validate_roots(config["roots"], protected)
+    if not node_release or not pnpm_release:
+        raise ValueError("Missing pinned Node/pnpm runtime source metadata")
+    nr = node._validate_release(node_release)
+    pr = native._validate_release(pnpm_release)
+    if pr.get("name") != "pnpm":
+        raise ValueError("Wrong package-manager runtime identity")
+    # Contract reviewed against current pnpm 12, not guessed for future majors.
+    if _version(pr["version"])[0] != 12:
+        raise ValueError("Unreviewed pnpm major; isolated global/build-policy contract requires pnpm 12")
+    pm = manifest("pnpm", pr["version"])
+    package = manifest(name)
+    deps = package["dependencies"]
+    if len(deps) > MAX_DIRECT:
+        raise ValueError("Direct dependency metadata exceeds review bound")
+    exact = [(n, v) for n, v in deps.items() if VERSION.fullmatch(v)]
+    pending = {n: v for n, v in deps.items() if not VERSION.fullmatch(v)}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        direct = list(pool.map(lambda pair: manifest(*pair), exact))
+    checks = []
+    for meta in [package, pm, *direct]:
+        engine = meta["engines"].get("node")
+        # A library without engines makes no Node-version claim.
+        if engine is None and meta not in [package, pm]: continue
+        if not satisfies(nr["version"], engine):
+            raise ValueError(f"Node {nr['version']} does not satisfy {meta['name']} engine {engine!r}")
+        checks.append({"package": meta["name"], "requirement": engine, "satisfied_by": nr["version"]})
+    scripts = [{"package": m["name"], "version": m["version"], "source": m["source"],
+                "hooks": m["install_scripts"]} for m in [package, *direct] if m["install_scripts"]]
+    builds = sorted({entry["package"] for entry in scripts if entry["package"] != name})
+    settings = {"pnpmHomeDir": roots["pnpm_home"], "globalDir": roots["global"],
+                "globalBinDir": roots["bin"], "storeDir": roots["store"],
+                "cacheDir": roots["cache"], "configDir": roots["config"],
+                "stateDir": roots["state"], "strictDepBuilds": True,
+                "ignoreScripts": False, "dangerouslyAllowAllBuilds": False}
+    # A draft command, never accepted by linux_packages.execute(). Unknown
+    # transitive builds must fail strictDepBuilds, not gain blanket approval.
+    command = [str(Path(roots["pnpm"]) / "pnpm"), "add", "--global",
+               *[f"--config.{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in settings.items()],
+               *[f"--allow-build={n}" for n in builds], "--", f"{name}@{package['version']}"]
+    environment = {"HOME": roots["home"], "PNPM_HOME": roots["pnpm_home"],
+                   "XDG_CONFIG_HOME": roots["config"], "XDG_CACHE_HOME": roots["cache"],
+                   "XDG_DATA_HOME": roots["data"], "XDG_STATE_HOME": roots["state"],
+                   "TMPDIR": roots["temp"], "TMP": roots["temp"], "TEMP": roots["temp"],
+                   "NPM_CONFIG_USERCONFIG": str(Path(roots["config"]) / "npmrc"),
+                   "NPM_CONFIG_GLOBALCONFIG": str(Path(roots["config"]) / "global-npmrc"),
+                   "NPM_CONFIG_CACHE": roots["cache"], "NPM_CONFIG_REGISTRY": REGISTRY,
+                   "PATH": ":".join([str(Path(roots["node"]) / "bin"), roots["pnpm"], roots["bin"], "/usr/bin", "/bin"])}
+    return {"status": "dry-only", "executable": False, "package": package,
+            "roots": roots, "runtime_sources": {"node": nr, "pnpm": pr},
+            "runtime_status": "proposed pinned runtimes; binaries not installed, probed or executed",
+            "engine_checks": checks, "direct_dependencies_reviewed": direct,
+            "unresolved_direct_ranges": pending, "install_scripts": scripts,
+            "script_policy": {"allow_builds_proposal": {n: True for n in builds},
+                              "required_version_scoped_policy": {f"{m['package']}@{m['version']}": True for m in scripts if m["package"] != name},
+                              "draft_cli_approval_scope": "--allow-build names are name-wide, not version-specific; not execution approval",
+                              "strict_unknown_builds": True, "runs_scripts_if_later_authorized": True,
+                              "inventory": "root and exact direct dependencies only; not exhaustive"},
+            "optional_policy": "Keep normal optional dependencies; pnpm filters OS/CPU/libc. Do not use --no-optional or enable experimental native Vercel execution.",
+            "proposed_command": command, "proposed_environment": environment,
+            "environment_policy": "Construct fresh child environment from these entries; never inherit tokens, npm config or VERCEL native-mode flags; do not change parent HOME/PATH/profile.",
+            "proposed_cwd": roots["work"],
+            "execution_blockers": [
+                "No global-package executor exists; this is a dry plan, not install authorization.",
+                "Replace name-wide draft --allow-build entries with reviewed version-scoped allowBuilds matchers after full lockfile review; no broad approval is authorized.",
+                "Install/verify pinned runtimes and validate effective pnpm config/paths in the isolated child before package installation.",
+                "Resolve and review full transitive/peer/optional lockfile, engine/platform compatibility, integrity and lifecycle/implicit node-gyp builds; direct metadata inventory is not a lockfile.",
+                "Review scripts and their network/toolchain/child-process effects; isolated path routing is NOT an OS security sandbox.",
+                "Revalidate all new roots with safe no-replace publication before writes; prevent symlink races and source/backup overlap."]}
