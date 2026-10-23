@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
-"""Explicit WACLI v0.15 state preservation; never install or execute WACLI.
+"""Explicit WACLI metadata inspection and offline export; capture is disabled.
 
-Only caller-selected roots are read. No config, SQL, message or credential is
-parsed. Captures require stopped writers, existing upstream LOCKs and no SQLite
-sidecars; bytes are not normalized or checkpointed. See docs/linux-wacli-state.md.
+No verified stop/copy/restart backend exists. Caller attestations, process exit,
+advisory LOCKs and absent sidecars cannot authorize capture. Never execute WACLI.
 """
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
-import fcntl
-import getpass
 import hashlib
 import json
 import os
@@ -19,7 +15,7 @@ import stat
 import sys
 import tempfile
 import unicodedata
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile
 
 from linux_restore import (CHUNK, MAX_MEMBER_BYTES, MAX_EXPANDED_BYTES,
                            secure_directory, safe_member,
@@ -99,52 +95,12 @@ def opened_file(root, rel):
 
 
 def snapshot(root, output, quiesced=False):
-    """Internal private staging; caller must encrypt before publishing anything."""
-    if not quiesced:
-        raise StateError('Explicit --quiesced attestation required: stop all WACLI and other writers first.')
-    root = absolute_path(root)
-    before = scan(root)
-    if not before:
-        raise StateError('State root is empty; no recoverable state captured.')
-    locks = [rel for rel in before if Path(rel).name == 'LOCK' and stat.S_ISREG(before[rel][2])]
-    for rel, s in before.items():
-        if stat.S_ISREG(s[2]) and Path(rel).suffix.lower() in ('.db', '.sqlite', '.sqlite3'):
-            lock = (Path(rel).parent / 'LOCK').as_posix()
-            if lock not in locks:
-                raise StateError('Database lacks an existing upstream LOCK; capture blocked without modifying the source.')
-    with ExitStack() as stack:
-        for rel in sorted(locks):
-            handle = stack.enter_context(opened_file(root, rel))
-            if stamp(os.fstat(handle.fileno())) != before[rel]:
-                raise StateError('State changed during lock acquisition.')
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise StateError('WACLI store is active/locked; capture blocked.') from None
-        if scan(root) != before:
-            raise StateError('State changed during lock acquisition.')
-        with ZipFile(output, 'x', compression=ZIP_DEFLATED, allowZip64=True) as z:
-            for rel, s in sorted(before.items()):
-                name = PREFIX + rel
-                if stat.S_ISDIR(s[2]):
-                    z.writestr(name + '/', b'')
-                    continue
-                if s[3] > MAX_MEMBER_BYTES:
-                    raise StateError('State member exceeds safety limit.')
-                with opened_file(root, rel) as source, z.open(name, 'w', force_zip64=True) as target:
-                    if stamp(os.fstat(source.fileno())) != s:
-                        raise StateError('State changed before copy.')
-                    size = 0
-                    while block := source.read(CHUNK):
-                        size += len(block)
-                        if size > s[3]:
-                            raise StateError('State changed during copy.')
-                        target.write(block)
-                    if size != s[3] or stamp(os.fstat(source.fileno())) != s:
-                        raise StateError('State changed during copy.')
-        if scan(root) != before:
-            raise StateError('State changed during snapshot; no capture published.')
-    return len(before)
+    """Legacy API retained only to refuse before inspecting either path.
+
+    A caller's quiesced flag is not authority to stop, copy or restart anything.
+    Do not retain a private lock-only implementation as an alternate backend.
+    """
+    raise StateError('Verified stop/copy/restart boundary unavailable; capture blocked.')
 
 
 def destination_parent(destination, source):
@@ -204,37 +160,8 @@ def publish_tree(temporary, destination, parent_fd):
 
 
 def capture(root, destination, password, quiesced=False):
-    provider = aes_zip()  # fail before reading state or making a destination
-    if not password:
-        raise StateError('A non-empty archive password is required.')
-    root, destination = absolute_path(root), absolute_path(destination)
-    parent = destination_parent(destination, root)
-    try:
-        with tempfile.TemporaryDirectory(prefix='mainframe-wacli-') as work:
-            work = Path(work)
-            inner = work / 'tool-secrets.zip'
-            count = snapshot(root, inner, quiesced)
-            ready = work / 'ready'
-            ready.mkdir(mode=0o700)
-            with provider.AESZipFile(ready / 'mainframe-secrets.zip', 'w', compression=provider.ZIP_DEFLATED, encryption=provider.WZ_AES) as z:
-                z.setpassword(password)
-                z.setencryption(provider.WZ_AES, nbits=256)
-                z.write(inner, 'tool-secrets.zip')
-            # Authenticate and byte-verify the complete inner ZIP before publication.
-            with provider.AESZipFile(ready / 'mainframe-secrets.zip') as z:
-                z.setpassword(password)
-                with z.open('tool-secrets.zip') as stream:
-                    digest = stream_hash(stream)
-            with inner.open('rb') as stream:
-                expected = stream_hash(stream)
-            if digest != expected:
-                raise StateError('Encrypted archive verification failed.')
-            publish_tree(ready, destination, parent)
-            return {'status': 'encrypted-state-preserved', 'entries': count, 'activation': 'not-performed',
-                    'restoration': restoration_status('explicit-native-root-encrypted'),
-                    'coverage': 'explicit-root-only; external configured stores are not followed'}
-    finally:
-        os.close(parent)
+    """Legacy API: fail before source/destination/password use or provider loading."""
+    raise StateError('Verified stop/copy/restart boundary unavailable; capture blocked.')
 
 
 def restore_unlocked(archive, destination):
@@ -342,10 +269,10 @@ def main(argv=None):
     sub = parser.add_subparsers(dest='operation', required=True)
     plan = sub.add_parser('plan', help='read filenames/metadata only, no payload, defaults or config discovery')
     plan.add_argument('--state-root', type=Path, required=True)
-    cap = sub.add_parser('capture', help='new encrypted envelope only; never modify an existing backup')
+    cap = sub.add_parser('capture', help='BLOCKED: no verified stop/copy/restart boundary')
     cap.add_argument('--state-root', type=Path, required=True)
     cap.add_argument('--destination', type=Path, required=True)
-    cap.add_argument('--quiesced', action='store_true')
+    cap.add_argument('--quiesced', action='store_true', help='legacy syntax only; never authorizes capture')
     restore = sub.add_parser('restore-unlocked', help='explicit authorized unlocked ZIP -> NEW offline directory only')
     restore.add_argument('--archive', type=Path, required=True)
     restore.add_argument('--destination', type=Path, required=True)
@@ -354,7 +281,7 @@ def main(argv=None):
     sub.add_parser('plan-coordinated-capture', help='BLOCKED capability report; reads no source or receipt')
     args = parser.parse_args(argv)
     try:
-        if args.operation == 'plan-coordinated-capture':
+        if args.operation in ('plan-coordinated-capture', 'capture'):
             from wacli_snapshot import capture_status
             print(json.dumps(capture_status(), sort_keys=True))
             return 3
@@ -364,12 +291,8 @@ def main(argv=None):
         elif args.operation == 'plan':
             result = {'status': 'metadata-only', 'entries': len(scan(args.state_root)),
                       'restoration': restoration_status('not-inspected'),
-                      'capture_requires': 'quiesced writers, existing store LOCKs, no sidecars, AES ZIP provider'}
-        elif args.operation == 'capture':
-            if not args.quiesced:
-                raise StateError('--quiesced is required; stop writers before capture.')
-            aes_zip()
-            result = capture(args.state_root, args.destination, getpass.getpass('Archive password: ').encode(), True)
+                      'capture_enabled': False,
+                      'capture_requires': 'verified all-writer stop/copy/restart backend; caller attestation is insufficient'}
         else:
             result = restore_unlocked(args.archive, args.destination)
         print(json.dumps(result, sort_keys=True))

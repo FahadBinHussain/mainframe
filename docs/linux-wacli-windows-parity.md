@@ -38,7 +38,7 @@ Unknown or non-native metadata must remain in the encrypted original backup and,
 
 ## What this change implements
 
-`wacli_restore_contract.py` supplies one payload-free status contract to the normal Linux Go plan, generic recovery inventory/report, and explicit native capture/offline export. It separates **installation**, **preservation**, **Windows migration**, **activation**, and **usability**. `complete` remains `false`; a planned install and byte-preserved store cannot change that.
+`wacli_restore_contract.py` supplies one payload-free status contract to the normal Linux Go plan, generic recovery inventory/report, and explicit offline export (native capture is disabled). It separates **installation**, **preservation**, **Windows migration**, **activation**, and **usability**. `complete` remains `false`; a planned install and byte-preserved store cannot change that.
 
 `wacli_state.py plan-windows-unlocked --archive /approved/unlocked/tool-secrets.zip` is an **optional metadata-only blocker assessment**, not a migration or unlock command. It only examines the standard Windows profile subtree in the ZIP central directory. It reports counts of candidate database pairs/sidecars without profile names, paths or payloads; rejects unsafe/duplicate/conflicting/special/encrypted selected entries and oversized input; never opens ZIP members, SQLite, YAML or profile JSON. No extraction destination exists. Exit **3** means blocked/incomplete, **2** means invalid input. It will not turn green merely because matching filenames or a claimed version are present.
 

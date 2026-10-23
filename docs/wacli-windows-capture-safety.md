@@ -19,10 +19,10 @@ This is source-capture work only. Normal Linux installation, offline staging, Wi
 | Unreadable source database or WAL | Both fail under an unprivileged POSIX runner; no immutable fallback is attempted. This does not test Windows ACL/share-mode behavior. |
 | Windows guard sees real uncheckpointed WAL plus version metadata | Both capture guards still reject; the WAL bytes are unchanged. Merely adding version fields does not unlock capture. |
 | Directory enumeration raises permission denial | Both guard functions propagate failure, not success. The permission error is injected into the AST-isolated PowerShell harness. |
-| Existing envelope dependency is missing | Native capture fails before source snapshot/output creation; no plaintext fallback. |
-| WAL-derived staged database and synthetic metadata through the existing AES envelope | Exact recovered file hashes and all committed rows match; wrong password and modified authentication bytes fail. This is the native clean-stage envelope, not a Windows integration. |
+| Native capture with or without `--quiesced` | Refuses before source/destination inspection or provider loading, regardless of dependency availability. |
+| Private unverified preparation through the existing AES envelope | Exact synthetic original-file bytes and unverified receipt survive; wrong password and modified authentication bytes fail. This uses only `WacliPreparation/v1/`, not native state or publishable Windows capture. |
 
-These tests are evidence for keeping the blocker. They do **not** implement or certify a Windows SQLite snapshot or encrypted Windows capture. Existing optional AES round-trip tests in [test_linux_wacli_state.py](../tests/test_linux_wacli_state.py) also test the native clean-store envelope only; a skipped test is not an encrypted round-trip pass. The default interpreter lacked `pyzipper`; already-present isolated test dependencies were subsequently located and reused via `PYTHONPATH`, without installing anything. No 7-Zip CLI was available. End-to-end Windows encryption/decryption and integrity verification remain untested here.
+These tests are evidence for keeping the blocker. They do **not** implement or certify a Windows SQLite snapshot or encrypted Windows capture. Native capture tests now prove unconditional no-I/O refusal; offline export uses directly constructed synthetic ZIP fixtures. AES preparation tests require optional `pyzipper`; a skipped test is not an encrypted round-trip pass. End-to-end Windows encryption/decryption and integrity verification remain untested here.
 
 ## Why the existing paths cannot be reused unchanged
 
@@ -54,3 +54,11 @@ The next implementation needs a synthetic Windows test environment with the requ
 Even after that gate passes, [the remaining migration gaps](linux-wacli-windows-parity.md) remain: complete schema compatibility, Windows account/config selection, external media preservation and path mapping, non-overwriting activation, and functional local/search/media/linked-device validation. None is performed or claimed here.
 
 The subsequent [snapshot preparation milestone](wacli-snapshot-preparation.md) adds a private staged SQLite engine and candidate AES integration, with a no-I/O blocked public preflight. It does not implement a boundary backend, accept a trusted capture receipt, change either Windows guard, or establish Windows validation. The proposed v1 capture contract above remains unimplemented.
+
+## Stop/copy/restart assessment: attestation bypass removed
+
+The legacy `wacli_state.py capture --quiesced` route and its `snapshot()` API previously allowed caller attestation plus cooperative Unix locks to authorize copying. They now refuse unconditionally before reading either path, loading encryption, asking for a password or creating output. This removes an alternate capture route; it does not implement a Windows stop backend. Existing offline export remains available without certifying historical capture consistency.
+
+`whatsapp-account.ps1` starts authentication in a detached PowerShell process and dispatches arbitrary commands without a registered service/process owner, verified clean-close protocol or launch-exclusion gate. The backup scripts do not supply those controls, and their generic skip-tolerant copies are not a lossless capture boundary. Unknown writers and independent SQLite/media handles cannot be ruled out. Polling for process exit, forced termination, timeout, an absent sidecar or a cooperative lock cannot repair that gap.
+
+No processes or services are stopped, launched or restarted by this change. Future restart must use recorded long-running service identities and restart only services that were running before capture, never replay one-shot commands. Failed close, forced termination, timeout, unknown writers, sidecars and unproven exclusion must block copying. See [the current native state contract](linux-wacli-state.md). Capture remains disabled; complete Linux restoration remains unfinished.

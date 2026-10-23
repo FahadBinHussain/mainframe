@@ -1,8 +1,8 @@
 """Synthetic, offline tests for Linux-native WACLI state preservation."""
 from __future__ import annotations
 
-import fcntl
 import io
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -48,35 +48,42 @@ class WacliStateTests(unittest.TestCase):
                     z.writestr(member, data)
         return archive
 
-    def test_snapshot_and_unlocked_restore_preserve_arbitrary_bytes_and_real_sqlite(self):
-        inner = Path(self.tmp.name) / "snapshot.zip"
-        count = ws.snapshot(self.root, inner, quiesced=True)
-        self.assertEqual(count, 5)
+    def test_fixture_archive_and_unlocked_restore_preserve_arbitrary_bytes_and_sqlite(self):
+        # Construct an offline test archive directly, never via disabled capture.
+        inner = self._plain_archive([(ws.PREFIX + name, data)
+                                     for name, data in self.before.items()])
         destination = Path(self.tmp.name) / "restored"
         report = ws.restore_unlocked(inner, destination)
         self.assertEqual(report["activation"], "not-performed")
-        restored = destination / "config.yaml"
-        self.assertEqual(restored.read_bytes(), (self.root / "config.yaml").read_bytes())
-        self.assertEqual((destination / "media" / "odd.bin").read_bytes(),
-                         (self.root / "media" / "odd.bin").read_bytes())
+        self.assertEqual(self.before, {p.relative_to(self.root).as_posix(): p.read_bytes()
+                                      for p in self.root.rglob("*") if p.is_file()})
+        for name, data in self.before.items():
+            self.assertEqual((destination / name).read_bytes(), data)
+            self.assertEqual((destination / name).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
         with sqlite3.connect(destination / "wacli.db") as con:
             self.assertEqual(con.execute("select body from messages").fetchone()[0], b"raw \\x00\\xff")
-        with ZipFile(inner) as z:
-            self.assertIn(ws.PREFIX + "config.yaml", z.namelist())
-            self.assertEqual(z.read(ws.PREFIX + "config.yaml"), (self.root / "config.yaml").read_bytes())
 
-    def test_snapshot_requires_quiesced_and_explicit_absolute_root(self):
-        with self.assertRaises(ValueError):
-            ws.snapshot(self.root, Path(self.tmp.name) / "x.zip")
+    def test_scan_requires_explicit_absolute_root(self):
         with self.assertRaises(ValueError):
             ws.scan(Path("relative-state"))
         with self.assertRaises(ValueError):
             ws.scan(Path("/tmp") / ".." / "tmp")
 
-    def test_snapshot_cannot_overwrite_an_existing_archive(self):
+    def test_snapshot_refuses_even_when_quiesced_without_any_io(self):
+        for quiesced in (False, True):
+            with self.subTest(quiesced=quiesced), \
+                    patch.object(ws, "absolute_path", side_effect=AssertionError("path inspected")), \
+                    patch.object(ws, "scan", side_effect=AssertionError("source scanned")), \
+                    patch.object(ws, "opened_file", side_effect=AssertionError("payload read")), \
+                    patch.object(ws, "ZipFile", side_effect=AssertionError("archive opened")):
+                with self.assertRaisesRegex(ws.StateError, "boundary unavailable"):
+                    ws.snapshot(object(), object(), quiesced=quiesced)
+
+    def test_disabled_snapshot_does_not_touch_existing_archive(self):
         existing = Path(self.tmp.name) / 'existing.zip'
         existing.write_bytes(b'existing synthetic backup, must not change')
-        with self.assertRaises(FileExistsError):
+        with self.assertRaisesRegex(ws.StateError, "boundary unavailable"):
             ws.snapshot(self.root, existing, True)
         self.assertEqual(existing.read_bytes(), b'existing synthetic backup, must not change')
 
@@ -113,47 +120,10 @@ class WacliStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ws.scan(self.root)
 
-    def test_sqlite_sidecars_are_blocked_even_when_quiesced(self):
-        (self.root / "wacli.db-wal").write_bytes(b"WAL")
-        with self.assertRaises(ValueError):
-            ws.snapshot(self.root, Path(self.tmp.name) / "x.zip", quiesced=True)
-
-    def test_held_fcntl_lock_is_blocked_without_source_mutation(self):
-        handle = open(self.root / "LOCK", "rb")
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            before = {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
-            with self.assertRaises(ValueError):
-                ws.snapshot(self.root, Path(self.tmp.name) / "x.zip", quiesced=True)
-            self.assertEqual(before, {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            handle.close()
-
-    def test_missing_database_lock_is_blocked_without_source_mutation(self):
-        (self.root / "LOCK").unlink()
-        before = {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()}
-        with self.assertRaises(ValueError):
-            ws.snapshot(self.root, Path(self.tmp.name) / "x.zip", quiesced=True)
-        self.assertEqual(before, {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob("*") if p.is_file()})
-
     def test_plan_is_metadata_only_and_does_not_open_payload(self):
         with patch.object(ws, "opened_file", side_effect=AssertionError("payload opened")):
             result = ws.main(["plan", "--state-root", str(self.root)])
         self.assertEqual(result, 0)
-
-    def test_source_mutation_between_metadata_and_copy_is_detected(self):
-        original = ws.opened_file
-        calls = {"n": 0}
-        def mutate_after_open(root, rel):
-            stream = original(root, rel)
-            calls["n"] += 1
-            if calls["n"] == 2:
-                (self.root / "config.yaml").write_bytes(b"changed after preflight")
-            return stream
-        with patch.object(ws, "opened_file", side_effect=mutate_after_open):
-            with self.assertRaises(ValueError):
-                ws.snapshot(self.root, Path(self.tmp.name) / "x.zip", quiesced=True)
 
     def test_restore_rejects_traversal_collisions_specials_and_encrypted_duplicates(self):
         bad = [
@@ -222,47 +192,30 @@ class WacliStateTests(unittest.TestCase):
         self.assertFalse((destination / "home-staging").exists())
         self.assertEqual(report['entries'][0]['category'], 'opaque-archive')
 
-    def test_capture_fails_closed_without_aes_provider_before_destination(self):
-        destination = Path(self.tmp.name) / "no-provider"
-        with patch.object(ws, "aes_zip", side_effect=ValueError("missing AES")):
-            with self.assertRaises(ValueError):
-                ws.capture(self.root, destination, b"password", quiesced=True)
-        self.assertFalse(destination.exists())
+    def test_capture_refuses_before_paths_password_providers_or_publication(self):
+        for quiesced in (False, True):
+            with self.subTest(quiesced=quiesced), \
+                    patch.object(ws, 'absolute_path', side_effect=AssertionError('path inspected')), \
+                    patch.object(ws, 'aes_zip', side_effect=AssertionError('provider loaded')), \
+                    patch.object(ws, 'snapshot', side_effect=AssertionError('snapshot called')), \
+                    patch.object(ws, 'publish_tree', side_effect=AssertionError('published')):
+                with self.assertRaisesRegex(ws.StateError, 'boundary unavailable'):
+                    ws.capture(object(), object(), object(), quiesced=quiesced)
 
-    def test_aes_capture_includes_raw_inner_zip_and_round_trips(self):
-        try:
-            import pyzipper
-        except ImportError:
-            self.skipTest('Optional AES ZIP provider unavailable')
-        destination = Path(self.tmp.name) / 'encrypted-capture'
-        password = b'synthetic-fixture-only'
-        result = ws.capture(self.root, destination, password, quiesced=True)
-        self.assertEqual(result['status'], 'encrypted-state-preserved')
-        self.assertEqual([p.name for p in destination.iterdir()], ['mainframe-secrets.zip'])
-        with pyzipper.AESZipFile(destination / 'mainframe-secrets.zip') as outer:
-            info = outer.infolist()[0]
-            self.assertEqual(info.filename, 'tool-secrets.zip')
-            self.assertTrue(info.flag_bits & 1)
-            self.assertEqual(info.wz_aes_strength, 3)
-            with self.assertRaises(RuntimeError):
-                outer.read(info)
-            outer.setpassword(b'wrong-password')
-            with self.assertRaises(RuntimeError):
-                outer.read(info)
-            outer.setpassword(password)
-            data = outer.read(info)
-        with ZipFile(io.BytesIO(data)) as inner:
-            for name, original in self.before.items():
-                self.assertEqual(inner.read(ws.PREFIX + name), original)
-        unlocked = Path(self.tmp.name) / 'tool-secrets.zip'
-        unlocked.write_bytes(data)
-        restored = Path(self.tmp.name) / 'round-trip'
-        ws.restore_unlocked(unlocked, restored)
-        for name, original in self.before.items():
-            self.assertEqual((restored / name).read_bytes(), original)
-            self.assertEqual((restored / name).stat().st_mode & 0o777, 0o600)
-        self.assertEqual(restored.stat().st_mode & 0o777, 0o700)
-        self.assertEqual(self.before, {p.relative_to(self.root).as_posix(): p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
+    def test_capture_cli_attestation_is_only_legacy_syntax(self):
+        for attestation in ([], ['--quiesced']):
+            with self.subTest(attestation=attestation), \
+                    patch.object(ws, 'capture', side_effect=AssertionError('capture called')), \
+                    patch.object(ws, 'scan', side_effect=AssertionError('source inspected')), \
+                    patch.object(ws, 'aes_zip', side_effect=AssertionError('provider loaded')), \
+                    patch('getpass.getpass', side_effect=AssertionError('password requested')), \
+                    patch('sys.stdout', new=io.StringIO()) as output:
+                result = ws.main(['capture', '--state-root', '/nonexistent/synthetic-state',
+                                  '--destination', '/nonexistent/synthetic-output'] + attestation)
+                self.assertEqual(result, 3)
+                report = json.loads(output.getvalue())
+                for key in ('capture_enabled', 'publishable', 'complete', 'source_read'):
+                    self.assertIs(report[key], False)
 
     def test_actual_uncheckpointed_wal_is_explicitly_blocked(self):
         con = sqlite3.connect(self.db)
@@ -273,7 +226,7 @@ class WacliStateTests(unittest.TestCase):
             con.commit()
             self.assertTrue(Path(str(self.db) + '-wal').exists())
             with self.assertRaisesRegex(ValueError, 'WAL/SHM/journal'):
-                ws.snapshot(self.root, Path(self.tmp.name) / 'wal-snapshot.zip', True)
+                ws.scan(self.root)
         finally:
             con.close()
 

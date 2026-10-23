@@ -15,6 +15,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 import test_wacli_windows_contract as windows_contract
+import wacli_snapshot
 import wacli_state as ws
 
 
@@ -119,26 +120,36 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
             self.assertNotIn('producer_build', names)
         # Neither a target install pin nor user_version supplies missing provenance.
 
-    def test_wal_derived_bytes_and_metadata_roundtrip_existing_aes_envelope(self):
+    def test_private_unverified_preparation_roundtrips_aes_envelope(self):
         try:
             import pyzipper
         except ImportError:
             self.skipTest('Optional AES ZIP provider unavailable; not an encryption pass')
         source, writer = self.fixture()
-        staged = self.root / 'offline-synthetic-stage'
-        staged.mkdir()
-        (staged / 'LOCK').touch()
-        metadata = {'fixture_version': 1, 'producer': 'synthetic-only',
-                    'schema_migrations': [24], 'user_version': 17}
-        (staged / 'fixture-metadata.json').write_text(json.dumps(metadata))
-        snapshot = staged / 'wacli.db'
-        with closing(self.readonly(source)) as reader, closing(sqlite3.connect(snapshot)) as target:
-            reader.backup(target)
-        before = {p.name: p.read_bytes() for p in staged.iterdir()}
-        destination = self.root / 'encrypted-output'
+        prepared = self.root / 'private-preparation'
+        originals = prepared / 'originals'
+        originals.mkdir(parents=True, mode=0o700)
+        # Stage every byte emitted by the synthetic WAL fixture; no native
+        # capture, restore, or source-root publication is involved.
+        staged_files = sorted(source.parent.glob(source.name + '*'))
+        self.assertTrue(staged_files)
+        for item in staged_files:
+            if item.is_file():
+                (originals / item.name).write_bytes(item.read_bytes())
+        (prepared / 'receipt.json').write_text(json.dumps({
+            'format': 'wacli-snapshot-preparation-v1',
+            'status': 'PREPARATION',
+            'publishable': False,
+            'boundary': 'UNVERIFIED',
+            'provenance': 'UNVERIFIED',
+            'cross_database_consistency': 'NOT_CERTIFIED',
+        }))
+        before = {p.relative_to(prepared).as_posix(): p.read_bytes()
+                  for p in prepared.rglob('*') if p.is_file()}
+        workspace = self.root / 'private-workspace'
+        workspace.mkdir(mode=0o700)
         password = b'synthetic-test-password'
-        ws.capture(staged, destination, password, quiesced=True)
-        encrypted = destination / 'mainframe-secrets.zip'
+        encrypted = wacli_snapshot._encrypt_candidate(prepared, workspace, password)
         with pyzipper.AESZipFile(encrypted) as outer:
             member, = outer.infolist()
             self.assertEqual(member.filename, 'tool-secrets.zip')
@@ -150,16 +161,16 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
             outer.setpassword(password)
             inner_bytes = outer.read(member)
         with ZipFile(io.BytesIO(inner_bytes)) as inner:
-            recovered = {Path(n).name: inner.read(n) for n in inner.namelist()}
+            names = inner.namelist()
+            self.assertIn('WacliPreparation/v1/originals/', names)
+            self.assertIn('WacliPreparation/v1/receipt.json', names)
+            recovered = {
+                n[len(wacli_snapshot.PREPARATION_PREFIX):]: inner.read(n)
+                for n in names if not n.endswith('/')
+            }
         self.assertEqual(set(recovered), set(before))
-        for name in before:
-            # Hash assertions avoid dumping even synthetic DB/metadata values.
-            self.assertEqual(hashlib.sha256(recovered[name]).digest(),
-                             hashlib.sha256(before[name]).digest())
-        restored = self.root / 'restored-snapshot.db'
-        restored.write_bytes(recovered['wacli.db'])
-        with closing(self.readonly(restored)) as con:
-            self.assertEqual(self.ledger(con), self.ledger(writer))
+        for name, payload in before.items():
+            self.assertEqual(recovered[name], payload)
         # Authentication corruption: flip the last HMAC byte of the AES member.
         damaged = bytearray(encrypted.read_bytes())
         with ZipFile(encrypted) as index:
@@ -173,8 +184,8 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
             outer.setpassword(password)
             with self.assertRaises(pyzipper.BadZipFile):
                 outer.read('tool-secrets.zip')
-        # This exercises the existing Linux clean-stage envelope, not a Windows
-        # capture integration or coordinated raw-WAL preservation protocol.
+        # This exercises private unverified preparation encryption only, not
+        # native capture, a publishable backup, or a Windows consistency protocol.
 
     def test_missing_and_malformed_paths_are_not_created_by_readonly_open(self):
         missing = self.root / 'missing.db'
@@ -202,8 +213,9 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
     def test_missing_encryption_provider_fails_before_state_read_or_output(self):
         destination = self.root / 'must-not-exist'
         with patch.dict('sys.modules', {'pyzipper': None}), \
+                patch.object(ws, 'aes_zip', side_effect=AssertionError('provider used')), \
                 patch.object(ws, 'snapshot', side_effect=AssertionError('state read')):
-            with self.assertRaisesRegex(ws.StateError, 'no plaintext fallback'):
+            with self.assertRaisesRegex(ws.StateError, 'boundary unavailable'):
                 ws.capture(self.root / 'not-opened', destination, b'synthetic-password', True)
         self.assertFalse(destination.exists())
 

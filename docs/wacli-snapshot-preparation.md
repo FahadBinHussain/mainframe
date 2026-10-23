@@ -30,7 +30,7 @@ python3 wacli_snapshot.py capture \
   --destination /approved/new-output
 ```
 
-Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The existing clean-closed native capture is unchanged; this new operation does not relax its sidecar checks. Both Windows backup guards remain unchanged, including the VSS-remapped guard.
+Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The legacy native `wacli_state.py capture --quiesced` path is now also unconditionally disabled: caller attestation cannot substitute for writer ownership and launch exclusion. Its `snapshot()` API refuses too; offline export and metadata sidecar checks remain available. Both Windows backup guards remain unchanged, including the VSS-remapped guard.
 
 ## Upstream command proposal, not a snapshot backend
 
