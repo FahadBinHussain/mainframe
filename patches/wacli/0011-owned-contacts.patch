@@ -1,0 +1,1431 @@
+Subject: LOCAL SOURCE PROPOSAL: lease-guarded contact command effects
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/cmd/wacli/contact_read.go b/cmd/wacli/contact_read.go
+index d7313e4..7f03761 100644
+--- a/cmd/wacli/contact_read.go
++++ b/cmd/wacli/contact_read.go
+@@ -7,2 +6,0 @@ import (
+-	"os"
+-	"path/filepath"
+@@ -26 +24 @@ func searchContactsForDisplay(ctx context.Context, a *app.App, query string, lim
+-	resolver, err := contactReadResolver(a)
++	db, err := a.OwnedDB(ctx)
+@@ -29,0 +28,4 @@ func searchContactsForDisplay(ctx context.Context, a *app.App, query string, lim
++	if err := db.CheckContactResolver(ctx); err != nil {
++
++		return nil, err
++	}
+@@ -32 +34 @@ func searchContactsForDisplay(ctx context.Context, a *app.App, query string, lim
+-	matches, err := a.DB().SearchContacts(query, math.MaxInt)
++	matches, err := db.SearchContacts(ctx, query, math.MaxInt)
+@@ -40 +42 @@ func searchContactsForDisplay(ctx context.Context, a *app.App, query string, lim
+-	contacts, err := contactsForDisplay(ctx, a, resolver)
++	contacts, err := contactsForDisplay(ctx, db)
+@@ -48 +50,4 @@ func searchContactsForDisplay(ctx context.Context, a *app.App, query string, lim
+-	queryJID := resolveContactReadJID(ctx, resolver, query)
++	queryJID, err := resolveContactReadJID(ctx, db, query)
++	if err != nil {
++		return nil, err
++	}
+@@ -70 +75 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
+-	resolver, err := contactReadResolver(a)
++	db, err := a.OwnedDB(ctx)
+@@ -74 +79,9 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
+-	contacts, err := contactsForDisplay(ctx, a, resolver)
++	if err := db.CheckContactResolver(ctx); err != nil {
++
++		return store.Contact{}, err
++	}
++	contacts, err := contactsForDisplay(ctx, db)
++	if err != nil {
++		return store.Contact{}, err
++	}
++	jid, err := resolveContactReadJID(ctx, db, rawJID)
+@@ -78 +90,0 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
+-	jid := resolveContactReadJID(ctx, resolver, rawJID)
+@@ -90 +102 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
+-			values, err := a.DB().ListTags(source)
++			values, err := db.ListTags(ctx, source)
+@@ -107,49 +119 @@ func getContactForDisplay(ctx context.Context, a *app.App, rawJID string) (store
+-func contactReadResolver(a *app.App) (app.LocalResolver, error) {
+-	if _, err := os.Stat(filepath.Join(a.StoreDir(), "session.db")); err != nil {
+-		if os.IsNotExist(err) {
+-			return nil, nil
+-		}
+-		return nil, err
+-	}
+-	return a.ReadOnlyResolver()
+-}
+-
+-func resolveContactReadJID(ctx context.Context, resolver app.LocalResolver, rawJID string) string {
+-	rawJID = strings.TrimSpace(rawJID)
+-	jid, err := types.ParseJID(rawJID)
+-	if err != nil {
+-		return rawJID
+-	}
+-	if jid.Server == types.HiddenUserServer {
+-		if resolver != nil {
+-			pn := resolver.ResolveLIDToPN(ctx, jid)
+-			if pn.User != "" && pn.Server == types.DefaultUserServer {
+-				return pn.ToNonAD().String()
+-			}
+-		}
+-	}
+-	return canonicalCLIJID(jid).String()
+-}
+-
+-func contactMetadataJIDs(ctx context.Context, a *app.App, rawJID string) ([]string, error) {
+-	resolver, err := contactReadResolver(a)
+-	if err != nil {
+-		return nil, err
+-	}
+-	return contactIdentityJIDs(ctx, resolver, rawJID), nil
+-}
+-
+-func contactIdentityJIDs(ctx context.Context, resolver app.LocalResolver, rawJID string) []string {
+-	canonical := resolveContactReadJID(ctx, resolver, rawJID)
+-	jids := []string{canonical}
+-	jid, err := types.ParseJID(canonical)
+-	if err == nil && resolver != nil && jid.Server == types.DefaultUserServer {
+-		lid := resolver.ResolvePNToLID(ctx, jid).ToNonAD()
+-		if lid.User != "" && lid.Server == types.HiddenUserServer {
+-			jids = append(jids, lid.String())
+-		}
+-	}
+-	return jids
+-}
+-
+-func contactsForDisplay(ctx context.Context, a *app.App, resolver app.LocalResolver) ([]contactDisplay, error) {
++func contactsForDisplay(ctx context.Context, db *app.OwnedDB) ([]contactDisplay, error) {
+@@ -158 +122 @@ func contactsForDisplay(ctx context.Context, a *app.App, resolver app.LocalResol
+-	contacts, err := a.DB().ListContacts(math.MaxInt)
++	contacts, err := db.ListContacts(ctx, math.MaxInt)
+@@ -162 +126 @@ func contactsForDisplay(ctx context.Context, a *app.App, resolver app.LocalResol
+-	aliases, err := a.DB().ListContactAliases()
++	aliases, err := db.ListContactAliases(ctx)
+@@ -178,2 +142,5 @@ func contactsForDisplay(ctx context.Context, a *app.App, resolver app.LocalResol
+-			if resolver != nil {
+-				pn := resolver.ResolveLIDToPN(ctx, jid)
++			if db != nil {
++				pn, err := db.ResolveLIDToPNWithError(ctx, jid)
++				if err != nil {
++					return nil, err
++				}
+@@ -209 +176,4 @@ func contactsForDisplay(ctx context.Context, a *app.App, resolver app.LocalResol
+-		sources := contactIdentityJIDs(ctx, resolver, display.contact.JID)
++		sources, err := contactIdentityJIDs(ctx, db, display.contact.JID)
++		if err != nil {
++			return nil, err
++		}
+@@ -264,0 +235,49 @@ func mergeDisplayContacts(primary, secondary store.Contact) store.Contact {
++
++func resolveContactReadJID(ctx context.Context, db *app.OwnedDB, rawJID string) (string, error) {
++	rawJID = strings.TrimSpace(rawJID)
++	jid, err := types.ParseJID(rawJID)
++	if err != nil {
++		return rawJID, nil
++	}
++	if jid.Server == types.HiddenUserServer {
++		pn, err := db.ResolveLIDToPNWithError(ctx, jid)
++		if err != nil {
++			return "", err
++		}
++		if pn.User != "" && pn.Server == types.DefaultUserServer {
++			return pn.ToNonAD().String(), nil
++		}
++	}
++	return canonicalCLIJID(jid).String(), nil
++}
++func contactIdentityJIDs(ctx context.Context, db *app.OwnedDB, rawJID string) ([]string, error) {
++	canonical, err := resolveContactReadJID(ctx, db, rawJID)
++	if err != nil {
++		return nil, err
++	}
++	jids := []string{canonical}
++	jid, err := types.ParseJID(canonical)
++	if err == nil && jid.Server == types.DefaultUserServer {
++		lid, err := db.ResolvePNToLIDWithError(ctx, jid)
++		if err != nil {
++			return nil, err
++		}
++		lid = lid.ToNonAD()
++		if lid.User != "" && lid.Server == types.HiddenUserServer {
++			jids = append(jids, lid.String())
++		}
++	}
++	return jids, nil
++}
++
++func contactMetadataJIDs(ctx context.Context, a *app.App, rawJID string) ([]string, error) {
++	db, err := a.OwnedDB(ctx)
++	if err != nil {
++		return nil, err
++	}
++	if err := db.CheckContactResolver(ctx); err != nil {
++
++		return nil, err
++	}
++	return contactIdentityJIDs(ctx, db, rawJID)
++}
+diff --git a/cmd/wacli/contacts.go b/cmd/wacli/contacts.go
+index 25ebbd1..80d6b8e 100644
+--- a/cmd/wacli/contacts.go
++++ b/cmd/wacli/contacts.go
+@@ -36 +36 @@ func newContactsSearchCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -45 +45,5 @@ func newContactsSearchCmd(flags *rootFlags) *cobra.Command {
+-
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
+@@ -79 +83 @@ func newContactsShowCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -91 +95,5 @@ func newContactsShowCmd(flags *rootFlags) *cobra.Command {
+-
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
+@@ -132 +140 @@ func newContactsRefreshCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -143,0 +152,9 @@ func newContactsRefreshCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			ownedDB, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
+@@ -148 +165,5 @@ func newContactsRefreshCmd(flags *rootFlags) *cobra.Command {
+-			cs, err := a.WA().GetAllContacts(ctx)
++			ownedWA, err := a.OwnedWA(ctx)
++			if err != nil {
++				return err
++			}
++			cs, err := ownedWA.GetAllContacts(ctx)
+@@ -156 +177 @@ func newContactsRefreshCmd(flags *rootFlags) *cobra.Command {
+-				if err := a.DB().UpsertContact(
++				if err := ownedDB.UpsertContact(ctx,
+@@ -187 +208 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -202,0 +224,9 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			ownedDB, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
+@@ -207 +237 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
+-			if err := a.DB().SetAlias(jids, alias); err != nil {
++			if err := ownedDB.SetAlias(ctx, jids, alias); err != nil {
+@@ -220 +250 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -234,0 +265,9 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			ownedDB, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
+@@ -239 +278 @@ func newContactsAliasCmd(flags *rootFlags) *cobra.Command {
+-			if err := a.DB().RemoveAlias(jids); err != nil {
++			if err := ownedDB.RemoveAlias(ctx, jids); err != nil {
+@@ -263 +302 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -278,0 +318,9 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			ownedDB, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
+@@ -283 +331 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
+-			if err := a.DB().AddTag(jids, tag); err != nil {
++			if err := ownedDB.AddTag(ctx, jids, tag); err != nil {
+@@ -296 +344 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -311,0 +360,9 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			ownedDB, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
+@@ -316 +373 @@ func newContactsTagsCmd(flags *rootFlags) *cobra.Command {
+-			if err := a.DB().RemoveTag(jids, tag); err != nil {
++			if err := ownedDB.RemoveTag(ctx, jids, tag); err != nil {
+diff --git a/cmd/wacli/contacts_check.go b/cmd/wacli/contacts_check.go
+index de253df..941b681 100644
+--- a/cmd/wacli/contacts_check.go
++++ b/cmd/wacli/contacts_check.go
+@@ -23 +23 @@ func newContactsCheckCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -86 +86 @@ const contactsCheckKind = "contacts_check"
+-func runContactsCheck(flags *rootFlags, args []string) error {
++func runContactsCheck(flags *rootFlags, args []string) (runErr error) {
+@@ -108,0 +109,9 @@ func runContactsCheck(flags *rootFlags, args []string) error {
++	ctx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return err
++	}
++	defer func() { finish(runErr) }()
++	ownedWA, err := a.OwnedWA(ctx)
++	if err != nil {
++		return err
++	}
+@@ -117 +126 @@ func runContactsCheck(flags *rootFlags, args []string) error {
+-	results, err := checkRegistrations(ctx, a.WA(), args)
++	results, err := checkRegistrations(ctx, ownedWA, args)
+diff --git a/cmd/wacli/contacts_import_system.go b/cmd/wacli/contacts_import_system.go
+index 7d1f8d9..898a761 100644
+--- a/cmd/wacli/contacts_import_system.go
++++ b/cmd/wacli/contacts_import_system.go
+@@ -38 +38 @@ and phones.`,
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (runErr error) {
+@@ -52,0 +53,9 @@ and phones.`,
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return err
++			}
++			defer func() { finish(runErr) }()
++			ownedDB, err := a.OwnedDB(ctx)
++			if err != nil {
++				return err
++			}
+@@ -55 +64 @@ and phones.`,
+-				return runContactsSystemClear(a.DB(), dryRun, flags.asJSON)
++				return runContactsSystemClear(ctx, ownedDB, dryRun, flags.asJSON)
+@@ -63 +72 @@ and phones.`,
+-			localContacts, err := a.DB().ListContacts(0)
++			localContacts, err := ownedDB.ListContacts(ctx, 0)
+@@ -88 +97 @@ and phones.`,
+-				if err := a.DB().SetSystemName(m.JID, m.SystemName); err != nil {
++				if err := ownedDB.SetSystemName(ctx, m.JID, m.SystemName); err != nil {
+@@ -119,2 +128,5 @@ func readSystemContacts(ctx context.Context, input string) ([]syscontacts.Contac
+-func runContactsSystemClear(db *store.DB, dryRun, asJSON bool) error {
+-	count, err := db.CountSystemNames()
++func runContactsSystemClear(ctx context.Context, db interface {
++	CountSystemNames(context.Context) (int64, error)
++	ClearAllSystemNames(context.Context) (int64, error)
++}, dryRun, asJSON bool) error {
++	count, err := db.CountSystemNames(ctx)
+@@ -131 +143 @@ func runContactsSystemClear(db *store.DB, dryRun, asJSON bool) error {
+-	cleared, err := db.ClearAllSystemNames()
++	cleared, err := db.ClearAllSystemNames(ctx)
+diff --git a/cmd/wacli/contacts_resolve.go b/cmd/wacli/contacts_resolve.go
+index 4568144..aad6be3 100644
+--- a/cmd/wacli/contacts_resolve.go
++++ b/cmd/wacli/contacts_resolve.go
+@@ -7,0 +8 @@ import (
++	"path/filepath"
+@@ -148,0 +150,11 @@ func writeContactResolutions(w io.Writer, asJSON, fullOutput bool, results []con
++
++// Legacy resolve route remains outside the migrated contact command family.
++func contactReadResolver(a *app.App) (app.LocalResolver, error) {
++	if _, err := os.Stat(filepath.Join(a.StoreDir(), "session.db")); err != nil {
++		if os.IsNotExist(err) {
++			return nil, nil
++		}
++		return nil, err
++	}
++	return a.ReadOnlyResolver()
++}
+diff --git a/cmd/wacli/contacts_save.go b/cmd/wacli/contacts_save.go
+index 15c46d4..dad24ca 100644
+--- a/cmd/wacli/contacts_save.go
++++ b/cmd/wacli/contacts_save.go
+@@ -60 +60 @@ func newContactsSaveCmd(flags *rootFlags) *cobra.Command {
+-func runContactsSave(flags *rootFlags, target types.JID, name, firstName string, phonebook bool) error {
++func runContactsSave(flags *rootFlags, target types.JID, name, firstName string, phonebook bool) (runErr error) {
+@@ -87,0 +88,5 @@ func runContactsSave(flags *rootFlags, target types.JID, name, firstName string,
++	ctx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return err
++	}
++	defer func() { finish(runErr) }()
+@@ -91,0 +97,5 @@ func runContactsSave(flags *rootFlags, target types.JID, name, firstName string,
++	ownedWA, err := a.OwnedWA(ctx)
++	if err != nil {
++		return err
++	}
++
+@@ -100 +110,4 @@ func runContactsSave(flags *rootFlags, target types.JID, name, firstName string,
+-		a.WA().Disconnect()
++		// Cleanup runs before finish and keeps the live parent token despite timeout.
++		if err := ownedWA.Disconnect(context.WithoutCancel(ctx)); err != nil && runErr == nil {
++			runErr = err
++		}
+@@ -106 +119 @@ func runContactsSave(flags *rootFlags, target types.JID, name, firstName string,
+-	result, err := saveContact(ctx, a, target, name, firstName, phonebook)
++	result, err := saveContact(ctx, ownedContactSaveAdapter{a}, target, name, firstName, phonebook)
+@@ -112,0 +126,6 @@ func runContactsSave(flags *rootFlags, target types.JID, name, firstName string,
++type ownedContactSaveAdapter struct{ a *app.App }
++
++func (o ownedContactSaveAdapter) SaveContact(ctx context.Context, target types.JID, fullName, firstName string, phonebook bool) (app.SavedContact, error) {
++	return o.a.OwnedSaveContact(ctx, target, fullName, firstName, phonebook)
++}
++
+diff --git a/cmd/wacli/owned_command_routes_test.go b/cmd/wacli/owned_command_routes_test.go
+index d40775f..6b0394b 100644
+--- a/cmd/wacli/owned_command_routes_test.go
++++ b/cmd/wacli/owned_command_routes_test.go
+@@ -13 +13 @@ func TestOwnedCommandRoutesDoNotBorrowRawHandles(t *testing.T) {
+-	for _, path := range []string{"messages_read.go", "messages_changes.go", "calls.go", "history.go", "store_stats.go"} {
++	for _, path := range []string{"messages_read.go", "messages_changes.go", "calls.go", "history.go", "store_stats.go", "contact_read.go", "contacts.go", "contacts_check.go", "contacts_import_system.go", "contacts_save.go"} {
+diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
+index 07c08ec..83b249f 100644
+--- a/cmd/wacli/send_ipc.go
++++ b/cmd/wacli/send_ipc.go
+@@ -444 +444,5 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
+-		return executeDelegatedContactsCheck(ctx, a.WA(), req)
++		owned, err := a.OwnedWA(ctx)
++		if err != nil {
++			return sendDelegateResponse{}, err
++		}
++		return executeDelegatedContactsCheck(ctx, owned, req)
+@@ -448 +452 @@ func executeDelegatedSend(parent context.Context, a *app.App, req sendDelegateRe
+-		return executeDelegatedContactsSave(ctx, a, req)
++		return executeDelegatedContactsSave(ctx, ownedContactSaveAdapter{a}, req)
+diff --git a/cmd/wacli/testdata/owned_handle_inventory.json b/cmd/wacli/testdata/owned_handle_inventory.json
+index 8313839..b59ebf3 100644
+--- a/cmd/wacli/testdata/owned_handle_inventory.json
++++ b/cmd/wacli/testdata/owned_handle_inventory.json
+@@ -212,150 +211,0 @@
+-  {
+-    "id": "cmd/wacli/contact_read.go:searchContactsForDisplay:DB:occurrence-1",
+-    "path": "cmd/wacli/contact_read.go",
+-    "function": "searchContactsForDisplay",
+-    "accessor": "DB",
+-    "line": 32,
+-    "column": 18,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contact_read.go:getContactForDisplay:DB:occurrence-1",
+-    "path": "cmd/wacli/contact_read.go",
+-    "function": "getContactForDisplay",
+-    "accessor": "DB",
+-    "line": 90,
+-    "column": 19,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contact_read.go:contactsForDisplay:DB:occurrence-1",
+-    "path": "cmd/wacli/contact_read.go",
+-    "function": "contactsForDisplay",
+-    "accessor": "DB",
+-    "line": 158,
+-    "column": 19,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contact_read.go:contactsForDisplay:DB:occurrence-2",
+-    "path": "cmd/wacli/contact_read.go",
+-    "function": "contactsForDisplay",
+-    "accessor": "DB",
+-    "line": 162,
+-    "column": 18,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts.go:newContactsRefreshCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/contacts.go",
+-    "function": "newContactsRefreshCmd",
+-    "accessor": "WA",
+-    "line": 148,
+-    "column": 15,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts.go:newContactsRefreshCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/contacts.go",
+-    "function": "newContactsRefreshCmd",
+-    "accessor": "DB",
+-    "line": 156,
+-    "column": 15,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts.go:newContactsAliasCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/contacts.go",
+-    "function": "newContactsAliasCmd",
+-    "accessor": "DB",
+-    "line": 207,
+-    "column": 14,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts.go:newContactsAliasCmd:DB:occurrence-2",
+-    "path": "cmd/wacli/contacts.go",
+-    "function": "newContactsAliasCmd",
+-    "accessor": "DB",
+-    "line": 239,
+-    "column": 14,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts.go:newContactsTagsCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/contacts.go",
+-    "function": "newContactsTagsCmd",
+-    "accessor": "DB",
+-    "line": 283,
+-    "column": 14,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts.go:newContactsTagsCmd:DB:occurrence-2",
+-    "path": "cmd/wacli/contacts.go",
+-    "function": "newContactsTagsCmd",
+-    "accessor": "DB",
+-    "line": 316,
+-    "column": 14,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts_check.go:runContactsCheck:WA:occurrence-1",
+-    "path": "cmd/wacli/contacts_check.go",
+-    "function": "runContactsCheck",
+-    "accessor": "WA",
+-    "line": 117,
+-    "column": 42,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts_import_system.go:newContactsImportSystemCmd:DB:occurrence-1",
+-    "path": "cmd/wacli/contacts_import_system.go",
+-    "function": "newContactsImportSystemCmd",
+-    "accessor": "DB",
+-    "line": 55,
+-    "column": 35,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts_import_system.go:newContactsImportSystemCmd:DB:occurrence-2",
+-    "path": "cmd/wacli/contacts_import_system.go",
+-    "function": "newContactsImportSystemCmd",
+-    "accessor": "DB",
+-    "line": 63,
+-    "column": 26,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts_import_system.go:newContactsImportSystemCmd:DB:occurrence-3",
+-    "path": "cmd/wacli/contacts_import_system.go",
+-    "function": "newContactsImportSystemCmd",
+-    "accessor": "DB",
+-    "line": 88,
+-    "column": 15,
+-    "expression": "a.DB()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/contacts_save.go:runContactsSave:WA:occurrence-1",
+-    "path": "cmd/wacli/contacts_save.go",
+-    "function": "runContactsSave",
+-    "accessor": "WA",
+-    "line": 100,
+-    "column": 3,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+@@ -1462,10 +1311,0 @@
+-  {
+-    "id": "cmd/wacli/send_ipc.go:executeDelegatedSend:WA:occurrence-1",
+-    "path": "cmd/wacli/send_ipc.go",
+-    "function": "executeDelegatedSend",
+-    "accessor": "WA",
+-    "line": 444,
+-    "column": 45,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+@@ -1477 +1317 @@
+-    "line": 555,
++    "line": 559,
+@@ -1487 +1327 @@
+-    "line": 593,
++    "line": 597,
+@@ -1497 +1337 @@
+-    "line": 598,
++    "line": 602,
+@@ -1507 +1347 @@
+-    "line": 619,
++    "line": 623,
+@@ -1517 +1357 @@
+-    "line": 724,
++    "line": 728,
+@@ -1527 +1367 @@
+-    "line": 730,
++    "line": 734,
+@@ -1537 +1377 @@
+-    "line": 730,
++    "line": 734,
+@@ -1547 +1387 @@
+-    "line": 801,
++    "line": 805,
+@@ -1927 +1767 @@
+-    "line": 370,
++    "line": 371,
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 6a6adb7..33643a3 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -6,0 +7 @@ import (
++	"os"
+@@ -428,0 +430,12 @@ func (a *App) Connect(ctx context.Context, allowQR bool, qrWriter func(string))
++
++// contactResolver deliberately uses the read-only session view even for writable
++// metadata commands. A missing session is an identity fallback, not client creation.
++func (a *App) contactResolver() (LocalResolver, error) {
++	if _, err := os.Stat(filepath.Join(a.opts.StoreDir, "session.db")); err != nil {
++		if os.IsNotExist(err) {
++			return nil, nil
++		}
++		return nil, err
++	}
++	return a.ReadOnlyResolver()
++}
+diff --git a/internal/app/contact_save.go b/internal/app/contact_save.go
+index 04855cf..3f4e894 100644
+--- a/internal/app/contact_save.go
++++ b/internal/app/contact_save.go
+@@ -211,0 +212,14 @@ func (a *App) drainContactJournal(ctx context.Context) (covered uint64, err erro
++
++// OwnedSaveContact retains the child lease through the complete account save,
++// including journal mirroring and persistence completion.
++func (a *App) OwnedSaveContact(ctx context.Context, target types.JID, fullName, firstName string, phonebook bool) (saved SavedContact, err error) {
++	if err := a.admitHandle(ctx); err != nil {
++		return SavedContact{}, err
++	}
++	child, finish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		return SavedContact{}, errors.Join(ErrHandleRevoked, err)
++	}
++	defer finishOwnedEffect(finish, &err)
++	return a.SaveContact(child, target, fullName, firstName, phonebook)
++}
+diff --git a/internal/app/owned_contact_scope_test.go b/internal/app/owned_contact_scope_test.go
+new file mode 100644
+index 0000000..ab17b66
+--- /dev/null
++++ b/internal/app/owned_contact_scope_test.go
+@@ -0,0 +1,144 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow/types"
++)
++
++type ownedContactSaveProbe struct {
++	WAClient
++	calls            atomic.Int32
++	entered, release chan struct{}
++}
++
++func (p *ownedContactSaveProbe) ResolvePNToLID(context.Context, types.JID) types.JID {
++	p.calls.Add(1)
++	close(p.entered)
++	<-p.release
++	return types.JID{}
++}
++func (*ownedContactSaveProbe) Disconnect() {}
++func (*ownedContactSaveProbe) Close()      {}
++
++func TestOwnedContactSaveInvocationJoinsAfterParentFinish(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	probe := &ownedContactSaveProbe{entered: make(chan struct{}), release: make(chan struct{})}
++	a.wa = probe
++	var release sync.Once
++	defer release.Do(func() { close(probe.release) })
++	sealed, cancel := context.WithCancel(context.Background())
++	cancel()
++	if held, err := a.BeginDrain(sealed); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("seal = %v %v", held, err)
++	}
++	result := make(chan error, 1)
++	go func() {
++		_, err := a.OwnedSaveContact(ctx, types.JID{User: "15550009999", Server: types.DefaultUserServer}, "Synthetic", "Synthetic", false)
++		result <- err
++	}()
++	select {
++	case <-probe.entered:
++	case <-time.After(time.Second):
++		t.Fatal("save did not enter")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, err := a.BeginDrain(context.Background()); drain <- err }()
++	select {
++	case err := <-drain:
++		t.Fatalf("save escaped drain: %v", err)
++	case <-time.After(20 * time.Millisecond):
++	}
++	release.Do(func() { close(probe.release) })
++	var saveErr error
++	select {
++	case saveErr = <-result:
++		if saveErr == nil {
++			t.Fatal("missing-LID error lost")
++		}
++	case <-time.After(time.Second):
++		t.Fatal("save did not finish")
++	}
++	select {
++	case err := <-drain:
++		if !errors.Is(err, saveErr) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++			t.Fatalf("save cause lost: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join")
++	}
++	if probe.calls.Load() != 1 {
++		t.Fatal("unexpected client count")
++	}
++}
++
++func TestOwnedContactResolverMissingSessionDoesNotCreateClient(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	a.opts.StoreDir = t.TempDir()
++	// Writable metadata commands must still use read-only local identity lookup.
++	a.opts.ReadOnly = false
++	d, err := a.OwnedDB(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := d.CheckContactResolver(ctx); err != nil {
++		t.Fatal(err)
++	}
++	jid := types.JID{User: "15550009999", Server: types.DefaultUserServer}
++	if got, err := d.ResolvePNToLIDWithError(ctx, jid); err != nil || got != jid {
++		t.Fatalf("fallback = %v %v", got, err)
++	}
++	if a.sessionResolver != nil {
++		t.Fatal("missing session constructed a resolver")
++	}
++	entries, err := os.ReadDir(a.opts.StoreDir)
++	if err != nil || len(entries) != 0 {
++		t.Fatalf("missing session changed store: %v %v", entries, err)
++	}
++}
++
++func TestOwnedContactResolverPreservesSessionOpenError(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	a.opts.StoreDir = t.TempDir()
++	if err := os.Mkdir(filepath.Join(a.opts.StoreDir, "session.db"), 0700); err != nil {
++		t.Fatal(err)
++	}
++	d, err := a.OwnedDB(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := d.CheckContactResolver(ctx); err == nil {
++		t.Fatal("session-open error suppressed")
++	}
++}
++
++func TestOwnedContactCleanupUsesLiveParentWithoutCancellation(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	w, err := a.OwnedWA(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	canceled, cancel := context.WithCancel(ctx)
++	cancel()
++	if err := w.Disconnect(canceled); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatal(err)
++	}
++	if err := w.Disconnect(context.WithoutCancel(canceled)); err != nil {
++		t.Fatal(err)
++	}
++	finish(nil)
++	if err := w.Disconnect(context.WithoutCancel(canceled)); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatal("cleanup revived a finished parent", err)
++	}
++}
+diff --git a/internal/app/owned_contacts.go b/internal/app/owned_contacts.go
+new file mode 100644
+index 0000000..ebd3b04
+--- /dev/null
++++ b/internal/app/owned_contacts.go
+@@ -0,0 +1,199 @@
++package app
++
++import (
++	"context"
++
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++type ownedContactReader interface {
++	SearchContacts(string, int) ([]store.Contact, error)
++	ListContacts(int) ([]store.Contact, error)
++	ListContactAliases() (map[string]string, error)
++	ListTags(string) ([]string, error)
++	UpsertContact(string, string, string, string, string, string) error
++	SetAlias([]string, string) error
++	RemoveAlias([]string) error
++	AddTag([]string, string) error
++	RemoveTag([]string, string) error
++	SetSystemName(string, string) error
++	CountSystemNames() (int64, error)
++	ClearAllSystemNames() (int64, error)
++}
++
++// Contact methods are deliberately narrow; the underlying DB and resolver never escape.
++func (d *OwnedDB) contactEffect(ctx context.Context) (context.Context, func(error), error) {
++	return d.effect(ctx)
++}
++func (d *OwnedDB) SearchContacts(ctx context.Context, q string, limit int) (v []store.Contact, err error) {
++	_, finish, err := d.contactEffect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.contacts.SearchContacts(q, limit)
++}
++func (d *OwnedDB) ListContacts(ctx context.Context, limit int) (v []store.Contact, err error) {
++	_, finish, err := d.contactEffect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.contacts.ListContacts(limit)
++}
++func (d *OwnedDB) ListContactAliases(ctx context.Context) (v map[string]string, err error) {
++	_, finish, err := d.contactEffect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.contacts.ListContactAliases()
++}
++func (d *OwnedDB) ListTags(ctx context.Context, jid string) (v []string, err error) {
++	_, finish, err := d.contactEffect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.contacts.ListTags(jid)
++}
++func (d *OwnedDB) UpsertContact(ctx context.Context, jid, phone, pushName, fullName, firstName, businessName string) (err error) {
++	_, finish, err := d.contactEffect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.contacts.UpsertContact(jid, phone, pushName, fullName, firstName, businessName)
++}
++func (d *OwnedDB) SetAlias(ctx context.Context, jids []string, alias string) (err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.SetAlias(jids, alias)
++}
++func (d *OwnedDB) RemoveAlias(ctx context.Context, jids []string) (err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.RemoveAlias(jids)
++}
++func (d *OwnedDB) AddTag(ctx context.Context, jids []string, tag string) (err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.AddTag(jids, tag)
++}
++func (d *OwnedDB) RemoveTag(ctx context.Context, jids []string, tag string) (err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.RemoveTag(jids, tag)
++}
++func (d *OwnedDB) SetSystemName(ctx context.Context, jid, name string) (err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.SetSystemName(jid, name)
++}
++func (d *OwnedDB) CountSystemNames(ctx context.Context) (n int64, err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return 0, err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.CountSystemNames()
++}
++func (d *OwnedDB) ClearAllSystemNames(ctx context.Context) (n int64, err error) {
++	_, f, err := d.contactEffect(ctx)
++	if err != nil {
++		return 0, err
++	}
++	defer finishOwnedEffect(f, &err)
++	return d.contacts.ClearAllSystemNames()
++}
++
++func (w *OwnedWA) GetAllContacts(ctx context.Context) (v map[types.JID]types.ContactInfo, err error) {
++	ctx, f, err := w.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(f, &err)
++	return w.client.GetAllContacts(ctx)
++}
++func (w *OwnedWA) IsOnWhatsApp(ctx context.Context, phones []string) (v []types.IsOnWhatsAppResponse, err error) {
++	ctx, f, err := w.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(f, &err)
++	return w.client.IsOnWhatsApp(ctx, phones)
++}
++
++// Disconnect retains an invocation lease just like every other client effect.
++// Lifecycle callers may use WithoutCancel while their parent scope is still live.
++func (w *OwnedWA) Disconnect(ctx context.Context) (err error) {
++	_, finish, err := w.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	w.client.Disconnect()
++	return nil
++}
++
++// CheckContactResolver preserves the original eager read-only resolver errors,
++// including for empty contact sets and inputs requiring no identity lookup.
++func (d *OwnedDB) CheckContactResolver(ctx context.Context) (err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	_, err = d.app.contactResolver()
++	return err
++}
++
++// ResolveLIDToPNWithError resolves identity under a leased, read-only-safe facade.
++func (d *OwnedDB) ResolveLIDToPNWithError(ctx context.Context, jid types.JID) (out types.JID, err error) {
++	child, finish, err := d.effect(ctx)
++	if err != nil {
++		return jid, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	resolver, err := d.app.contactResolver()
++	if err != nil {
++		return jid, err
++	}
++	if resolver == nil {
++		return jid, nil
++	}
++	return resolver.ResolveLIDToPN(child, jid), nil
++}
++
++// ResolvePNToLIDWithError resolves identity under a leased, read-only-safe facade.
++func (d *OwnedDB) ResolvePNToLIDWithError(ctx context.Context, jid types.JID) (out types.JID, err error) {
++	child, finish, err := d.effect(ctx)
++	if err != nil {
++		return jid, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	resolver, err := d.app.contactResolver()
++	if err != nil {
++		return jid, err
++	}
++	if resolver == nil {
++		return jid, nil
++	}
++	return resolver.ResolvePNToLID(child, jid), nil
++}
+diff --git a/internal/app/owned_contacts_test.go b/internal/app/owned_contacts_test.go
+new file mode 100644
+index 0000000..c77b6f8
+--- /dev/null
++++ b/internal/app/owned_contacts_test.go
+@@ -0,0 +1,406 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++type ownedContactsProbe struct {
++	ownedContactReader
++	calls   atomic.Int32
++	entered chan struct{}
++	release chan struct{}
++	failure error
++	panics  bool
++}
++
++func (p *ownedContactsProbe) read() error {
++	p.calls.Add(1)
++	if p.entered != nil {
++		close(p.entered)
++		<-p.release
++	}
++	if p.panics {
++		panic(p.failure)
++	}
++	return p.failure
++}
++func (p *ownedContactsProbe) SearchContacts(string, int) ([]store.Contact, error) {
++	return nil, p.read()
++}
++func (p *ownedContactsProbe) ListContacts(int) ([]store.Contact, error)      { return nil, p.read() }
++func (p *ownedContactsProbe) ListContactAliases() (map[string]string, error) { return nil, p.read() }
++func (p *ownedContactsProbe) ListTags(string) ([]string, error)              { return nil, p.read() }
++func (p *ownedContactsProbe) UpsertContact(string, string, string, string, string, string) error {
++	return p.read()
++}
++func (p *ownedContactsProbe) SetAlias([]string, string) error     { return p.read() }
++func (p *ownedContactsProbe) RemoveAlias([]string) error          { return p.read() }
++func (p *ownedContactsProbe) AddTag([]string, string) error       { return p.read() }
++func (p *ownedContactsProbe) RemoveTag([]string, string) error    { return p.read() }
++func (p *ownedContactsProbe) SetSystemName(string, string) error  { return p.read() }
++func (p *ownedContactsProbe) CountSystemNames() (int64, error)    { return 0, p.read() }
++func (p *ownedContactsProbe) ClearAllSystemNames() (int64, error) { return 0, p.read() }
++
++type ownedContactInvocation struct {
++	name string
++	call func(*OwnedDB, context.Context) error
++}
++
++var ownedContactInvocations = []ownedContactInvocation{
++	{"search", func(d *OwnedDB, c context.Context) error { _, e := d.SearchContacts(c, "synthetic", 7); return e }},
++	{"list", func(d *OwnedDB, c context.Context) error { _, e := d.ListContacts(c, 7); return e }},
++	{"aliases", func(d *OwnedDB, c context.Context) error { _, e := d.ListContactAliases(c); return e }},
++	{"tags", func(d *OwnedDB, c context.Context) error { _, e := d.ListTags(c, "jid"); return e }},
++	{"upsert", func(d *OwnedDB, c context.Context) error {
++		return d.UpsertContact(c, "jid", "phone", "push", "full", "first", "business")
++	}},
++	{"set-alias", func(d *OwnedDB, c context.Context) error { return d.SetAlias(c, []string{"jid"}, "alias") }},
++	{"remove-alias", func(d *OwnedDB, c context.Context) error { return d.RemoveAlias(c, []string{"jid"}) }},
++	{"add-tag", func(d *OwnedDB, c context.Context) error { return d.AddTag(c, []string{"jid"}, "tag") }},
++	{"remove-tag", func(d *OwnedDB, c context.Context) error { return d.RemoveTag(c, []string{"jid"}, "tag") }},
++	{"set-system-name", func(d *OwnedDB, c context.Context) error { return d.SetSystemName(c, "jid", "name") }},
++	{"count-system-names", func(d *OwnedDB, c context.Context) error { _, e := d.CountSystemNames(c); return e }},
++	{"clear-system-names", func(d *OwnedDB, c context.Context) error { _, e := d.ClearAllSystemNames(c); return e }},
++}
++
++func TestOwnedContactsRefusalHasZeroStoreEffects(t *testing.T) {
++	for _, mode := range []string{"missing", "foreign", "canceled", "finished", "sealed-finished"} {
++		t.Run(mode, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			d, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			probe := &ownedContactsProbe{ownedContactReader: d.contacts}
++			d.contacts = probe
++			use := ctx
++			switch mode {
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(ctx)
++				cancel()
++			case "finished":
++				finish(nil)
++			case "sealed-finished":
++				canceled, cancel := context.WithCancel(context.Background())
++				cancel()
++				if held, e := a.BeginDrain(canceled); held != nil || !errors.Is(e, ErrDrainCoverageIncomplete) {
++					t.Fatalf("seal = %v %v", held, e)
++				}
++				finish(nil)
++			}
++			for _, op := range ownedContactInvocations {
++				if e := op.call(d, use); !errors.Is(e, ErrHandleRevoked) {
++					t.Errorf("%s = %v", op.name, e)
++				}
++			}
++			if got := probe.calls.Load(); got != 0 {
++				t.Fatalf("refused operations performed %d store effects", got)
++			}
++		})
++	}
++}
++
++func TestOwnedContactsAcceptedAfterSealAndActualInvocationJoin(t *testing.T) {
++	for _, op := range ownedContactInvocations {
++		t.Run(op.name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			d, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			failure := errors.New("synthetic contact failure")
++			probe := &ownedContactsProbe{ownedContactReader: d.contacts, entered: make(chan struct{}), release: make(chan struct{}), failure: failure}
++			d.contacts = probe
++			var once sync.Once
++			defer once.Do(func() { close(probe.release) })
++			sealed, cancel := context.WithCancel(context.Background())
++			cancel()
++			if held, e := a.BeginDrain(sealed); held != nil || !errors.Is(e, ErrDrainCoverageIncomplete) {
++				t.Fatalf("seal = %v %v", held, e)
++			}
++			result := make(chan error, 1)
++			go func() { result <- op.call(d, ctx) }()
++			select {
++			case <-probe.entered:
++			case <-time.After(time.Second):
++				t.Fatal("live parent failed to admit child after seal")
++			}
++			finish(nil)
++			drain := make(chan error, 1)
++			go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++			select {
++			case e := <-drain:
++				t.Fatalf("drain escaped invocation: %v", e)
++			case <-time.After(20 * time.Millisecond):
++			}
++			once.Do(func() { close(probe.release) })
++			if e := <-result; !errors.Is(e, failure) {
++				t.Fatalf("actual error = %v", e)
++			}
++			select {
++			case e := <-drain:
++				if !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++					t.Fatalf("drain = %v", e)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("drain did not join")
++			}
++			if got := probe.calls.Load(); got != 1 {
++				t.Fatalf("store effect count = %d", got)
++			}
++		})
++	}
++}
++
++func TestOwnedContactsCountSystemNamesZero(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	d, err := a.OwnedDB(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	n, err := d.CountSystemNames(ctx)
++	if err != nil || n != 0 {
++		t.Fatalf("count = %d, %v; want zero", n, err)
++	}
++}
++
++func TestOwnedContactsPanicRetainsCause(t *testing.T) {
++	for _, op := range ownedContactInvocations {
++		t.Run(op.name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			d, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			failure := errors.New("synthetic contact panic")
++			d.contacts = &ownedContactsProbe{ownedContactReader: d.contacts, failure: failure, panics: true}
++			func() {
++				defer func() {
++					if recover() != failure {
++						t.Error("panic cause changed")
++					}
++				}()
++				_ = op.call(d, ctx)
++			}()
++			finish(nil)
++			if held, e := a.BeginDrain(context.Background()); held != nil || !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++				t.Fatalf("lost panic = %v %v", held, e)
++			}
++		})
++	}
++}
++
++type ownedContactsWAProbe struct {
++	WAClient
++	calls   atomic.Int32
++	entered chan struct{}
++	release chan struct{}
++	failure error
++	panics  bool
++}
++
++func (w *ownedContactsWAProbe) read() error {
++	w.calls.Add(1)
++	if w.entered != nil {
++		close(w.entered)
++		<-w.release
++	}
++	if w.panics {
++		panic(w.failure)
++	}
++	return w.failure
++}
++func (w *ownedContactsWAProbe) GetAllContacts(context.Context) (map[types.JID]types.ContactInfo, error) {
++	return nil, w.read()
++}
++func (w *ownedContactsWAProbe) IsOnWhatsApp(context.Context, []string) ([]types.IsOnWhatsAppResponse, error) {
++	return nil, w.read()
++}
++func (w *ownedContactsWAProbe) Disconnect() { _ = w.read() }
++func (*ownedContactsWAProbe) Close()        {}
++
++func TestOwnedContactsWARefusalAndAcceptedLifecycle(t *testing.T) {
++	for _, mode := range []string{"missing", "foreign", "canceled", "finished", "sealed-finished"} {
++		t.Run(mode, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			probe := &ownedContactsWAProbe{}
++			a.wa = probe
++			wa, err := a.OwnedWA(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			use := ctx
++			switch mode {
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(ctx)
++				cancel()
++			case "finished":
++				finish(nil)
++			case "sealed-finished":
++				canceled, cancel := context.WithCancel(context.Background())
++				cancel()
++				if held, e := a.BeginDrain(canceled); held != nil || !errors.Is(e, ErrDrainCoverageIncomplete) {
++					t.Fatalf("seal = %v %v", held, e)
++				}
++				finish(nil)
++			}
++			if _, e := wa.GetAllContacts(use); !errors.Is(e, ErrHandleRevoked) {
++				t.Errorf("contacts = %v", e)
++			}
++			if _, e := wa.IsOnWhatsApp(use, []string{"1"}); !errors.Is(e, ErrHandleRevoked) {
++				t.Errorf("on whatsapp = %v", e)
++			}
++			if e := wa.Disconnect(use); !errors.Is(e, ErrHandleRevoked) {
++				t.Errorf("disconnect = %v", e)
++			}
++			if probe.calls.Load() != 0 {
++				t.Fatalf("refused WA effects = %d", probe.calls.Load())
++			}
++		})
++	}
++	for _, name := range []string{"contacts", "whatsapp", "disconnect"} {
++		t.Run("accepted-"+name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			var failure error = errors.New("synthetic WA failure")
++			if name == "disconnect" {
++				failure = nil
++			}
++			probe := &ownedContactsWAProbe{entered: make(chan struct{}), release: make(chan struct{}), failure: failure}
++			a.wa = probe
++			wa, err := a.OwnedWA(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			sealed, cancel := context.WithCancel(context.Background())
++			cancel()
++			if held, e := a.BeginDrain(sealed); held != nil || !errors.Is(e, ErrDrainCoverageIncomplete) {
++				t.Fatalf("seal = %v %v", held, e)
++			}
++			result := make(chan error, 1)
++			go func() {
++				var e error
++				switch name {
++				case "contacts":
++					_, e = wa.GetAllContacts(ctx)
++				case "whatsapp":
++					_, e = wa.IsOnWhatsApp(ctx, []string{"1"})
++				default:
++					e = wa.Disconnect(ctx)
++				}
++				result <- e
++			}()
++			select {
++			case <-probe.entered:
++			case <-time.After(time.Second):
++				t.Fatal("WA effect not entered")
++			}
++			finish(nil)
++			drain := make(chan error, 1)
++			go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++			select {
++			case e := <-drain:
++				t.Fatalf("drain escaped effect: %v", e)
++			case <-time.After(20 * time.Millisecond):
++			}
++			close(probe.release)
++			if e := <-result; !errors.Is(e, failure) {
++				t.Fatalf("effect = %v", e)
++			}
++			if e := <-drain; (failure != nil && !errors.Is(e, failure)) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++				t.Fatalf("drain = %v", e)
++			}
++			if probe.calls.Load() != 1 {
++				t.Fatalf("WA effects = %d", probe.calls.Load())
++			}
++		})
++	}
++}
++
++func TestOwnedContactsWAPanicRetainsCause(t *testing.T) {
++	for _, name := range []string{"contacts", "whatsapp", "disconnect"} {
++		t.Run(name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			defer finish(nil)
++			failure := errors.New("synthetic WA panic")
++			a.wa = &ownedContactsWAProbe{failure: failure, panics: true}
++			wa, err := a.OwnedWA(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			func() {
++				defer func() {
++					if recover() != failure {
++						t.Error("panic cause changed")
++					}
++				}()
++				switch name {
++				case "contacts":
++					_, _ = wa.GetAllContacts(ctx)
++				case "whatsapp":
++					_, _ = wa.IsOnWhatsApp(ctx, nil)
++				default:
++					_ = wa.Disconnect(ctx)
++				}
++			}()
++			finish(nil)
++			if held, e := a.BeginDrain(context.Background()); held != nil || !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++				t.Fatalf("lost panic = %v %v", held, e)
++			}
++		})
++	}
++}
++
++type ownedSaveRefusalWA struct{ WAClient }
++
++func (*ownedSaveRefusalWA) Close() {}
++func (*ownedSaveRefusalWA) ResolvePNToLID(context.Context, types.JID) types.JID {
++	panic("save effect reached")
++}
++func (*ownedSaveRefusalWA) Disconnect() { panic("save effect reached") }
++
++func TestOwnedSaveContactRefusalHasZeroEffects(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	a.wa = &ownedSaveRefusalWA{}
++	finish(nil)
++	_, err := a.OwnedSaveContact(ctx, types.JID{User: "15551234567", Server: types.DefaultUserServer}, "full", "first", true)
++	if !errors.Is(err, ErrHandleRevoked) {
++		t.Fatalf("OwnedSaveContact = %v", err)
++	}
++}
+diff --git a/internal/app/owned_db.go b/internal/app/owned_db.go
+index fad7440..aca96e7 100644
+--- a/internal/app/owned_db.go
++++ b/internal/app/owned_db.go
+@@ -30,4 +30,5 @@ type OwnedDB struct {
+-	db      *store.DB
+-	app     *App
+-	quote   ownedQuoteReader
+-	archive ownedArchiveReader
++	db       *store.DB
++	app      *App
++	quote    ownedQuoteReader
++	archive  ownedArchiveReader
++	contacts ownedContactReader
+@@ -46 +47 @@ func (a *App) OwnedDB(ctx context.Context) (*OwnedDB, error) {
+-	return &OwnedDB{db: a.db, app: a, quote: a.db, archive: a.db}, nil
++	return &OwnedDB{db: a.db, app: a, quote: a.db, archive: a.db, contacts: a.db}, nil

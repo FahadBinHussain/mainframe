@@ -1,14 +1,14 @@
 # WACLI raw-handle calls still needing ownership review
 
-The final ten-patch WACLI chain contains **194 production zero-argument accessor call sites: 92 `DB()` and 102 `WA()`**. Every entry remains conservatively `raw_escape` / **UNPROVEN**. This is a complete syntactic list of these calls, not a proof of lifecycle coverage.
+The final eleven-patch WACLI chain contains **178 production zero-argument accessor call sites: 80 `DB()` and 98 `WA()`**. Every entry remains conservatively `raw_escape` / **UNPROVEN**. This is a complete syntactic list of these calls, not a proof of lifecycle coverage.
 
-The chain applies to WACLI `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b` with the four pinned whatsmeow patches. The [SHA-256 manifest](../patches/wacli/runtime-series.json) identifies the exact source artifacts; [patch 0009](../patches/wacli/0009-owned-quote-and-handle-inventory.patch) introduces and [patch 0010](../patches/wacli/0010-owned-command-reads.patch) updates the AST regression and full machine-readable `cmd/wacli/testdata/owned_handle_inventory.json` fixture. Line numbers below refer to the reconstructed final source, not Mainframe files.
+The chain applies to WACLI `5578d1b6892f50a8f2329b11a6b6e27a1a81f88b` with the four pinned whatsmeow patches. The [SHA-256 manifest](../patches/wacli/runtime-series.json) identifies the exact source artifacts; [patch 0009](../patches/wacli/0009-owned-quote-and-handle-inventory.patch) introduces and [patches 0010](../patches/wacli/0010-owned-command-reads.patch) and [0011](../patches/wacli/0011-owned-contacts.patch) update the AST regression and full machine-readable `cmd/wacli/testdata/owned_handle_inventory.json` fixture. Line numbers below refer to the reconstructed final source, not Mainframe files.
 
 ## What changed, and what has not
 
 File and sticker sends select owned client and database facets before accessing a raw handle. Their quoted-message and media-metadata reads have per-invocation child leases. Their remaining raw accessor entries below are compatibility branches for non-owned callers, not evidence that those callers are fenced. Text-send helpers still use a raw reply adapter. Patch 0010 adds leased message-read and local archive-diagnostic facades. Their scoped command routes do not borrow raw handles; consistent page callbacks and synchronous resolver work stay private inside the invocation lease. This fences those application invocations, not arbitrary SDK descendants or output descriptors.
 
-Large remaining families include legacy message-mutation helpers, message mutations, group administration, poll state, media download, contacts, cleanup, and profile/auth client operations. The internal `LocalResolver` return and chat-state handler removal also remain raw. The migrated routes are message list/search/starred/show/context/export reads and changes; calls list, history coverage/fill planning, and store statistics. Export file publication remains a separate filesystem-ownership gap. A root command scope alone does not prove a borrowed handle or callback continuation is joined.
+Large remaining families include legacy message-mutation helpers, message mutations, group administration, poll state, media download, cleanup, and profile/auth client operations. The internal `LocalResolver` return and chat-state handler removal also remain raw. The migrated routes are message list/search/starred/show/context/export reads and changes; calls list, history coverage/fill planning, and store statistics. Export file publication remains a separate filesystem-ownership gap. Patch 0011 also migrates contact search/show, refresh, alias/tag metadata, system import/clear, live registration check, and account save (including those two delegated contact routes). Each actual DB/resolver/client effect retains a child lease through completion. Save retains the whole persistence/journal operation and leases disconnect cleanup before the still-live parent finishes, even after timeout. The separate `contacts resolve` command still borrows a raw resolver; direct legacy `App.SaveContact` and application fields/stores are not certified. A root command scope alone does not prove a borrowed handle or callback continuation is joined.
 
 Public SDK synchronous methods, SDK `Store` and `DangerousInternals`, application fields/direct store methods, previously borrowed handles, method values and aliases, arbitrary callbacks, drivers/descriptors and independent processes remain separate gaps. Both production drain APIs still refuse a held capture; capture, publication and usable restore remain disabled. No Windows runtime is claimed.
 
@@ -27,11 +27,6 @@ After source review only, regenerate the test fixture with `WACLI_UPDATE_OWNED_H
 | `cmd/wacli/chats.go` | 3 | 0 | 3 |
 | `cmd/wacli/chats_cleanup.go` | 6 | 0 | 6 |
 | `cmd/wacli/chats_state.go` | 0 | 1 | 1 |
-| `cmd/wacli/contact_read.go` | 4 | 0 | 4 |
-| `cmd/wacli/contacts.go` | 5 | 1 | 6 |
-| `cmd/wacli/contacts_check.go` | 0 | 1 | 1 |
-| `cmd/wacli/contacts_import_system.go` | 3 | 0 | 3 |
-| `cmd/wacli/contacts_save.go` | 0 | 1 | 1 |
 | `cmd/wacli/doctor.go` | 1 | 2 | 3 |
 | `cmd/wacli/groups_admin.go` | 4 | 13 | 17 |
 | `cmd/wacli/groups_info_rename.go` | 3 | 6 | 9 |
@@ -53,7 +48,7 @@ After source review only, regenerate the test fixture with `WACLI_UPDATE_OWNED_H
 | `cmd/wacli/send_file.go` | 1 | 1 | 2 |
 | `cmd/wacli/send_file_cmd.go` | 0 | 1 | 1 |
 | `cmd/wacli/send_helpers.go` | 0 | 1 | 1 |
-| `cmd/wacli/send_ipc.go` | 2 | 7 | 9 |
+| `cmd/wacli/send_ipc.go` | 2 | 6 | 8 |
 | `cmd/wacli/send_location_cmd.go` | 1 | 4 | 5 |
 | `cmd/wacli/send_poll_cmd.go` | 3 | 5 | 8 |
 | `cmd/wacli/send_react_cmd.go` | 1 | 3 | 4 |
@@ -95,21 +90,6 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/chats_cleanup.go:132:17` | `cleanupSingleChat` | `a.DB()` | 2 |
 | `cmd/wacli/chats_cleanup.go:166:12` | `cleanupSingleChat` | `a.DB()` | 3 |
 | `cmd/wacli/chats_state.go:243:3` | `runChatState` | `a.WA()` | 1 |
-| `cmd/wacli/contact_read.go:32:18` | `searchContactsForDisplay` | `a.DB()` | 1 |
-| `cmd/wacli/contact_read.go:90:19` | `getContactForDisplay` | `a.DB()` | 1 |
-| `cmd/wacli/contact_read.go:158:19` | `contactsForDisplay` | `a.DB()` | 1 |
-| `cmd/wacli/contact_read.go:162:18` | `contactsForDisplay` | `a.DB()` | 2 |
-| `cmd/wacli/contacts.go:148:15` | `newContactsRefreshCmd` | `a.WA()` | 1 |
-| `cmd/wacli/contacts.go:156:15` | `newContactsRefreshCmd` | `a.DB()` | 1 |
-| `cmd/wacli/contacts.go:207:14` | `newContactsAliasCmd` | `a.DB()` | 1 |
-| `cmd/wacli/contacts.go:239:14` | `newContactsAliasCmd` | `a.DB()` | 2 |
-| `cmd/wacli/contacts.go:283:14` | `newContactsTagsCmd` | `a.DB()` | 1 |
-| `cmd/wacli/contacts.go:316:14` | `newContactsTagsCmd` | `a.DB()` | 2 |
-| `cmd/wacli/contacts_check.go:117:42` | `runContactsCheck` | `a.WA()` | 1 |
-| `cmd/wacli/contacts_import_system.go:55:35` | `newContactsImportSystemCmd` | `a.DB()` | 1 |
-| `cmd/wacli/contacts_import_system.go:63:26` | `newContactsImportSystemCmd` | `a.DB()` | 2 |
-| `cmd/wacli/contacts_import_system.go:88:15` | `newContactsImportSystemCmd` | `a.DB()` | 3 |
-| `cmd/wacli/contacts_save.go:100:3` | `runContactsSave` | `a.WA()` | 1 |
 | `cmd/wacli/doctor.go:198:11` | `newDoctorCmd` | `appInstance.DB()` | 1 |
 | `cmd/wacli/doctor.go:216:15` | `newDoctorCmd` | `a.WA()` | 1 |
 | `cmd/wacli/doctor.go:218:19` | `newDoctorCmd` | `a.WA()` | 2 |
@@ -220,15 +200,14 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/send_file.go:128:12` | `sendFile` | `a.DB()` | 1 |
 | `cmd/wacli/send_file_cmd.go:94:33` | `newSendFileCmd` | `a.WA()` | 1 |
 | `cmd/wacli/send_helpers.go:165:3` | `reconnectForSend` | `a.WA()` | 1 |
-| `cmd/wacli/send_ipc.go:444:45` | `executeDelegatedSend` | `a.WA()` | 1 |
-| `cmd/wacli/send_ipc.go:555:10` | `executeDelegatedPresence` | `a.WA()` | 1 |
-| `cmd/wacli/send_ipc.go:593:10` | `executeDelegatedEdit` | `a.WA()` | 1 |
-| `cmd/wacli/send_ipc.go:598:12` | `executeDelegatedEdit` | `a.DB()` | 1 |
-| `cmd/wacli/send_ipc.go:619:35` | `executeDelegatedText` | `a.WA()` | 1 |
-| `cmd/wacli/send_ipc.go:724:10` | `executeDelegatedReact` | `a.WA()` | 1 |
-| `cmd/wacli/send_ipc.go:730:38` | `executeDelegatedReact` | `a.DB()` | 1 |
-| `cmd/wacli/send_ipc.go:730:46` | `executeDelegatedReact` | `a.WA()` | 2 |
-| `cmd/wacli/send_ipc.go:801:30` | `warmupDelegatedRecipient` | `a.WA()` | 1 |
+| `cmd/wacli/send_ipc.go:559:10` | `executeDelegatedPresence` | `a.WA()` | 1 |
+| `cmd/wacli/send_ipc.go:597:10` | `executeDelegatedEdit` | `a.WA()` | 1 |
+| `cmd/wacli/send_ipc.go:602:12` | `executeDelegatedEdit` | `a.DB()` | 1 |
+| `cmd/wacli/send_ipc.go:623:35` | `executeDelegatedText` | `a.WA()` | 1 |
+| `cmd/wacli/send_ipc.go:728:10` | `executeDelegatedReact` | `a.WA()` | 1 |
+| `cmd/wacli/send_ipc.go:734:38` | `executeDelegatedReact` | `a.DB()` | 1 |
+| `cmd/wacli/send_ipc.go:734:46` | `executeDelegatedReact` | `a.WA()` | 2 |
+| `cmd/wacli/send_ipc.go:805:30` | `warmupDelegatedRecipient` | `a.WA()` | 1 |
 | `cmd/wacli/send_location_cmd.go:103:33` | `newSendLocationCmd` | `a.WA()` | 1 |
 | `cmd/wacli/send_location_cmd.go:109:37` | `newSendLocationCmd` | `a.WA()` | 2 |
 | `cmd/wacli/send_location_cmd.go:173:42` | `persistOutboundLocation` | `a.DB()` | 1 |
@@ -266,5 +245,5 @@ All entries in this table have status **UNPROVEN (`raw_escape`)**. Occurrence nu
 | `cmd/wacli/store_cleanup.go:96:17` | `newStoreCleanupCmd` | `a.DB()` | 4 |
 | `cmd/wacli/store_cleanup.go:97:15` | `newStoreCleanupCmd` | `a.DB()` | 5 |
 | `cmd/wacli/store_media_membership.go:27:20` | `newStoreVerifyMediaCmd` | `a.DB()` | 1 |
-| `internal/app/app.go:370:10` | `LocalResolver` | `a.WA()` | 1 |
+| `internal/app/app.go:371:10` | `LocalResolver` | `a.WA()` | 1 |
 | `internal/app/chat_state.go:43:14` | `AddChatStatePersistenceHandler` | `a.WA()` | 1 |
