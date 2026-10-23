@@ -29,7 +29,7 @@ index 0000000..8c785cb
 +	}
 +}
 diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
-index 4d613d9..264a009 100644
+index 4d613d9..26ec532 100644
 --- a/cmd/wacli/send_ipc.go
 +++ b/cmd/wacli/send_ipc.go
 @@ -181 +181 @@ func startSendDelegateServer(ctx context.Context, a *app.App, spacing sendSpacin
@@ -37,12 +37,12 @@ index 4d613d9..264a009 100644
 +		return executeAdmittedDelegate(ctx, a, req)
 @@ -184,0 +185,9 @@ func startSendDelegateServer(ctx context.Context, a *app.App, spacing sendSpacin
 +func executeAdmittedDelegate(ctx context.Context, a *app.App, req sendDelegateRequest) (response sendDelegateResponse, operationErr error) {
-+	finish, err := a.BeginOperation(ctx)
++	ownedCtx, finish, err := a.BeginCancelableOperation(ctx)
 +	if err != nil {
 +		return sendDelegateResponse{}, err
 +	}
 +	defer func() { finish(operationErr) }()
-+	return executeDelegatedSend(ctx, a, req)
++	return executeDelegatedSend(ownedCtx, a, req)
 +}
 +
 diff --git a/cmd/wacli/store.go b/cmd/wacli/store.go
@@ -232,14 +232,18 @@ index 15c34ee..e1546b0 100644
 +
 +A successful result says `verified-byte-objects-only`, with `boundary: UNVERIFIED`, `complete: false` and `publishable: false`. The temporary descriptors are closed after reporting. Concurrent producers can still change database membership or the external roots, so this diagnostic is **not** a held whole-store frontier, a capture receipt, a restore or a Windows validation. Other platforms refuse immutable staging rather than weakening the contract.
 diff --git a/internal/app/app.go b/internal/app/app.go
-index a6dbfe4..9475c05 100644
+index a6dbfe4..9c61e9f 100644
 --- a/internal/app/app.go
 +++ b/internal/app/app.go
 @@ -127,0 +128 @@ type App struct {
 +	operations              operationAdmission
-@@ -239,0 +241 @@ func (a *App) CloseWithError() error {
+@@ -239,0 +241,5 @@ func (a *App) CloseWithError() error {
++		// Seal admission and cancel only app-owned delegates before waiting.
++		// The drain itself remains unbounded so context-ignoring effects keep
++		// their stores alive until they actually finish.
++		a.operations.cancelAccepted()
 +		_ = a.operations.drain(context.Background())
-@@ -262,0 +265,7 @@ func (a *App) CloseWithError() error {
+@@ -262,0 +269,7 @@ func (a *App) CloseWithError() error {
 +		_, drainErr := a.BeginDrain(context.Background())
 +		var incomplete *DrainIncompleteError
 +		if errors.As(drainErr, &incomplete) {
@@ -249,10 +253,10 @@ index a6dbfe4..9475c05 100644
 +		}
 diff --git a/internal/app/drain.go b/internal/app/drain.go
 new file mode 100644
-index 0000000..30e5520
+index 0000000..d4cf8cd
 --- /dev/null
 +++ b/internal/app/drain.go
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,184 @@
 +package app
 +
 +import (
@@ -260,6 +264,7 @@ index 0000000..30e5520
 +	"errors"
 +	"sync"
 +
++	"github.com/openclaw/wacli/internal/wa"
 +	"go.mau.fi/whatsmeow"
 +)
 +
@@ -286,33 +291,80 @@ index 0000000..30e5520
 +	mu        sync.Mutex
 +	sealed    bool
 +	active    int
++	nextID    uint64
++	cancels   map[uint64]context.CancelFunc
 +	done      chan struct{}
 +	completed bool
 +	err       error
 +}
 +
 +func (o *operationAdmission) begin(ctx context.Context) (func(error), error) {
++	_, finish, err := o.beginWithCancel(ctx, false)
++	return finish, err
++}
++
++func (o *operationAdmission) beginWithCancel(ctx context.Context, cancelable bool) (context.Context, func(error), error) {
 +	if err := ctx.Err(); err != nil {
-+		return nil, err
++		return nil, nil, err
++	}
++	ownedCtx := ctx
++	var cancel context.CancelFunc
++	if cancelable {
++		ownedCtx, cancel = context.WithCancel(ctx)
 +	}
 +	o.mu.Lock()
 +	defer o.mu.Unlock()
 +	if o.sealed {
-+		return nil, ErrOperationSealed
++		if cancel != nil {
++			cancel()
++		}
++		return nil, nil, ErrOperationSealed
 +	}
 +	o.active++
++	var id uint64
++	if cancel != nil {
++		if o.cancels == nil {
++			o.cancels = make(map[uint64]context.CancelFunc)
++		}
++		o.nextID++
++		id = o.nextID
++		o.cancels[id] = cancel
++	}
 +	var once sync.Once
-+	return func(err error) {
++	finish := func(err error) {
 +		once.Do(func() {
++			if cancel != nil {
++				cancel()
++			}
 +			o.mu.Lock()
 +			defer o.mu.Unlock()
++			if cancel != nil {
++				delete(o.cancels, id)
++			}
 +			if o.err == nil && err != nil {
 +				o.err = err
 +			}
 +			o.active--
 +			o.completeLocked()
 +		})
-+	}, nil
++	}
++	return ownedCtx, finish, nil
++}
++
++func (o *operationAdmission) cancelAccepted() {
++	o.mu.Lock()
++	o.sealed = true
++	if o.done == nil {
++		o.done = make(chan struct{})
++	}
++	cancels := make([]context.CancelFunc, 0, len(o.cancels))
++	for _, cancel := range o.cancels {
++		cancels = append(cancels, cancel)
++	}
++	o.mu.Unlock()
++	for _, cancel := range cancels {
++		cancel()
++	}
 +}
 +func (o *operationAdmission) completeLocked() {
 +	if o.sealed && o.active == 0 && !o.completed {
@@ -352,6 +404,17 @@ index 0000000..30e5520
 +	return a.operations.begin(ctx)
 +}
 +
++// BeginCancelableOperation tracks an admitted delegate and returns a context
++// owned by the app. Close cancels this context after sealing admission, before
++// waiting for the operation to finish. Unlike BeginOperation, cancellation is
++// intentionally app-owned; callers still must invoke finish after all effects.
++func (a *App) BeginCancelableOperation(ctx context.Context) (context.Context, func(error), error) {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	return a.operations.beginWithCancel(ctx, true)
++}
++
 +// BeginDrain seals explicit application operations and invokes the SDK drain
 +// while both stores remain open. It never returns a successful held boundary:
 +// the public DB/WA accessors and remaining application workers are not revoked.
@@ -370,7 +433,7 @@ index 0000000..30e5520
 +				BeginDrain(context.Context) (*whatsmeow.HeldBoundary, error)
 +			}); ok {
 +				_, err := drainer.BeginDrain(ctx)
-+				if err != whatsmeow.ErrLifecycleCoverageIncomplete {
++				if err = wa.DrainOperationalError(err); err != nil {
 +					workErr = errors.Join(workErr, err)
 +				}
 +			}
@@ -380,10 +443,10 @@ index 0000000..30e5520
 +}
 diff --git a/internal/app/drain_test.go b/internal/app/drain_test.go
 new file mode 100644
-index 0000000..53ed63a
+index 0000000..6f5e025
 --- /dev/null
 +++ b/internal/app/drain_test.go
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,235 @@
 +package app
 +
 +import (
@@ -492,6 +555,132 @@ index 0000000..53ed63a
 +	if err := a.CloseWithError(); err != nil {
 +		t.Fatal(err)
 +	}
++}
++
++func TestCloseCancelsCancelableDelegateBeforeWaiting(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, finish, err := a.BeginCancelableOperation(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	canceled := make(chan struct{})
++	go func() {
++		<-ctx.Done()
++		close(canceled)
++		finish(context.Canceled)
++	}()
++	closeDone := make(chan error, 1)
++	go func() { closeDone <- a.CloseWithError() }()
++	select {
++	case <-canceled:
++	case <-time.After(5 * time.Second):
++		t.Fatal("close did not cancel admitted delegate")
++	}
++	select {
++	case err := <-closeDone:
++		if !errors.Is(err, context.Canceled) {
++			t.Fatalf("close lost cancellation failure: %v", err)
++		}
++	case <-time.After(5 * time.Second):
++		t.Fatal("close did not wait for delegate finish")
++	}
++}
++
++func TestCloseKeepsStoreLiveUntilCanceledEffectFinishes(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, finish, err := a.BeginCancelableOperation(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	canceled := make(chan struct{})
++	go func() { <-ctx.Done(); close(canceled) }()
++	closeDone := make(chan error, 1)
++	go func() { closeDone <- a.CloseWithError() }()
++	select {
++	case <-canceled:
++	case <-time.After(5 * time.Second):
++		t.Fatal("delegate was not canceled")
++	}
++	if _, err := a.DB().CountMessages(); err != nil {
++		t.Fatalf("store closed before canceled effect cleanup: %v", err)
++	}
++	select {
++	case err := <-closeDone:
++		t.Fatalf("close returned before effect finish: %v", err)
++	default:
++	}
++	finish(context.Canceled)
++	if err := <-closeDone; !errors.Is(err, context.Canceled) {
++		t.Fatalf("close lost effect failure: %v", err)
++	}
++}
++
++func TestDrainCancelableAdmissionRejectedAfterCloseSeals(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, finish, err := a.BeginCancelableOperation(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	closeDone := make(chan error, 1)
++	go func() { closeDone <- a.CloseWithError() }()
++	<-ctx.Done()
++	if _, _, err := a.BeginCancelableOperation(t.Context()); !errors.Is(err, ErrOperationSealed) {
++		t.Fatalf("late admission = %v, want ErrOperationSealed", err)
++	}
++	finish(context.Canceled)
++	if err := <-closeDone; !errors.Is(err, context.Canceled) {
++		t.Fatalf("close lost accepted cancellation: %v", err)
++	}
++}
++
++func TestDrainCancelableFinishReleasesOwnedContext(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, finish, err := a.BeginCancelableOperation(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	finish(nil)
++	finish(nil)
++	if !errors.Is(ctx.Err(), context.Canceled) {
++		t.Fatal("completed operation retained parent context")
++	}
++	if err := a.CloseWithError(); err != nil {
++		t.Fatalf("normal completion became close failure: %v", err)
++	}
++}
++
++func TestDrainDoesNotCancelAcceptedDelegate(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, finish, err := a.BeginCancelableOperation(t.Context())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer a.Close()
++	waitCtx, cancel := context.WithCancel(t.Context())
++	cancel()
++	boundary, err := a.BeginDrain(waitCtx)
++	if boundary != nil || !errors.Is(err, context.Canceled) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("unsafe drain: %v, %v", boundary, err)
++	}
++	if ctx.Err() != nil {
++		t.Fatal("public drain canceled accepted work")
++	}
++	finish(nil)
 +}
 diff --git a/internal/mediamembership/limits.go b/internal/mediamembership/limits.go
 new file mode 100644
@@ -1161,21 +1350,19 @@ index 0000000..a2a65d0
 +	}
 +}
 diff --git a/internal/wa/client.go b/internal/wa/client.go
-index a44e1cd..bf28075 100644
+index a44e1cd..e01fb85 100644
 --- a/internal/wa/client.go
 +++ b/internal/wa/client.go
-@@ -84 +84,4 @@ func (c *Client) CloseWithError() error {
+@@ -84 +84,2 @@ func (c *Client) CloseWithError() error {
 -			c.closeErr = errors.Join(c.closeErr, cli.DrainAppStateKeyShares(context.Background()))
 +			_, err := cli.BeginDrain(context.Background())
-+			if err != whatsmeow.ErrLifecycleCoverageIncomplete {
-+				c.closeErr = errors.Join(c.closeErr, err)
-+			}
++			c.closeErr = errors.Join(c.closeErr, DrainOperationalError(err))
 diff --git a/internal/wa/drain.go b/internal/wa/drain.go
 new file mode 100644
-index 0000000..d251f9e
+index 0000000..70cf896
 --- /dev/null
 +++ b/internal/wa/drain.go
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,32 @@
 +package wa
 +
 +import (
@@ -1195,4 +1382,51 @@ index 0000000..d251f9e
 +		return nil, whatsmeow.ErrLifecycleCoverageIncomplete
 +	}
 +	return cli.BeginDrain(ctx)
++}
++
++// DrainOperationalError strips only the exact known coverage wrapper/marker.
++// Unknown wrapped or joined errors are kept intact, never dropped by errors.Is.
++func DrainOperationalError(err error) error {
++	if incomplete, ok := err.(*whatsmeow.LifecycleDrainError); ok {
++		return incomplete.Cause
++	}
++	if err == whatsmeow.ErrLifecycleCoverageIncomplete {
++		return nil
++	}
++	return err
++}
+diff --git a/internal/wa/drain_error_test.go b/internal/wa/drain_error_test.go
+new file mode 100644
+index 0000000..9573e34
+--- /dev/null
++++ b/internal/wa/drain_error_test.go
+@@ -0,0 +1,29 @@
++package wa
++
++import (
++	"errors"
++	"testing"
++
++	"go.mau.fi/whatsmeow"
++)
++
++func TestDrainOperationalErrorPreservesJoinedFailures(t *testing.T) {
++	first := errors.New("synthetic SDK failure")
++	second := errors.New("synthetic independent failure")
++	if DrainOperationalError(whatsmeow.ErrLifecycleCoverageIncomplete) != nil {
++		t.Fatal("coverage-only marker became close failure")
++	}
++	if DrainOperationalError(&whatsmeow.LifecycleDrainError{}) != nil {
++		t.Fatal("coverage-only typed result became close failure")
++	}
++	known := &whatsmeow.LifecycleDrainError{Cause: first}
++	if !errors.Is(DrainOperationalError(known), first) {
++		t.Fatal("typed operational cause lost")
++	}
++	for _, joined := range []error{errors.Join(whatsmeow.ErrLifecycleCoverageIncomplete, first, second), errors.Join(known, second)} {
++		got := DrainOperationalError(joined)
++		if !errors.Is(got, first) || !errors.Is(got, second) {
++			t.Fatalf("joined operational errors lost: %v", got)
++		}
++	}
 +}
