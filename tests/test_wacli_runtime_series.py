@@ -94,6 +94,7 @@ class RuntimeSeriesTests(unittest.TestCase):
             ('wacli', '0009-owned-quote-and-handle-inventory.patch', 'wacli_test_pattern'),
             ('wacli', '0010-owned-command-reads.patch', 'wacli_test_pattern'),
             ('wacli', '0011-owned-contacts.patch', 'wacli_test_pattern'),
+            ('wacli', '0012-owned-auth-profile-presence.patch', 'wacli_test_pattern'),
             ('whatsmeow', 'whatsmeow/0004-callback-lineage.patch', 'dependency_test_pattern'),
         )
         for group, name, pattern in extensions:
