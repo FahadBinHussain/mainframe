@@ -1,0 +1,846 @@
+diff --git a/cmd/wacli/media_download.go b/cmd/wacli/media_download.go
+index 34b4073..329e8b8 100644
+--- a/cmd/wacli/media_download.go
++++ b/cmd/wacli/media_download.go
+@@ -36,0 +37,11 @@ func mediaResult(info store.MediaDownloadInfo, path string, bytes int64, source
++func acquireReadOnlyMediaOutputLock(ctx context.Context, flags *rootFlags, output string) (*lock.Lock, error) {
++	if flags == nil || !flags.isReadOnly() || output == "" {
++		return nil, nil
++	}
++	storeDir, err := resolveStoreDir(flags)
++	if err != nil {
++		return nil, err
++	}
++	return lock.AcquireWithTimeout(ctx, storeDir, flags.lockWait)
++}
++
+@@ -53,0 +65,7 @@ func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output
++			publicationLock, err := acquireReadOnlyMediaOutputLock(ctx, flags, output)
++			if err != nil {
++				return nil, err
++			}
++			if publicationLock != nil {
++				defer publicationLock.Release()
++			}
+@@ -89 +107 @@ func downloadExactMedia(ctx context.Context, flags *rootFlags, chat, id, output
+-				return nil, fmt.Errorf("%w; cached/read-only downloads use --read-only --output PATH; phone recovery needs a sync owner supporting media delegation", delegateErr)
++				return nil, fmt.Errorf("%w; phone recovery needs a sync owner supporting media delegation; --read-only output also waits for this store lock", delegateErr)
+diff --git a/cmd/wacli/media_download_test.go b/cmd/wacli/media_download_test.go
+index 38e8cfe..fb0395d 100644
+--- a/cmd/wacli/media_download_test.go
++++ b/cmd/wacli/media_download_test.go
+@@ -48,46 +48,50 @@ func TestMediaDownloadCacheMissOpensWritableStore(t *testing.T) {
+-func TestMediaDownloadVerifiedCacheBypassesExpiredLocationAndStoreLock(t *testing.T) {
+-	for _, readOnly := range []bool{true, false} {
+-		t.Run(map[bool]string{true: "read-only", false: "writable"}[readOnly], func(t *testing.T) {
+-			dir := t.TempDir()
+-			db, err := store.Open(filepath.Join(dir, "wacli.db"))
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			data := []byte("exact recovered recording")
+-			hash := sha256.Sum256(data)
+-			cached := filepath.Join(dir, "recovered.ogg")
+-			if err := os.WriteFile(cached, data, 0o600); err != nil {
+-				t.Fatal(err)
+-			}
+-			if err := db.UpsertChat("111@s.whatsapp.net", "dm", "Synthetic", time.Now()); err != nil {
+-				t.Fatal(err)
+-			}
+-			if err := db.UpsertMessage(store.UpsertMessageParams{ChatJID: "111@s.whatsapp.net", MsgID: "exact", SenderJID: "111@s.whatsapp.net", Timestamp: time.Now(), MediaType: "audio", MimeType: "audio/ogg", DirectPath: "expired-location", MediaKey: make([]byte, 32), FileSHA256: hash[:], FileLength: uint64(len(data))}); err != nil {
+-				t.Fatal(err)
+-			}
+-			if err := db.MarkMediaDownloaded("111@s.whatsapp.net", "exact", cached, time.Now()); err != nil {
+-				t.Fatal(err)
+-			}
+-			db.Close()
+-			lk, err := lock.Acquire(dir)
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			defer lk.Release()
+-			target := filepath.Join(dir, "output.ogg")
+-			args := []string{"--store", dir, "--json", "media", "download", "--chat", "111@s.whatsapp.net", "--id", "exact", "--output", target}
+-			if readOnly {
+-				args = append([]string{"--read-only"}, args...)
+-			}
+-			stdout, stderr, err := runPresenceDelegateHelper(t, args)
+-			if err != nil {
+-				t.Fatalf("cached exact download: %v stdout=%s stderr=%s", err, stdout, stderr)
+-			}
+-			if !strings.Contains(stdout, `"source":"cache"`) {
+-				t.Fatalf("cache not identified: %s", stdout)
+-			}
+-			got, err := os.ReadFile(target)
+-			if err != nil || string(got) != string(data) {
+-				t.Fatalf("output=%q err=%v", got, err)
+-			}
+-		})
++func TestMediaDownloadReadOnlyOutputRespectsStoreLock(t *testing.T) {
++	dir := t.TempDir()
++	db, err := store.Open(filepath.Join(dir, "wacli.db"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	data := []byte("exact recovered recording")
++	hash := sha256.Sum256(data)
++	cached := filepath.Join(dir, "recovered.ogg")
++	if err := os.WriteFile(cached, data, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertChat("111@s.whatsapp.net", "dm", "Synthetic", time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.UpsertMessage(store.UpsertMessageParams{ChatJID: "111@s.whatsapp.net", MsgID: "exact", SenderJID: "111@s.whatsapp.net", Timestamp: time.Now(), MediaType: "audio", MimeType: "audio/ogg", DirectPath: "expired-location", MediaKey: make([]byte, 32), FileSHA256: hash[:], FileLength: uint64(len(data))}); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.MarkMediaDownloaded("111@s.whatsapp.net", "exact", cached, time.Now()); err != nil {
++		t.Fatal(err)
++	}
++	db.Close()
++
++	target := filepath.Join(dir, "output.ogg")
++	lk, err := lock.Acquire(dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	stdout, stderr, runErr := runPresenceDelegateHelper(t, []string{"--read-only", "--store", dir, "--json", "media", "download", "--chat", "111@s.whatsapp.net", "--id", "exact", "--output", target})
++	if runErr == nil || !strings.Contains(stderr, "store is locked") {
++		t.Fatalf("locked read-only download: err=%v stdout=%s stderr=%s, want store-lock refusal", runErr, stdout, stderr)
++	}
++	if _, err := os.Stat(target); !os.IsNotExist(err) {
++		t.Fatalf("locked download created output: err=%v", err)
++	}
++	got, err := os.ReadFile(cached)
++	if err != nil || string(got) != string(data) {
++		t.Fatalf("cache after locked download=%q err=%v", got, err)
++	}
++	if err := lk.Release(); err != nil {
++		t.Fatal(err)
++	}
++
++	stdout, stderr, runErr = runPresenceDelegateHelper(t, []string{"--read-only", "--store", dir, "--json", "media", "download", "--chat", "111@s.whatsapp.net", "--id", "exact", "--output", target})
++	if runErr != nil || !strings.Contains(stdout, `"source":"cache"`) {
++		t.Fatalf("unlocked read-only download: err=%v stdout=%s stderr=%s", runErr, stdout, stderr)
++	}
++	got, err = os.ReadFile(target)
++	if err != nil || string(got) != string(data) {
++		t.Fatalf("output=%q err=%v", got, err)
+diff --git a/cmd/wacli/media_test.go b/cmd/wacli/media_test.go
+index a2393e7..55334ff 100644
+--- a/cmd/wacli/media_test.go
++++ b/cmd/wacli/media_test.go
+@@ -88,3 +88,3 @@ func TestMediaDownloadReadOnlyRequiresOutput(t *testing.T) {
+-// `sync --follow` holds the store lock for its entire run, so waiting cannot
+-// clear it and the caller has to be told about the path that needs no lock.
+-func TestMediaDownloadLockedStoreNamesTheReadOnlyPath(t *testing.T) {
++// Read-only output now also participates in the source store lock. A locked
++// writable miss must not recommend it as a lock-free workaround.
++func TestMediaDownloadLockedStoreExplainsReadOnlyAlsoNeedsLock(t *testing.T) {
+@@ -106,2 +106,2 @@ func TestMediaDownloadLockedStoreNamesTheReadOnlyPath(t *testing.T) {
+-	if !strings.Contains(err.Error(), "--read-only") {
+-		t.Fatalf("error = %v, want it to name --read-only", err)
++	if !strings.Contains(err.Error(), "--read-only output also waits for this store lock") {
++		t.Fatalf("error = %v, want the explicit read-only lock policy", err)
+diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
+index d00ce28..4d613d9 100644
+--- a/cmd/wacli/send_ipc.go
++++ b/cmd/wacli/send_ipc.go
+@@ -11,0 +12 @@ import (
++	"sync"
+@@ -199,0 +201,2 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
++	// Accepted handlers are joined before stop returns.
++	var acceptedHandlers sync.WaitGroup
+@@ -211 +214,5 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
+-			go handleSendDelegateConn(ctx, conn, execute, sendSlot, pacer, mediaSlot)
++			acceptedHandlers.Add(1)
++			go func() {
++				defer acceptedHandlers.Done()
++				handleSendDelegateConn(ctx, conn, execute, sendSlot, pacer, mediaSlot)
++			}()
+@@ -217,0 +225 @@ func startSendDelegateServerForStore(ctx context.Context, storeDir string, spaci
++		acceptedHandlers.Wait()
+diff --git a/cmd/wacli/snapshot_boundary_probe_test.go b/cmd/wacli/snapshot_boundary_probe_test.go
+index 65a9507..1141807 100644
+--- a/cmd/wacli/snapshot_boundary_probe_test.go
++++ b/cmd/wacli/snapshot_boundary_probe_test.go
+@@ -13,2 +13,2 @@ import (
+-// This counterexample must not be mistaken for a snapshot implementation.
+-func TestSnapshotBoundaryProbeStopReturnsBeforeAcceptedExecutorRelease(t *testing.T) {
++// Delegate admission is only one family, not a complete snapshot boundary.
++func TestSnapshotBoundaryProbeStopJoinsAcceptedExecutor(t *testing.T) {
+@@ -62,2 +62,2 @@ func TestSnapshotBoundaryProbeStopReturnsBeforeAcceptedExecutorRelease(t *testin
+-	case <-time.After(2 * time.Second):
+-		t.Fatal("stop did not return after listener close")
++		t.Fatal("stop returned before accepted executor completed")
++	case <-time.After(25 * time.Millisecond):
+@@ -67 +67 @@ func TestSnapshotBoundaryProbeStopReturnsBeforeAcceptedExecutorRelease(t *testin
+-		t.Fatal("counterexample did not reproduce: executor finished before release")
++		t.Fatal("executor finished before release")
+@@ -69 +69 @@ func TestSnapshotBoundaryProbeStopReturnsBeforeAcceptedExecutorRelease(t *testin
+-		t.Log("stop returned while an accepted synthetic executor remained blocked")
++		t.Log("accepted executor remains admitted during stop")
+@@ -76,0 +77,5 @@ func TestSnapshotBoundaryProbeStopReturnsBeforeAcceptedExecutorRelease(t *testin
++	select {
++	case <-stopped:
++	case <-time.After(2 * time.Second):
++		t.Fatal("stop failed to join released executor")
++	}
+diff --git a/cmd/wacli/snapshot_shutdown_media_test.go b/cmd/wacli/snapshot_shutdown_media_test.go
+index 322380b..a8d190f 100644
+--- a/cmd/wacli/snapshot_shutdown_media_test.go
++++ b/cmd/wacli/snapshot_shutdown_media_test.go
+@@ -15,3 +15,2 @@ import (
+-// Diagnostic only: this is deliberately not a snapshot-safety test. It proves
+-// that a cache-hit media download is a filesystem writer outside the store
+-// lock's scope. Only synthetic metadata/bytes are used, with no real account,
++// Read-only output now participates in this store lock. Writable cached output
++// still bypasses it, so this remains a counterexample to an all-media frontier. Only synthetic metadata/bytes are used, with no real account,
+@@ -19 +18 @@ import (
+-func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
++func TestSnapshotShutdownProbeMediaParticipationAndRemainingWriterGap(t *testing.T) {
+@@ -75,4 +74,12 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
+-	stdout, stderr, err := runPresenceDelegateHelper(t, []string{
+-		"--read-only", "--store", storeDir, "--json", "media", "download",
+-		"--chat", chat, "--id", id, "--output", outputPath,
+-	})
++	args := []string{"--read-only", "--store", storeDir, "--json", "media", "download",
++		"--chat", chat, "--id", id, "--output", outputPath}
++	stdout, stderr, err := runPresenceDelegateHelper(t, args)
++	if err == nil || !strings.Contains(stderr, "store is locked") {
++		t.Fatalf("read-only output did not honor held lock: %v stdout=%s stderr=%s", err, stdout, stderr)
++	}
++	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
++		t.Fatalf("blocked output was created: %v", err)
++	}
++	assertLocked()
++	// Do not hide the still-supported writable cache path's independent output.
++	stdout, stderr, err = runPresenceDelegateHelper(t, args[1:])
+@@ -80 +87 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
+-		t.Fatalf("offline cache download under held LOCK failed: %v stdout=%s stderr=%s", err, stdout, stderr)
++		t.Fatalf("writable cache output: %v stdout=%s stderr=%s", err, stdout, stderr)
+@@ -83 +90 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
+-		t.Fatalf("output did not report cache source: %s", stdout)
++		t.Fatalf("missing cache source: %s", stdout)
+@@ -85,0 +93,11 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
++	if err != nil || string(got) != string(payload) {
++		t.Fatalf("synthetic output=%q, err=%v", got, err)
++	}
++	assertLocked()
++	if err := lk.Release(); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.Remove(outputPath); err != nil {
++		t.Fatal(err)
++	}
++	stdout, stderr, err = runPresenceDelegateHelper(t, args)
+@@ -87 +105 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
+-		t.Fatalf("explicit output was not created while LOCK was held: %v", err)
++		t.Fatalf("read-only output after release: %v stdout=%s stderr=%s", err, stdout, stderr)
+@@ -89,2 +107,3 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
+-	if string(got) != string(payload) {
+-		t.Fatalf("explicit output = %q, want synthetic payload", got)
++	got, err = os.ReadFile(outputPath)
++	if err != nil || string(got) != string(payload) {
++		t.Fatalf("read-only synthetic output=%q, err=%v", got, err)
+@@ -92 +110,0 @@ func TestSnapshotShutdownProbeExplicitOutputBypassesStoreLock(t *testing.T) {
+-	assertLocked()
+diff --git a/docs/media.md b/docs/media.md
+index 8be20f9..f1b3e3b 100644
+--- a/docs/media.md
++++ b/docs/media.md
+@@ -22 +22,3 @@ failed verification never replaces a good output. Cache hits work without a
+-writable session or store lock. JSON adds `source`: `cache`, `server` or `phone`.
++writable session. Read-only output takes the store lock; writable cache hits
++retain their existing lock-free behavior. JSON adds `source`: `cache`, `server`
++or `phone`.
+@@ -45 +47,2 @@ recovery response, check the exact local file before requesting recovery again.
+-- `--read-only` takes **no store lock**, so direct/cache retrieval works during `sync --follow`. Writable cache misses delegate to a compatible running sync process; without a compatible endpoint, the held store lock is reported explicitly. `--lock-wait` does not release a follow session's lock.
++- `--read-only` holds the **source store lock** while publishing cached or directly downloaded output. It cannot publish while `sync --follow` holds that lock; `--lock-wait` waits but never releases another process's lock. Writable cache misses still delegate to a compatible running sync process; without a compatible endpoint, the held store lock is reported explicitly.
++- This lock coordinates participating commands of one store, not every writer of an external output root. It does not make that root eligible for snapshot capture.
+diff --git a/internal/app/admission_boundary_test.go b/internal/app/admission_boundary_test.go
+new file mode 100644
+index 0000000..0d0f205
+--- /dev/null
++++ b/internal/app/admission_boundary_test.go
+@@ -0,0 +1,66 @@
++package app
++
++import (
++	"errors"
++	"testing"
++)
++
++func TestClosePreventsLazySessionReopen(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := a.CloseWithError(); err != nil {
++		t.Fatal(err)
++	}
++	if err := a.OpenWA(); !errors.Is(err, ErrClosed) {
++		t.Fatalf("OpenWA after Close error = %v, want ErrClosed", err)
++	}
++	if _, err := a.ReadOnlyResolver(); !errors.Is(err, ErrClosed) {
++		t.Fatalf("ReadOnlyResolver after Close error = %v, want ErrClosed", err)
++	}
++}
++
++func TestCloseConcurrentWithLazyAdmission(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	const callers = 16
++	results := make(chan error, callers)
++	start := make(chan struct{})
++	for i := 0; i < callers; i++ {
++		go func() {
++			<-start
++			results <- a.CloseWithError()
++		}()
++	}
++	admitDone := make(chan error, 1)
++	go func() {
++		<-start
++		admitDone <- a.OpenWA()
++	}()
++	close(start)
++	var receipt error
++	for i := 0; i < callers; i++ {
++		err := <-results
++		if i == 0 {
++			receipt = err
++		} else if (err == nil) != (receipt == nil) || (err != nil && receipt != nil && err.Error() != receipt.Error()) {
++			t.Fatalf("close call %d returned %v, first returned %v", i, err, receipt)
++		}
++	}
++	if err := <-admitDone; err != nil && !errors.Is(err, ErrClosed) {
++		t.Fatalf("concurrent lazy admission error = %v, want nil or ErrClosed", err)
++	}
++}
++
++func TestCloseZeroValueApp(t *testing.T) {
++	a := &App{}
++	if err := a.CloseWithError(); err != nil {
++		t.Fatal(err)
++	}
++	if err := a.CloseWithError(); err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/internal/app/app.go b/internal/app/app.go
+index 62746e9..a6dbfe4 100644
+--- a/internal/app/app.go
++++ b/internal/app/app.go
+@@ -4,0 +5 @@ import (
++	"errors"
+@@ -122,0 +124,2 @@ type Options struct {
++var ErrClosed = errors.New("app is closed")
++
+@@ -125,0 +129,3 @@ type App struct {
++	closed                  bool
++	closeOnce               sync.Once
++	closeErr                error
+@@ -197,0 +204,3 @@ func (a *App) OpenWA() error {
++	if a.closed {
++		return ErrClosed
++	}
+@@ -223,16 +232,13 @@ func (a *App) Close() {
+-	a.appStateRecoveryMu.Lock()
+-	a.appStateRecoveryClosing = true
+-	if a.lateRecoveryStop != nil {
+-		close(a.lateRecoveryStop)
+-		a.lateRecoveryStop = nil
+-	}
+-	a.appStateRecoveryMu.Unlock()
+-	a.waMu.Lock()
+-	waClient := a.wa
+-	sessionResolver := a.sessionResolver
+-	sessionState, sessionHandler := a.sessionState, a.sessionHandler
+-	a.waMu.Unlock()
+-	if waClient != nil {
+-		waClient.Disconnect()
+-		if sessionState != nil {
+-			waClient.RemoveEventHandler(sessionHandler)
++	_ = a.CloseWithError()
++}
++
++// CloseWithError closes the app once and reports durable store close failures.
++// Concurrent callers all wait for the same close operation and receive its
++// result, so no caller can observe a partially closed app.
++func (a *App) CloseWithError() error {
++	a.closeOnce.Do(func() {
++		a.appStateRecoveryMu.Lock()
++		a.appStateRecoveryClosing = true
++		if a.lateRecoveryStop != nil {
++			close(a.lateRecoveryStop)
++			a.lateRecoveryStop = nil
+@@ -240,14 +246,41 @@ func (a *App) Close() {
+-	}
+-	// A completed command frontier may hand later ready tasks to a background
+-	// drainer. Keep SQLite open until that drainer has finished every write.
+-	a.appStateRecoveryWorkers.Wait()
+-	_ = a.appStatePersist.waitIdle(context.Background())
+-	if sessionResolver != nil {
+-		_ = sessionResolver.Close()
+-	}
+-	if waClient != nil {
+-		waClient.Close()
+-	}
+-	if a.db != nil {
+-		_ = a.db.Close()
+-	}
++		a.appStateRecoveryMu.Unlock()
++		a.waMu.Lock()
++		a.closed = true
++		waClient := a.wa
++		sessionResolver := a.sessionResolver
++		sessionState, sessionHandler := a.sessionState, a.sessionHandler
++		a.waMu.Unlock()
++		if waClient != nil {
++			waClient.Disconnect()
++			if sessionState != nil {
++				waClient.RemoveEventHandler(sessionHandler)
++			}
++		}
++		// A completed command frontier may hand later ready tasks to a background
++		// drainer. Keep SQLite open until that drainer has finished every write.
++		a.appStateRecoveryWorkers.Wait()
++		waitErr := a.appStatePersist.waitIdle(context.Background())
++		if sessionResolver != nil {
++			if err := sessionResolver.Close(); err != nil {
++				a.closeErr = errors.Join(a.closeErr, err)
++			}
++		}
++		if waClient != nil {
++			if closer, ok := waClient.(interface{ CloseWithError() error }); ok {
++				if err := closer.CloseWithError(); err != nil {
++					a.closeErr = errors.Join(a.closeErr, err)
++				}
++			} else {
++				waClient.Close()
++			}
++		}
++		if a.db != nil {
++			if err := a.db.Close(); err != nil {
++				a.closeErr = errors.Join(a.closeErr, err)
++			}
++		}
++		if waitErr != nil {
++			a.closeErr = errors.Join(a.closeErr, waitErr)
++		}
++	})
++	return a.closeErr
+@@ -297,0 +331,3 @@ func (a *App) ReadOnlyResolver() (LocalResolver, error) {
++	if a.closed {
++		return nil, ErrClosed
++	}
+diff --git a/internal/app/close_receipt_test.go b/internal/app/close_receipt_test.go
+new file mode 100644
+index 0000000..45f87cd
+--- /dev/null
++++ b/internal/app/close_receipt_test.go
+@@ -0,0 +1,77 @@
++package app
++
++import (
++	"errors"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++)
++
++type receiptWA struct {
++	WAClient
++	started chan struct{}
++	release chan struct{}
++	calls   atomic.Int32
++	failure error
++}
++
++func (w *receiptWA) Disconnect() {}
++func (w *receiptWA) Close()      { panic("error-returning close must be preferred") }
++func (w *receiptWA) CloseWithError() error {
++	w.calls.Add(1)
++	close(w.started)
++	<-w.release
++	return w.failure
++}
++
++func TestCloseReceiptSealsLazyAdmissionAndRetainsSessionError(t *testing.T) {
++	a, err := New(Options{StoreDir: t.TempDir()})
++	if err != nil {
++		t.Fatal(err)
++	}
++	failure := errors.New("synthetic session persistence failure")
++	w := &receiptWA{started: make(chan struct{}), release: make(chan struct{}), failure: failure}
++	a.wa = w
++	var once sync.Once
++	release := func() { once.Do(func() { close(w.release) }) }
++	t.Cleanup(func() { release(); a.Close() })
++	const callers = 8
++	results := make(chan error, callers)
++	for range callers {
++		go func() { results <- a.CloseWithError() }()
++	}
++	select {
++	case <-w.started:
++	case <-time.After(5 * time.Second):
++		t.Fatal("close did not reach session boundary")
++	}
++	if err := a.OpenWA(); !errors.Is(err, ErrClosed) {
++		t.Fatalf("lazy session opened during close: %v", err)
++	}
++	if _, err := a.ReadOnlyResolver(); !errors.Is(err, ErrClosed) {
++		t.Fatalf("lazy resolver opened during close: %v", err)
++	}
++	select {
++	case err := <-results:
++		t.Fatalf("close returned before session drain: %v", err)
++	default:
++	}
++	release()
++	for range callers {
++		select {
++		case err := <-results:
++			if !errors.Is(err, failure) {
++				t.Fatalf("close lost session error: %v", err)
++			}
++		case <-time.After(5 * time.Second):
++			t.Fatal("concurrent close did not return")
++		}
++	}
++	if w.calls.Load() != 1 {
++		t.Fatalf("session closed %d times", w.calls.Load())
++	}
++	if !errors.Is(a.CloseWithError(), failure) {
++		t.Fatal("later caller lost close error")
++	}
++}
+diff --git a/internal/wa/client.go b/internal/wa/client.go
+index b41a534..a44e1cd 100644
+--- a/internal/wa/client.go
++++ b/internal/wa/client.go
+@@ -4,0 +5 @@ import (
++	"errors"
+@@ -38,0 +40,2 @@ type Client struct {
++	closeOnce      sync.Once
++	closeErr       error
+@@ -65,10 +68,23 @@ func (c *Client) Close() {
+-	c.mu.Lock()
+-	defer c.mu.Unlock()
+-	if c.client != nil {
+-		c.client.Disconnect()
+-		c.client = nil
+-	}
+-	if c.container != nil {
+-		_ = c.container.Close()
+-		c.container = nil
+-	}
++	_ = c.CloseWithError()
++}
++
++// CloseWithError joins accepted app-state key-share workers, including the
++// synchronous application key-store continuation, before closing session SQL.
++// Other SDK producer families are NOT joined; this is not a capture receipt.
++func (c *Client) CloseWithError() error {
++	c.closeOnce.Do(func() {
++		c.mu.Lock()
++		cli, container := c.client, c.container
++		// Revoke new wrapper borrows before waiting, without holding mu across
++		// SDK callbacks. Already-borrowed SDK handles are not a fenced frontier.
++		c.client, c.container = nil, nil
++		c.mu.Unlock()
++		if cli != nil {
++			cli.Disconnect()
++			c.closeErr = errors.Join(c.closeErr, cli.DrainAppStateKeyShares(context.Background()))
++		}
++		if container != nil {
++			c.closeErr = errors.Join(c.closeErr, container.Close())
++		}
++	})
++	return c.closeErr
+diff --git a/internal/wa/snapshot_dependency_boundary_test.go b/internal/wa/snapshot_dependency_boundary_test.go
+index f4ff6dc..eae3f12 100644
+--- a/internal/wa/snapshot_dependency_boundary_test.go
++++ b/internal/wa/snapshot_dependency_boundary_test.go
+@@ -18 +18,2 @@ import (
+-// These are counterexamples for the pinned SDK, NOT snapshot safety tests.
++// The key-share regression tests one joined family; the node queue remains a
++// counterexample. Neither is an exhaustive snapshot safety test.
+@@ -72 +73 @@ func (s *snapshotProbeMetadata) ClearAppStateKeyUnavailable(context.Context, str
+-func TestSnapshotDependencyProbeKeyWriterOutlivesWrapperClose(t *testing.T) {
++func TestSnapshotDependencyProbeCloseJoinsKeyWriterAndMetadata(t *testing.T) {
+@@ -103 +104,5 @@ func TestSnapshotDependencyProbeKeyWriterOutlivesWrapperClose(t *testing.T) {
+-	snapshotProbeAwait(t, closed, "wrapper Close while key writer is blocked")
++	select {
++	case <-closed:
++		t.Fatal("wrapper Close returned before accepted key work completed")
++	case <-time.After(25 * time.Millisecond):
++	}
+@@ -110,2 +115,2 @@ func TestSnapshotDependencyProbeKeyWriterOutlivesWrapperClose(t *testing.T) {
+-	snapshotProbeAwait(t, keys.written, "write after wrapper Close returned")
+-	snapshotProbeAwait(t, metadata.cleared, "WACLI metadata write after wrapper Close returned")
++	snapshotProbeAwait(t, keys.written, "accepted write completes")
++	snapshotProbeAwait(t, metadata.cleared, "accepted WACLI metadata continuation")
+@@ -112,0 +118 @@ func TestSnapshotDependencyProbeKeyWriterOutlivesWrapperClose(t *testing.T) {
++	snapshotProbeAwait(t, closed, "wrapper close after accepted work")
+diff --git a/internal/wa/snapshot_shutdown_boundary_test.go b/internal/wa/snapshot_shutdown_boundary_test.go
+index 7637b56..b4d3233 100644
+--- a/internal/wa/snapshot_shutdown_boundary_test.go
++++ b/internal/wa/snapshot_shutdown_boundary_test.go
+@@ -5,0 +6 @@ import (
++	"errors"
+@@ -7 +7,0 @@ import (
+-	"strings"
+@@ -9,0 +10 @@ import (
++	"time"
+@@ -20,2 +21 @@ import (
+-// This adapter records a generic synthetic SQL effect, NOT session credentials
+-// or the whatsmeow session schema. Only the container's real Close is exercised.
++// Generic SQL effect only: no credentials or real session schema.
+@@ -32,4 +32 @@ func (s *snapshotShutdownKeys) PutAppStateSyncKey(ctx context.Context, _ []byte,
+-	write := func() error {
+-		_, err := s.db.ExecContext(ctx, "UPDATE synthetic_effect SET value=1")
+-		return err
+-	}
++	write := func() error { _, err := s.db.ExecContext(ctx, "UPDATE synthetic_effect SET value=1"); return err }
+@@ -51 +48,2 @@ type snapshotShutdownMetadata struct {
+-	result chan error
++	result  chan error
++	failure error
+@@ -55 +53,4 @@ func (s *snapshotShutdownMetadata) ClearAppStateKeyUnavailable(ctx context.Conte
+-	err := s.AppStateKeyStateStore.ClearAppStateKeyUnavailable(ctx, account, id)
++	err := s.failure
++	if err == nil {
++		err = s.AppStateKeyStateStore.ClearAppStateKeyUnavailable(ctx, account, id)
++	}
+@@ -60,4 +61,3 @@ func (s *snapshotShutdownMetadata) ClearAppStateKeyUnavailable(ctx context.Conte
+-// Passing means closing SQL is NOT a lossless accepted-work drain. The tests
+-// run real detached SDK workers, WACLI's key guard and real SQLite close/errors,
+-// but no connected client, paired account, real session schema or personal data.
+-func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
++// This joins one actual SDK family through the WACLI guard and SQL close order,
++// not all SDK workers, a connected account, or a complete held capture.
++func TestSnapshotShutdownProbeKeyShareDrainCompletesSQLAndMetadata(t *testing.T) {
+@@ -65,46 +65,4 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-		name := "accepted_session_effect_lost"
+-		if commitFirst {
+-			name = "committed_session_effect_metadata_unfinished"
+-		}
+-		t.Run(name, func(t *testing.T) {
+-			root := t.TempDir()
+-			sessionPath := filepath.Join(root, "synthetic-session.db")
+-			sessionDB, err := sql.Open("sqlite3", sessionPath)
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			t.Cleanup(func() { _ = sessionDB.Close() })
+-			if _, err := sessionDB.Exec("CREATE TABLE synthetic_effect(value INTEGER NOT NULL); INSERT INTO synthetic_effect VALUES(0)"); err != nil {
+-				t.Fatal(err)
+-			}
+-			appPath := filepath.Join(root, "synthetic-app.db")
+-			appDB, err := appstore.Open(appPath)
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			t.Cleanup(func() { _ = appDB.Close() })
+-			id := []byte("synthetic-id")
+-			if err := appDB.MarkAppStateKeyUnavailable(t.Context(), "synthetic", id); err != nil {
+-				t.Fatal(err)
+-			}
+-			keys := &snapshotShutdownKeys{db: sessionDB, commitFirst: commitFirst, entered: make(chan struct{}), release: make(chan struct{}), result: make(chan error, 1)}
+-			metadata := &snapshotShutdownMetadata{AppStateKeyStateStore: appDB, result: make(chan error, 1)}
+-			versions := &snapshotProbeVersions{remaining: len(appstate.AllPatchNames), done: make(chan struct{})}
+-			guard := &appStateKeyGuard{AppStateSyncKeyStore: keys, state: metadata, account: "synthetic"}
+-			cli := whatsmeow.NewClient(&store.Device{AppStateKeys: guard, AppState: versions}, nil)
+-			wrapper := &Client{client: cli, container: sqlstore.NewWithDB(sessionDB, "sqlite3", nil)}
+-			var once sync.Once
+-			release := func() { once.Do(func() { close(keys.release) }) }
+-			t.Cleanup(func() {
+-				release()
+-				wrapper.Close()
+-				snapshotProbeAwait(t, versions.done, "detached worker cleanup")
+-			})
+-			ctx, cancel := context.WithCancel(context.Background())
+-			cancel()
+-			info := &types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true, Sender: types.JID{Device: 1}}}
+-			msg := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{AppStateSyncKeyShare: &waE2E.AppStateSyncKeyShare{Keys: []*waE2E.AppStateSyncKey{{
+-				KeyID: &waE2E.AppStateSyncKeyId{KeyID: id}, KeyData: &waE2E.AppStateSyncKeyData{KeyData: []byte("synthetic-only")},
+-			}}}}}
+-			if !cli.DangerousInternals().HandleProtocolMessage(ctx, info, msg) {
+-				t.Fatal("synthetic work was not accepted")
++		for _, failMetadata := range []bool{false, true} {
++			name := "before-session-effect"
++			if commitFirst {
++				name = "after-session-effect"
+@@ -112,8 +70,2 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-			snapshotProbeAwait(t, keys.entered, "accepted dependency key operation")
+-			closed := make(chan struct{})
+-			go func() { wrapper.Close(); close(closed) }()
+-			snapshotProbeAwait(t, closed, "real session SQL close while producer is blocked")
+-			// Match App.Close's relative order: wrapper/container before app SQL.
+-			// This is not a full App.Close or connected-websocket integration test.
+-			if err := appDB.Close(); err != nil {
+-				t.Fatal(err)
++			if failMetadata {
++				name += "-metadata-error"
+@@ -121,6 +73,10 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-			release()
+-			snapshotProbeAwait(t, versions.done, "SDK continuation after failed persistence")
+-			keyErr := <-keys.result
+-			if commitFirst {
+-				if keyErr != nil {
+-					t.Fatalf("fixture did not commit its first effect: %v", keyErr)
++			t.Run(name, func(t *testing.T) {
++				root := t.TempDir()
++				sessionPath := filepath.Join(root, "synthetic-session.db")
++				sessionDB, err := sql.Open("sqlite3", sessionPath)
++				if err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { _ = sessionDB.Close() })
++				if _, err := sessionDB.Exec("CREATE TABLE synthetic_effect(value INTEGER NOT NULL); INSERT INTO synthetic_effect VALUES(0)"); err != nil {
++					t.Fatal(err)
+@@ -128,2 +84,4 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-				if err := <-metadata.result; err == nil || !strings.Contains(err.Error(), "database is closed") {
+-					t.Fatalf("expected closed app SQL to reject accepted continuation, got %v", err)
++				appPath := filepath.Join(root, "synthetic-app.db")
++				appDB, err := appstore.Open(appPath)
++				if err != nil {
++					t.Fatal(err)
+@@ -131,3 +89,4 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-			} else {
+-				if keyErr == nil || !strings.Contains(keyErr.Error(), "database is closed") {
+-					t.Fatalf("expected closed session SQL to reject accepted effect, got %v", keyErr)
++				t.Cleanup(func() { _ = appDB.Close() })
++				id := []byte("synthetic-id")
++				if err := appDB.MarkAppStateKeyUnavailable(t.Context(), "synthetic", id); err != nil {
++					t.Fatal(err)
+@@ -134,0 +94,26 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
++				keys := &snapshotShutdownKeys{db: sessionDB, commitFirst: commitFirst, entered: make(chan struct{}), release: make(chan struct{}), result: make(chan error, 1)}
++				metadata := &snapshotShutdownMetadata{AppStateKeyStateStore: appDB, result: make(chan error, 1)}
++				var expected error
++				if failMetadata {
++					expected = errors.New("synthetic metadata failure")
++					metadata.failure = expected
++				}
++				versions := &snapshotProbeVersions{remaining: len(appstate.AllPatchNames), done: make(chan struct{})}
++				guard := &appStateKeyGuard{AppStateSyncKeyStore: keys, state: metadata, account: "synthetic"}
++				cli := whatsmeow.NewClient(&store.Device{AppStateKeys: guard, AppState: versions}, nil)
++				wrapper := &Client{client: cli, container: sqlstore.NewWithDB(sessionDB, "sqlite3", nil)}
++				var once sync.Once
++				release := func() { once.Do(func() { close(keys.release) }) }
++				t.Cleanup(func() { release(); wrapper.Close() })
++				ctx, cancel := context.WithCancel(context.Background())
++				cancel()
++				info := &types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true, Sender: types.JID{Device: 1}}}
++				msg := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{AppStateSyncKeyShare: &waE2E.AppStateSyncKeyShare{Keys: []*waE2E.AppStateSyncKey{{
++					KeyID: &waE2E.AppStateSyncKeyId{KeyID: id}, KeyData: &waE2E.AppStateSyncKeyData{KeyData: []byte("synthetic-only")},
++				}}}}}
++				if !cli.DangerousInternals().HandleProtocolMessage(ctx, info, msg) {
++					t.Fatal("work was not accepted")
++				}
++				snapshotProbeAwait(t, keys.entered, "accepted key operation")
++				closed := make(chan error, 1)
++				go func() { closed <- wrapper.CloseWithError() }()
+@@ -136,3 +121,3 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-				case err := <-metadata.result:
+-					t.Fatalf("metadata unexpectedly attempted after session failure: %v", err)
+-				default:
++				case err := <-closed:
++					t.Fatalf("close returned before accepted work completed: %v", err)
++				case <-time.After(25 * time.Millisecond):
+@@ -140,20 +125,25 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-			}
+-			// Reopen only for verification after the fixture worker has finished.
+-			verify, err := sql.Open("sqlite3", sessionPath)
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			defer verify.Close()
+-			var effect int
+-			if err := verify.QueryRow("SELECT value FROM synthetic_effect").Scan(&effect); err != nil {
+-				t.Fatal(err)
+-			}
+-			want := 0
+-			if commitFirst {
+-				want = 1
+-			}
+-			if effect != want {
+-				t.Fatalf("synthetic session effect=%d, want %d", effect, want)
+-			}
+-			for _, path := range []string{sessionPath, appPath} {
+-				checkSQL, err := sql.Open("sqlite3", path)
++				release()
++				var closeErr error
++				select {
++				case closeErr = <-closed:
++				case <-time.After(5 * time.Second):
++					t.Fatal("close did not join released key work")
++				}
++				if !errors.Is(closeErr, expected) {
++					t.Fatalf("close error=%v, want %v", closeErr, expected)
++				}
++				if !errors.Is(wrapper.CloseWithError(), expected) {
++					t.Fatal("close did not retain its error")
++				}
++				if err := <-keys.result; err != nil {
++					t.Fatalf("accepted SQL effect failed: %v", err)
++				}
++				if err := <-metadata.result; !errors.Is(err, expected) {
++					t.Fatalf("metadata error=%v", err)
++				}
++				// Application SQL stays open until the session wrapper's accepted
++				// synchronous continuation has completed (or reported failure).
++				if err := appDB.Close(); err != nil {
++					t.Fatal(err)
++				}
++				verify, err := sql.Open("sqlite3", sessionPath)
+@@ -163,5 +153,4 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-				var integrity string
+-				err = checkSQL.QueryRow("PRAGMA integrity_check").Scan(&integrity)
+-				closeErr := checkSQL.Close()
+-				if err != nil || closeErr != nil || integrity != "ok" {
+-					t.Fatalf("fixture integrity=%q, query err=%v, close err=%v", integrity, err, closeErr)
++				defer verify.Close()
++				var effect int
++				if err := verify.QueryRow("SELECT value FROM synthetic_effect").Scan(&effect); err != nil || effect != 1 {
++					t.Fatalf("effect=%d, err=%v", effect, err)
+@@ -169,11 +158,22 @@ func TestSnapshotShutdownProbeStoreCloseIsNotAcceptedWorkDrain(t *testing.T) {
+-			}
+-			check, err := appstore.OpenReadOnly(appPath)
+-			if err != nil {
+-				t.Fatal(err)
+-			}
+-			defer check.Close()
+-			if unavailable, err := check.IsAppStateKeyUnavailable(t.Context(), "synthetic", id); err != nil || !unavailable {
+-				t.Fatalf("unfinished metadata marker=%v, err=%v", unavailable, err)
+-			}
+-			t.Logf("both SQL handles closed without draining accepted work: session effect=%d, unavailable marker retained", effect)
+-		})
++				check, err := appstore.OpenReadOnly(appPath)
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer check.Close()
++				if unavailable, err := check.IsAppStateKeyUnavailable(t.Context(), "synthetic", id); err != nil || unavailable != failMetadata {
++					t.Fatalf("unavailable=%v, err=%v", unavailable, err)
++				}
++				for _, path := range []string{sessionPath, appPath} {
++					checkSQL, err := sql.Open("sqlite3", path)
++					if err != nil {
++						t.Fatal(err)
++					}
++					var integrity string
++					err = checkSQL.QueryRow("PRAGMA integrity_check").Scan(&integrity)
++					closeErr := checkSQL.Close()
++					if err != nil || closeErr != nil || integrity != "ok" {
++						t.Fatalf("integrity=%q, err=%v, close=%v", integrity, err, closeErr)
++					}
++				}
++			})
++		}

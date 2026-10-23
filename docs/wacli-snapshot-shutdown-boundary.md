@@ -1,5 +1,7 @@
 # Shutdown alone cannot certify a WACLI snapshot
 
+Follow-up: the [runtime implementation and remaining held-capture gaps](wacli-snapshot-held-capture-audit.md) fix selected producer paths through coupled source patches. The counterexamples below describe the original unmodified audited versions; corresponding fixed-path tests are replaced by positive regressions in runtime patch `0005`. Capture is still disabled.
+
 **Capture remains disabled. Usable Linux restoration is still not implemented.** On the audited WACLI and whatsmeow versions, stopping the delegate listener and closing the client/databases does not establish a lossless application boundary. New synthetic tests reproduce rejected accepted work, an unfinished cross-store continuation, and an independent offline media writer. This change adds diagnostics and documentation only; it does not enable capture, change dependencies or alter runtime shutdown.
 
 The source versions remain WACLI [`5578d1b6892f50a8f2329b11a6b6e27a1a81f88b`](https://github.com/openclaw/wacli/tree/5578d1b6892f50a8f2329b11a6b6e27a1a81f88b) and whatsmeow `v0.0.0-20261017175727-b2b1e71d45e2`. Earlier [producer lifecycle evidence](wacli-snapshot-producer-lifecycle.md) and [delegate counterexamples](wacli-snapshot-writer-boundary.md) still apply.

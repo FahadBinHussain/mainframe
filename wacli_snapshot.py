@@ -27,6 +27,8 @@ def capture_status():
         'windows_validated': False, 'source_read': False,
         'activation': 'not-performed',
         'blockers': ['verified-all-writer-boundary-backend-unavailable',
+                     'dependency-exhaustive-causal-drain-unavailable',
+                     'media-root-exclusive-ownership-unavailable',
                      'approved-complete-input-membership-unverified',
                      'historical-producer-provenance-unverified',
                      'windows-capture-acceptance-run-required'],

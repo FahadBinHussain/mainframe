@@ -1,0 +1,416 @@
+diff --git a/appstate.go b/appstate.go
+index 60157c3..008417f 100644
+--- a/appstate.go
++++ b/appstate.go
+@@ -165 +165,7 @@ func (cli *Client) applyAppStatePatches(
+-			go cli.requestMissingAppStateKeys(context.WithoutCancel(ctx), patches)
++			childErr := goAppStateKeyShareChild(context.WithoutCancel(ctx), func(childCtx context.Context) error {
++				cli.requestMissingAppStateKeys(childCtx, patches)
++				// The decode error is already retained by the key-share parent.
++				// This registration additionally keeps SQL open for its request.
++				return nil
++			})
++			err = errors.Join(err, childErr)
+diff --git a/client.go b/client.go
+index dcbad5d..15b5aab 100644
+--- a/client.go
++++ b/client.go
+@@ -133,0 +134 @@ type Client struct {
++	appStateKeyShareDrain   *appStateKeyShareDrain
+@@ -301,0 +303 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
++		appStateKeyShareDrain:  newAppStateKeyShareDrain(),
+diff --git a/keyshare_drain.go b/keyshare_drain.go
+new file mode 100644
+index 0000000..71bc86b
+--- /dev/null
++++ b/keyshare_drain.go
+@@ -0,0 +1,155 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"sync"
++
++	"go.mau.fi/whatsmeow/proto/waE2E"
++)
++
++var (
++	errAppStateKeyShareSealed    = errors.New("app state key-share admission is sealed")
++	errAppStateKeyShareScopeDone = errors.New("app state key-share scope is finished")
++)
++
++type appStateKeyShareDrain struct {
++	mu        sync.Mutex
++	active    int
++	sealed    bool
++	done      chan struct{}
++	completed bool
++	err       error
++}
++
++type appStateKeyShareScope struct {
++	drain *appStateKeyShareDrain
++	done  bool // protected by drain.mu, including child admission
++}
++
++type appStateKeyShareScopeKey struct{}
++
++func newAppStateKeyShareDrain() *appStateKeyShareDrain {
++	return &appStateKeyShareDrain{done: make(chan struct{})}
++}
++
++func (d *appStateKeyShareDrain) admit() (*appStateKeyShareScope, error) {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if d.sealed {
++		return nil, errAppStateKeyShareSealed
++	}
++	d.active++
++	return &appStateKeyShareScope{drain: d}, nil
++}
++
++func (s *appStateKeyShareScope) child() (*appStateKeyShareScope, error) {
++	d := s.drain
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if s.done {
++		return nil, errAppStateKeyShareScopeDone
++	}
++	// Root sealing does not reject descendants of a live accepted operation.
++	// The parent is still counted while this registration is linearized.
++	d.active++
++	return &appStateKeyShareScope{drain: d}, nil
++}
++
++func (s *appStateKeyShareScope) finish(err error) {
++	d := s.drain
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	if s.done {
++		return
++	}
++	s.done = true
++	// One retained failure is sufficient to prevent a successful frontier;
++	// don't accumulate an unbounded error tree in a long-running client.
++	if d.err == nil && err != nil {
++		d.err = err
++	}
++	d.active--
++	d.completeLocked()
++}
++
++func (d *appStateKeyShareDrain) completeLocked() {
++	// Before sealing, zero workers is transient: another batch may be admitted.
++	if d.sealed && d.active == 0 && !d.completed {
++		d.completed = true
++		close(d.done)
++	}
++}
++
++func (d *appStateKeyShareDrain) drain(ctx context.Context) error {
++	if ctx == nil {
++		ctx = context.Background()
++	}
++	d.mu.Lock()
++	d.sealed = true
++	d.completeLocked()
++	done := d.done
++	d.mu.Unlock()
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	select {
++	case <-done:
++		if err := ctx.Err(); err != nil {
++			return err
++		}
++		d.mu.Lock()
++		defer d.mu.Unlock()
++		return d.err
++	case <-ctx.Done():
++		return ctx.Err()
++	}
++}
++
++func (cli *Client) launchAppStateSyncKeyShare(ctx context.Context, keys *waE2E.AppStateSyncKeyShare) error {
++	scope, err := cli.appStateKeyShareDrain.admit()
++	if err != nil {
++		cli.Log.Warnf("Rejected app state sync key share after drain began: %v", err)
++		return err
++	}
++	ctx = context.WithValue(context.WithoutCancel(ctx), appStateKeyShareScopeKey{}, scope)
++	go func() {
++		var workErr error
++		defer func() { scope.finish(workErr) }()
++		workErr = cli.handleAppStateSyncKeyShareError(ctx, keys)
++	}()
++	return nil
++}
++
++// goAppStateKeyShareChild retains a registered internal descendant when invoked
++// from the key-share fetch path. Outside that path, its existing detached launch
++// semantics are unchanged. Callback-created goroutines are not covered.
++func goAppStateKeyShareChild(ctx context.Context, fn func(context.Context) error) error {
++	parent, _ := ctx.Value(appStateKeyShareScopeKey{}).(*appStateKeyShareScope)
++	if parent == nil {
++		go func() { _ = fn(ctx) }()
++		return nil
++	}
++	child, err := parent.child()
++	if err != nil {
++		return err
++	}
++	ctx = context.WithValue(ctx, appStateKeyShareScopeKey{}, child)
++	go func() {
++		var workErr error
++		defer func() { child.finish(workErr) }()
++		workErr = fn(ctx)
++	}()
++	return nil
++}
++
++// DrainAppStateKeyShares permanently seals protocol key-share root admission and
++// joins accepted workers, their synchronous key-store/fetch continuations and
++// explicitly scoped internal missing-key requests. Errors are retained. A
++// canceled wait still seals admission; it never authorizes closing live stores.
++//
++// This is NOT an exhaustive client/capture drain: socket/reconnect, other roots,
++// and arbitrary event-handler-created work are not owned by this API.
++func (cli *Client) DrainAppStateKeyShares(ctx context.Context) error {
++	return cli.appStateKeyShareDrain.drain(ctx)
++}
+diff --git a/keyshare_drain_test.go b/keyshare_drain_test.go
+new file mode 100644
+index 0000000..9c387a6
+--- /dev/null
++++ b/keyshare_drain_test.go
+@@ -0,0 +1,183 @@
++package whatsmeow
++
++import (
++	"context"
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow/proto/waE2E"
++	"go.mau.fi/whatsmeow/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++func TestKeyShareDrainIdleAndCanceledWait(t *testing.T) {
++	for _, canceled := range []bool{false, true} {
++		d := newAppStateKeyShareDrain()
++		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++		defer cancel()
++		if canceled {
++			cancel()
++		}
++		err := d.drain(ctx)
++		if canceled && !errors.Is(err, context.Canceled) {
++			t.Fatalf("canceled idle drain=%v", err)
++		}
++		if !canceled && err != nil {
++			t.Fatal(err)
++		}
++		if _, err := d.admit(); !errors.Is(err, errAppStateKeyShareSealed) {
++			t.Fatalf("late admission=%v", err)
++		}
++		if err := d.drain(context.Background()); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++func TestKeyShareDrainRepeatedBatchesBeforeSeal(t *testing.T) {
++	d := newAppStateKeyShareDrain()
++	for range 10 {
++		scope, err := d.admit()
++		if err != nil {
++			t.Fatal(err)
++		}
++		scope.finish(nil)
++		scope.finish(nil) // release is idempotent
++		select {
++		case <-d.done:
++			t.Fatal("transient zero closed the drain")
++		default:
++		}
++	}
++	if err := d.drain(context.Background()); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestKeyShareDrainAcceptedDescendantsAndStickyErrors(t *testing.T) {
++	d := newAppStateKeyShareDrain()
++	parent, err := d.admit()
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx := context.WithValue(context.Background(), appStateKeyShareScopeKey{}, parent)
++	canceled, cancel := context.WithCancel(context.Background())
++	cancel()
++	if !errors.Is(d.drain(canceled), context.Canceled) {
++		t.Fatal("canceled seal succeeded")
++	}
++	entered, grandchildEntered, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	failure := errors.New("synthetic descendant persistence failure")
++	var releaseOnce sync.Once
++	unblock := func() { releaseOnce.Do(func() { close(release) }) }
++	t.Cleanup(unblock)
++	if err := goAppStateKeyShareChild(ctx, func(childCtx context.Context) error {
++		close(entered)
++		return goAppStateKeyShareChild(context.WithoutCancel(childCtx), func(context.Context) error {
++			close(grandchildEntered)
++			<-release
++			return failure
++		})
++	}); err != nil {
++		t.Fatal(err)
++	}
++	parent.finish(nil)
++	if err := goAppStateKeyShareChild(ctx, func(context.Context) error { t.Error("expired scope ran"); return nil }); !errors.Is(err, errAppStateKeyShareScopeDone) {
++		t.Fatalf("expired child registration=%v", err)
++	}
++	for _, ch := range []chan struct{}{entered, grandchildEntered} {
++		select {
++		case <-ch:
++		case <-time.After(time.Second):
++			t.Fatal("descendant did not start")
++		}
++	}
++	select {
++	case <-d.done:
++		t.Fatal("grandchild escaped drain")
++	default:
++	}
++	unblock()
++	if err := d.drain(context.Background()); !errors.Is(err, failure) {
++		t.Fatalf("drain lost error: %v", err)
++	}
++	if err := d.drain(context.Background()); !errors.Is(err, failure) {
++		t.Fatalf("error not sticky: %v", err)
++	}
++}
++
++func TestKeyShareDrainChildFinishRace(t *testing.T) {
++	for range 100 {
++		d := newAppStateKeyShareDrain()
++		parent, err := d.admit()
++		if err != nil {
++			t.Fatal(err)
++		}
++		children := make(chan *appStateKeyShareScope, 1)
++		go func() { child, _ := parent.child(); children <- child }()
++		parent.finish(nil)
++		if child := <-children; child != nil {
++			child.finish(nil)
++		}
++		if err := d.drain(context.Background()); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++type drainTestKeys struct {
++	store.AppStateSyncKeyStore
++	entered chan error
++	release chan struct{}
++	failure error
++}
++
++func (s *drainTestKeys) PutAppStateSyncKey(ctx context.Context, _ []byte, _ store.AppStateSyncKey) error {
++	s.entered <- ctx.Err()
++	<-s.release
++	return s.failure
++}
++
++type drainTestVersions struct{ store.AppStateStore }
++
++func (*drainTestVersions) GetAppStateVersion(context.Context, string) (uint64, [128]byte, error) {
++	return 1, [128]byte{}, nil
++}
++
++func TestKeyShareDrainActualProtocolAdmissionAndPersistenceError(t *testing.T) {
++	failure := errors.New("synthetic key-store failure")
++	keys := &drainTestKeys{entered: make(chan error, 1), release: make(chan struct{}), failure: failure}
++	cli := NewClient(&store.Device{AppStateKeys: keys, AppState: &drainTestVersions{}}, nil)
++	var once sync.Once
++	release := func() { once.Do(func() { close(keys.release) }) }
++	t.Cleanup(func() { release(); _ = cli.DrainAppStateKeyShares(context.Background()) })
++	info := &types.MessageInfo{MessageSource: types.MessageSource{IsFromMe: true, Sender: types.JID{Device: 1}}}
++	msg := &waE2E.Message{ProtocolMessage: &waE2E.ProtocolMessage{AppStateSyncKeyShare: &waE2E.AppStateSyncKeyShare{Keys: []*waE2E.AppStateSyncKey{{
++		KeyID: &waE2E.AppStateSyncKeyId{KeyID: []byte("synthetic")}, KeyData: &waE2E.AppStateSyncKeyData{KeyData: []byte("synthetic")},
++	}}}}}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if !cli.handleProtocolMessage(ctx, info, msg) {
++		t.Fatal("initial key share rejected")
++	}
++	select {
++	case err := <-keys.entered:
++		if err != nil {
++			t.Fatalf("accepted work was canceled: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("actual key-share worker did not start")
++	}
++	if !errors.Is(cli.DrainAppStateKeyShares(ctx), context.Canceled) {
++		t.Fatal("canceled wait succeeded")
++	}
++	if cli.handleProtocolMessage(context.Background(), info, msg) {
++		t.Fatal("sealed key share accepted")
++	}
++	release()
++	if err := cli.DrainAppStateKeyShares(context.Background()); !errors.Is(err, failure) {
++		t.Fatalf("drain lost persistence error: %v", err)
++	}
++}
+diff --git a/message.go b/message.go
+index 98e97f6..a0496d7 100644
+--- a/message.go
++++ b/message.go
+@@ -828 +828,4 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-	onlyResyncIfNotSynced := true
++	if err := cli.handleAppStateSyncKeyShareError(ctx, keys); err != nil {
++		cli.Log.Errorf("Failed to process app state sync key share: %v", err)
++	}
++}
+@@ -829,0 +833,3 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
++func (cli *Client) handleAppStateSyncKeyShareError(ctx context.Context, keys *waE2E.AppStateSyncKeyShare) error {
++	onlyResyncIfNotSynced := true
++	var processErr error
+@@ -835 +841,3 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-			cli.Log.Errorf("Failed to marshal fingerprint of app state sync key %X", key.GetKeyID().GetKeyID())
++			err = fmt.Errorf("marshal fingerprint for app state sync key %X: %w", key.GetKeyID().GetKeyID(), err)
++			cli.Log.Errorf("Failed to %v", err)
++			processErr = errors.Join(processErr, err)
+@@ -843,3 +851 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-			Data:        key.GetKeyData().GetKeyData(),
+-			Fingerprint: marshaledFingerprint,
+-			Timestamp:   key.GetKeyData().GetTimestamp(),
++			Data: key.GetKeyData().GetKeyData(), Fingerprint: marshaledFingerprint, Timestamp: key.GetKeyData().GetTimestamp(),
+@@ -848 +854,3 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-			cli.Log.Errorf("Failed to store app state sync key %X: %v", key.GetKeyID().GetKeyID(), err)
++			err = fmt.Errorf("store app state sync key %X: %w", key.GetKeyID().GetKeyID(), err)
++			cli.Log.Errorf("Failed to %v", err)
++			processErr = errors.Join(processErr, err)
+@@ -854 +861,0 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-
+@@ -858 +865,3 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-			cli.Log.Errorf("Failed to do initial fetch of app state %s: %v", name, err)
++			err = fmt.Errorf("initial fetch of app state %s: %w", name, err)
++			cli.Log.Errorf("Failed to %v", err)
++			processErr = errors.Join(processErr, err)
+@@ -860,0 +870 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
++	return processErr
+@@ -862 +871,0 @@ func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.A
+-
+@@ -924 +933,3 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
+-		go cli.handleAppStateSyncKeyShare(context.WithoutCancel(ctx), protoMsg.AppStateSyncKeyShare)
++		if err := cli.launchAppStateSyncKeyShare(ctx, protoMsg.AppStateSyncKeyShare); err != nil {
++			ok = false
++		}
