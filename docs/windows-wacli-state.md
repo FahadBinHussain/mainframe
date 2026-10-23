@@ -11,3 +11,13 @@ Both Windows backup routes (`backup.ps1` and the standalone `backup-secrets.ps1`
 This guard does not alter unrelated Windows backup behavior. It applies when the source itself is named `WhatsApp` or when an account-root source contains a direct `WhatsApp` child. A future implementation may permit this state only after it can prove a consistent snapshot.
 
 Windows restore applies the same fail-closed boundary to embedded `secrets/` entries and standalone archive entries, including custom manifests: any source path that is the reserved tree, below it, or contains it is skipped rather than partially merged.
+
+## Windows-to-Linux parity is still blocked
+
+The [exact parity review](linux-wacli-windows-parity.md) traces the broad
+accounts manifest, external/legacy stores that are not independently captured,
+missing producing-version and SQLite-consistency evidence, the separate WACLI
+and whatsmeow schemas, and absolute media paths that raw copying cannot repair.
+The normal Linux binary install proposal remains independent. No Windows store
+is opened, converted or activated by the new metadata-only assessment; copied
+bytes and a planned installation are never reported as a usable account.
