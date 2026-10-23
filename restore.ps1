@@ -235,6 +235,46 @@ function Import-AppRegistryFile {
     }
 }
 
+function Report-WacliPayloadPreserved {
+    param([Parameter(Mandatory)][string]$Path)
+    if ($script:WacliPayloadReported) { return }
+    $found = @()
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $found = @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName.Substring($Path.TrimEnd('\').Length).TrimStart('\/') -replace '\\','/' -match '(?i)(^|/)NativeState/wacli(/|$)' })
+    } elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $zip = $null
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            $found = @($zip.Entries | Where-Object { $_.FullName -replace '\\','/' -match '(?i)(^|/)NativeState/wacli(/|$)' })
+        } finally { if ($zip) { $zip.Dispose() } }
+    }
+    if ($found.Count -gt 0) {
+        $script:WacliPayloadReported = $true
+        Write-Warning 'Preserved WACLI NativeState/wacli payload detected; it is Linux-native state and is not activated or remapped into Windows accounts.'
+    }
+}
+
+function Test-WacliReservedArchiveSource {
+    param([Parameter(Mandatory)][string]$Source)
+
+    # A custom manifest may point at NativeState/wacli itself, a descendant,
+    # or a parent directory containing that tree.  Never selectively merge
+    # such a source into a Windows account target.
+    $normalized = $Source -replace '\\', '/'
+    if ($normalized -match '(?i)(^|/)NativeState/wacli(/|$)') {
+        return $true
+    }
+    if (Test-Path -LiteralPath $Source -PathType Container) {
+        $reserved = Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction Stop |
+            Where-Object { ($_.FullName -replace '\\', '/') -match '(?i)(^|/)NativeState/wacli(/|$)' } |
+            Select-Object -First 1
+        if ($reserved) { return $true }
+    }
+    return $false
+}
+
 function Restore-SecretItem {
     param(
         [Parameter(Mandatory)][PSCustomObject]$Item,
@@ -256,6 +296,11 @@ function Restore-SecretItem {
 
     if (-not (Test-Path -LiteralPath $source)) {
         Write-Warning "Secret entry not found in backup, skipping $($Item.Name): $archiveRelativePath"
+        return
+    }
+
+    if (Test-WacliReservedArchiveSource -Source $source) {
+        Write-Warning "Skipping secret item '$($Item.Name)': archive source contains reserved NativeState/wacli payload; it is preserved and never copied to a Windows target."
         return
     }
 
@@ -286,6 +331,7 @@ function Restore-ToolSecretsArchive {
     }
 
     if (Test-Path -LiteralPath $secretsDir) {
+        Report-WacliPayloadPreserved -Path $secretsDir
         Write-Host "Restoring secrets from embedded backup..."
         $manifest = Get-Content -LiteralPath $SecretsManifestPath -Raw | ConvertFrom-Json
         $manifestItems = @($manifest.items | Where-Object { -not $_.Disabled })
@@ -317,6 +363,7 @@ function Restore-ToolSecretsArchive {
 
     $standaloneZip = Join-Path $BackupRoot 'tool-secrets.zip'
     if (Test-Path -LiteralPath $standaloneZip) {
+        Report-WacliPayloadPreserved -Path $standaloneZip
         $script = Join-Path $PSScriptRoot 'restore-secrets.ps1'
         if (-not (Test-Path -LiteralPath $script)) {
             throw "Missing restore-secrets.ps1 next to restore.ps1: $script"
