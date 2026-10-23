@@ -435,7 +435,9 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                       "their toolchain/compiler execution is outside this dry-only review. "
                       "No executor or cached-global-binary/release "
                       "fallback; no live-home/PATH/cache changes or build/install; "
-                      "see docs/linux-wacli-build-review.md.")
+                      "see docs/linux-wacli-build-review.md. Normal installation need not be portable: "
+                      "explicit-root encrypted state preservation is separate in wacli_state.py "
+                      "(docs/linux-wacli-state.md); it does not enable this build action.")
         blockers.append(reason)
         actions.append(Action("go", path, cmd, version=version, tags=tags, status="blocked", reason=reason, source="go"))
     # Backup roots are data/control metadata, never implicit Python install inputs.

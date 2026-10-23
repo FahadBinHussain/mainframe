@@ -88,6 +88,8 @@ def classify(path, archive=''):
     """Return explicit category, reason, optional native-relative export target."""
     low = path.lower()
     p = PurePosixPath(path)
+    if low.startswith('nativestate/wacli/'):
+        return 'blocked', 'Sensitive native WACLI bytes retained without activation; use explicit wacli_state.py restore-unlocked into a NEW offline directory. Windows account profiles are not migrated.', None
     if low.endswith(('.zip', '.7z')):
         return 'opaque-archive', 'Nested archive preserved unopened; encrypted secrets require a separately authorized export/unlock workflow.', None
     if low.endswith(('.dpapi', '.enc')) or p.name == '.encryption_key':
