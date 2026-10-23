@@ -34,7 +34,17 @@ class Response:
     def close(self): pass
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux filesystem publication fixtures")
 class BitwardenTests(unittest.TestCase):
+    def setUp(self):
+        patches = [patch.object(bw.platform, "system", return_value="Linux"),
+                   patch.object(bw.platform, "machine", return_value="x86_64"),
+                   patch.object(bw.platform, "libc_ver", return_value=("glibc", "2.0")),
+                   patch.object(lp, "host_info", return_value=("ubuntu", "x86_64"))]
+        for item in patches:
+            item.start()
+        self.addCleanup(lambda: [item.stop() for item in reversed(patches)])
+
     def release(self, payload=None):
         payload = elf_fixture() if payload is None else payload
         return {"version": "1.2.3", "url": "https://github.com/bitwarden/clients/releases/download/cli-v1.2.3/bw-oss-linux-1.2.3.zip",
@@ -77,6 +87,23 @@ class BitwardenTests(unittest.TestCase):
         link = parent / "link"; link.symlink_to(existing, target_is_directory=True)
         with self.assertRaisesRegex(ValueError, "existing|symlink"):
             bw.validate_install(self.release(), link)
+
+    def test_foreign_owned_ancestor_is_refused(self):
+        real_fstat = os.fstat
+        calls = 0
+
+        def foreign_once(fd):
+            nonlocal calls
+            calls += 1
+            result = real_fstat(fd)
+            if calls == 2:
+                values = list(result)
+                values[4] = os.geteuid() + 1
+                return os.stat_result(values)
+            return result
+
+        with patch.object(bw.os, "fstat", side_effect=foreign_once), self.assertRaisesRegex(ValueError, "ancestor"):
+            bw.validate_install(self.release(), Path(tempfile.mkdtemp()) / "new")
 
     def test_success_publishes_executable_and_never_runs_it(self):
         raw = io.BytesIO()
