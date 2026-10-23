@@ -33,6 +33,10 @@
     {
       "path": "0008-owned-handle-admission.patch",
       "sha256": "1f2e810a3954d9600bad79c9f77ce6dedc8424efd090536fb07e69009fa7e4bc"
+    },
+    {
+      "path": "0009-owned-quote-and-handle-inventory.patch",
+      "sha256": "9ed7ad74d4fe16344611bb16f1222879924f0eab861c23f023b939c021a15ee3"
     }
   ],
   "whatsmeow": [

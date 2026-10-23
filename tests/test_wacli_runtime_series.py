@@ -91,6 +91,7 @@ class RuntimeSeriesTests(unittest.TestCase):
         manifest = json.loads((verifier.PATCHES / 'runtime-series.json').read_text())
         extensions = (
             ('wacli', '0008-owned-handle-admission.patch', 'wacli_test_pattern'),
+            ('wacli', '0009-owned-quote-and-handle-inventory.patch', 'wacli_test_pattern'),
             ('whatsmeow', 'whatsmeow/0004-callback-lineage.patch', 'dependency_test_pattern'),
         )
         for group, name, pattern in extensions:

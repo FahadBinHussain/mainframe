@@ -1,0 +1,2862 @@
+Subject: LOCAL SOURCE PROPOSAL: owned quote lookup and raw-handle inventory
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/cmd/wacli/owned_handle_inventory_test.go b/cmd/wacli/owned_handle_inventory_test.go
+new file mode 100644
+index 0000000..6bc3d91
+--- /dev/null
++++ b/cmd/wacli/owned_handle_inventory_test.go
+@@ -0,0 +1,186 @@
++package main
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"go/ast"
++	"go/format"
++	"go/parser"
++	"go/token"
++	"io/fs"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"testing"
++)
++
++// ownedHandleSite is deliberately syntactic: it does not attempt receiver type
++// resolution or infer whether a command's root scope protects a retained handle.
++type ownedHandleSite struct {
++	ID         string `json:"id"`
++	Path       string `json:"path"`
++	Function   string `json:"function"`
++	Accessor   string `json:"accessor"`
++	Line       int    `json:"line"`
++	Column     int    `json:"column"`
++	Expression string `json:"expression"`
++	Status     string `json:"status"`
++}
++
++func TestOwnedHandleInventory(t *testing.T) {
++	root := filepath.Join("..", "..")
++	got, err := scanOwnedHandleSites(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	fixturePath := filepath.Join("testdata", "owned_handle_inventory.json")
++	if os.Getenv("WACLI_UPDATE_OWNED_HANDLE_INVENTORY") == "1" {
++		data, err := json.MarshalIndent(got, "", "  ")
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(fixturePath, append(data, '\n'), 0o644); err != nil {
++			t.Fatal(err)
++		}
++		t.Logf("updated %s with %d sites", fixturePath, len(got))
++		return
++	}
++	data, err := os.ReadFile(fixturePath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var want []ownedHandleSite
++	if err := json.Unmarshal(data, &want); err != nil {
++		t.Fatal(err)
++	}
++	if len(want) != len(got) {
++		t.Fatalf("owned-handle inventory count changed: fixture=%d source=%d; review additions and deletions, then regenerate with WACLI_UPDATE_OWNED_HANDLE_INVENTORY=1", len(want), len(got))
++	}
++	for i := range want {
++		if want[i] != got[i] {
++			t.Errorf("owned-handle inventory drift at index %d:\nfixture: %+v\nsource:  %+v", i, want[i], got[i])
++		}
++		if want[i].Status != "raw_escape" {
++			t.Errorf("%s has unsupported status %q; every syntactic site remains unproven until separately reviewed", want[i].ID, want[i].Status)
++		}
++	}
++}
++
++func TestOwnedHandleInventorySyntheticSyntax(t *testing.T) {
++	root := t.TempDir()
++	source := `package probe
++var global = a.DB()
++func f() {
++    // a.WA() is not a call in the AST.
++    _ = "a.DB()"
++    _ = a.WA // method values remain an explicit inventory limitation
++    _ = a.DB()
++    go func() { a.WA(); a.DB() }()
++}
++`
++	if err := os.WriteFile(filepath.Join(root, "probe.go"), []byte(source), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, "ignored_test.go"), []byte("not valid Go"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	sites, err := scanOwnedHandleSites(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(sites) != 4 {
++		t.Fatalf("expected four real calls, got %+v", sites)
++	}
++	if sites[0].Function != "(file scope)" || sites[2].Function != "f" || sites[2].Accessor != "WA" {
++		t.Fatalf("lost file or nested callback ownership: %+v", sites)
++	}
++	if sites[1].ID == sites[3].ID || sites[3].ID != "probe.go:f:DB:occurrence-2" {
++		t.Fatalf("repeated accessors lost identity: %+v", sites)
++	}
++	for _, site := range sites {
++		if site.Status != "raw_escape" {
++			t.Fatalf("syntactic inventory approved ownership: %+v", site)
++		}
++	}
++}
++
++func scanOwnedHandleSites(root string) ([]ownedHandleSite, error) {
++	var sites []ownedHandleSite
++	fset := token.NewFileSet()
++	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
++		if walkErr != nil {
++			return walkErr
++		}
++		if entry.IsDir() {
++			if entry.Name() == ".git" || entry.Name() == "vendor" {
++				return filepath.SkipDir
++			}
++			return nil
++		}
++		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
++			return nil
++		}
++		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
++		if err != nil {
++			return err
++		}
++		rel, err := filepath.Rel(root, path)
++		if err != nil {
++			return err
++		}
++		rel = filepath.ToSlash(rel)
++		var funcs []*ast.FuncDecl
++		for _, decl := range file.Decls {
++			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
++				funcs = append(funcs, fn)
++			}
++		}
++		ast.Inspect(file, func(node ast.Node) bool {
++			call, ok := node.(*ast.CallExpr)
++			if !ok || len(call.Args) != 0 {
++				return true
++			}
++			sel, ok := call.Fun.(*ast.SelectorExpr)
++			if !ok || (sel.Sel.Name != "DB" && sel.Sel.Name != "WA") {
++				return true
++			}
++			fn := "(file scope)"
++			for _, candidate := range funcs {
++				if candidate.Pos() <= call.Pos() && call.End() <= candidate.End() {
++					fn = candidate.Name.Name
++					break
++				}
++			}
++			var expr bytes.Buffer
++			err := format.Node(&expr, fset, call)
++			if err != nil {
++				return true
++			}
++			pos := fset.Position(call.Pos())
++			sites = append(sites, ownedHandleSite{Path: rel, Function: fn, Accessor: sel.Sel.Name, Line: pos.Line, Column: pos.Column, Expression: expr.String(), Status: "raw_escape"})
++			return true
++		})
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	sort.Slice(sites, func(i, j int) bool {
++		if sites[i].Path != sites[j].Path {
++			return sites[i].Path < sites[j].Path
++		}
++		if sites[i].Line != sites[j].Line {
++			return sites[i].Line < sites[j].Line
++		}
++		return sites[i].Column < sites[j].Column
++	})
++	occurrence := make(map[string]int)
++	for i := range sites {
++		key := sites[i].Path + ":" + sites[i].Function + ":" + sites[i].Accessor
++		occurrence[key]++
++		sites[i].ID = fmt.Sprintf("%s:%s:%s:occurrence-%d", sites[i].Path, sites[i].Function, sites[i].Accessor, occurrence[key])
++	}
++	return sites, nil
++}
+diff --git a/cmd/wacli/owned_quote_route_test.go b/cmd/wacli/owned_quote_route_test.go
+new file mode 100644
+index 0000000..caa7fed
+--- /dev/null
++++ b/cmd/wacli/owned_quote_route_test.go
+@@ -0,0 +1,101 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/openclaw/wacli/internal/app"
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++// A zero OwnedWA deliberately has no client: any attempted client invocation
++// panics. Revocation must be reported by OwnedDB before the client can be used.
++// Raw accessors panic independently, catching accidental production fallback.
++type ownedQuoteRoute struct{ owner *app.App }
++
++func (*ownedQuoteRoute) WA() app.WAClient                              { panic("raw WA accessor reached") }
++func (*ownedQuoteRoute) DB() *store.DB                                 { panic("raw DB accessor reached") }
++func (*ownedQuoteRoute) OwnedWA(context.Context) (*app.OwnedWA, error) { return &app.OwnedWA{}, nil }
++func (r *ownedQuoteRoute) OwnedDB(ctx context.Context) (*app.OwnedDB, error) {
++	return r.owner.OwnedDB(ctx)
++}
++
++func TestOwnedQuoteFileRouteRefusesWithoutRawOrClientEffects(t *testing.T) {
++	for _, mode := range []string{"finished", "missing", "foreign", "canceled", "sealed"} {
++		t.Run(mode, func(t *testing.T) {
++			a, err := app.New(app.Options{StoreDir: t.TempDir()})
++			if err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(a.Close)
++			ctx, finish, err := a.BeginScopedOperation(context.Background())
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer finish(nil)
++			use := ctx
++			switch mode {
++			case "finished":
++				finish(nil)
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &app.App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(ctx)
++				cancel()
++			case "sealed":
++				finish(nil)
++				if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, app.ErrDrainCoverageIncomplete) {
++					t.Fatalf("seal: %v %v", held, err)
++				}
++			}
++			// Missing file is intentional: admission must refuse even before reading it.
++			_, err = sendFile(use, &ownedQuoteRoute{owner: a}, types.JID{User: "synthetic", Server: types.DefaultUserServer}, "not-opened", sendFileOptions{replyTo: "synthetic-quote"})
++			if !errors.Is(err, app.ErrHandleRevoked) {
++				t.Fatalf("owned route failed to refuse before effects: %v", err)
++			}
++		})
++	}
++}
++
++// Each partial adapter panics if any accessor is invoked: facet completeness
++// must be checked before either owned admission or raw fallback is attempted.
++type ownedQuotePartialWA struct{}
++
++func (ownedQuotePartialWA) WA() app.WAClient { panic("raw WA reached") }
++func (ownedQuotePartialWA) DB() *store.DB    { panic("raw DB reached") }
++func (ownedQuotePartialWA) OwnedWA(context.Context) (*app.OwnedWA, error) {
++	panic("partial OwnedWA reached")
++}
++
++type ownedQuotePartialDB struct{}
++
++func (ownedQuotePartialDB) WA() app.WAClient { panic("raw WA reached") }
++func (ownedQuotePartialDB) DB() *store.DB    { panic("raw DB reached") }
++func (ownedQuotePartialDB) OwnedDB(context.Context) (*app.OwnedDB, error) {
++	panic("partial OwnedDB reached")
++}
++
++func TestOwnedQuotePartialFacadesRefuseBeforeEffects(t *testing.T) {
++	for _, a := range []interface {
++		WA() app.WAClient
++		DB() *store.DB
++	}{ownedQuotePartialWA{}, ownedQuotePartialDB{}} {
++		if _, err := sendFile(context.Background(), a, types.JID{}, "not-opened", sendFileOptions{replyTo: "quote"}); !errors.Is(err, app.ErrHandleRevoked) {
++			t.Fatalf("file mixed facet: %v", err)
++		}
++		if _, err := sendSticker(context.Background(), a, types.JID{}, "not-opened", sendStickerOptions{replyTo: "quote"}); !errors.Is(err, app.ErrHandleRevoked) {
++			t.Fatalf("sticker mixed facet: %v", err)
++		}
++	}
++}
+diff --git a/cmd/wacli/send.go b/cmd/wacli/send.go
+index c8d7441..06f0a4d 100644
+--- a/cmd/wacli/send.go
++++ b/cmd/wacli/send.go
+@@ -302 +302 @@ func sendTextMessageWithSender(ctx context.Context, sender textMessageSender, db
+-	reply, err := buildReplyContextInfo(ctx, sender, db, to, replyTo, replyToSender)
++	reply, err := buildReplyContextInfo(ctx, sender, rawReplyMessageLookup{db: db}, to, replyTo, replyToSender)
+@@ -360 +360 @@ func isSelfTextRecipient(sender textMessageSender, to types.JID) bool {
+-func textReplySelfJID(ctx context.Context, sender textMessageSender, db *store.DB, chat, aliasChat types.JID, replyTo, replyToSender string) (string, error) {
++func textReplySelfJID(ctx context.Context, sender textMessageSender, lookup replyMessageLookup, chat, aliasChat types.JID, replyTo, replyToSender string) (string, error) {
+@@ -366 +366 @@ func textReplySelfJID(ctx context.Context, sender textMessageSender, db *store.D
+-	quoted, err := getQuotedMessage(db, chat, aliasChat, replyTo)
++	quoted, err := getQuotedMessage(ctx, lookup, chat, aliasChat, replyTo)
+@@ -585,2 +585,22 @@ func attachLinkPreview(msg *waProto.ExtendedTextMessage, preview *linkpreview.Pr
+-func getQuotedMessage(db *store.DB, chat, aliasChat types.JID, replyTo string) (store.Message, error) {
+-	quoted, err := db.GetMessage(chat.String(), replyTo)
++type replyMessageLookup interface {
++	GetMessage(context.Context, string, string) (store.Message, error)
++}
++
++type rawReplyMessageLookup struct {
++	db *store.DB
++}
++
++func (r rawReplyMessageLookup) GetMessage(_ context.Context, chatJID, msgID string) (store.Message, error) {
++	return r.db.GetMessage(chatJID, msgID)
++}
++
++func (r rawReplyMessageLookup) GetMediaDownloadInfo(_ context.Context, chatJID, msgID string) (store.MediaDownloadInfo, error) {
++	return r.db.GetMediaDownloadInfo(chatJID, msgID)
++}
++
++type replyMediaLookup interface {
++	GetMediaDownloadInfo(context.Context, string, string) (store.MediaDownloadInfo, error)
++}
++
++func getQuotedMessage(ctx context.Context, lookup replyMessageLookup, chat, aliasChat types.JID, replyTo string) (store.Message, error) {
++	quoted, err := lookup.GetMessage(ctx, chat.String(), replyTo)
+@@ -590 +610 @@ func getQuotedMessage(db *store.DB, chat, aliasChat types.JID, replyTo string) (
+-	return db.GetMessage(aliasChat.String(), replyTo)
++	return lookup.GetMessage(ctx, aliasChat.String(), replyTo)
+@@ -608 +628 @@ func replyLookupAlias(ctx context.Context, sender textMessageSender, to types.JI
+-func buildReplyContextInfo(ctx context.Context, sender textMessageSender, db *store.DB, chat types.JID, replyTo, replyToSender string) (*waProto.ContextInfo, error) {
++func buildReplyContextInfo(ctx context.Context, sender textMessageSender, lookup replyMessageLookup, chat types.JID, replyTo, replyToSender string) (*waProto.ContextInfo, error) {
+@@ -613 +633 @@ func buildReplyContextInfo(ctx context.Context, sender textMessageSender, db *st
+-	selfJID, err := textReplySelfJID(ctx, sender, db, chat, aliasChat, replyTo, replyToSender)
++	selfJID, err := textReplySelfJID(ctx, sender, lookup, chat, aliasChat, replyTo, replyToSender)
+@@ -617 +637 @@ func buildReplyContextInfo(ctx context.Context, sender textMessageSender, db *st
+-	return buildTextReplyContextInfo(db, chat, aliasChat, replyTo, replyToSender, selfJID)
++	return buildTextReplyContextInfo(ctx, lookup, chat, aliasChat, replyTo, replyToSender, selfJID)
+@@ -620 +640 @@ func buildReplyContextInfo(ctx context.Context, sender textMessageSender, db *st
+-func buildTextReplyContextInfo(db *store.DB, chat, aliasChat types.JID, replyTo, replyToSender, selfJID string) (*waProto.ContextInfo, error) {
++func buildTextReplyContextInfo(ctx context.Context, lookup replyMessageLookup, chat, aliasChat types.JID, replyTo, replyToSender, selfJID string) (*waProto.ContextInfo, error) {
+@@ -626 +646 @@ func buildTextReplyContextInfo(db *store.DB, chat, aliasChat types.JID, replyTo,
+-	quoted, err := getQuotedMessage(db, chat, aliasChat, replyTo)
++	quoted, err := getQuotedMessage(ctx, lookup, chat, aliasChat, replyTo)
+@@ -643 +663 @@ func buildTextReplyContextInfo(db *store.DB, chat, aliasChat types.JID, replyTo,
+-	quotedMessage, err := storedQuotedMessage(db, quoted)
++	quotedMessage, err := storedQuotedMessage(ctx, lookup, quoted)
+@@ -659 +679 @@ func buildTextReplyContextInfo(db *store.DB, chat, aliasChat types.JID, replyTo,
+-func storedQuotedMessage(db *store.DB, msg store.Message) (*waProto.Message, error) {
++func storedQuotedMessage(ctx context.Context, lookup replyMessageLookup, msg store.Message) (*waProto.Message, error) {
+@@ -670 +690,5 @@ func storedQuotedMessage(db *store.DB, msg store.Message) (*waProto.Message, err
+-		mediaInfo, err := db.GetMediaDownloadInfo(msg.ChatJID, msg.MsgID)
++		mediaLookup, ok := lookup.(replyMediaLookup)
++		if !ok {
++			return nil, fmt.Errorf("media quote lookup is unavailable")
++		}
++		mediaInfo, err := mediaLookup.GetMediaDownloadInfo(ctx, msg.ChatJID, msg.MsgID)
+diff --git a/cmd/wacli/send_file.go b/cmd/wacli/send_file.go
+index 4584cda..e1666dd 100644
+--- a/cmd/wacli/send_file.go
++++ b/cmd/wacli/send_file.go
+@@ -69,0 +70,15 @@ type sendFileOutcome struct {
++// Never mix owned client admission with an unguarded database (or vice versa).
++// Legacy callers without either facet remain explicitly outside this contract.
++func validateOwnedSendFacets(a any) error {
++	_, client := a.(interface {
++		OwnedWA(context.Context) (*app.OwnedWA, error)
++	})
++	_, db := a.(interface {
++		OwnedDB(context.Context) (*app.OwnedDB, error)
++	})
++	if client != db {
++		return fmt.Errorf("incomplete owned send facade: %w", app.ErrHandleRevoked)
++	}
++	return nil
++}
++
+@@ -73,0 +89,3 @@ func sendFile(ctx context.Context, a interface {
++	if err := validateOwnedSendFacets(a); err != nil {
++		return sendFileOutcome{}, err
++	}
+@@ -80 +98 @@ func sendFile(ctx context.Context, a interface {
+-	} = a.WA()
++	}
+@@ -88,0 +107,2 @@ func sendFile(ctx context.Context, a interface {
++	} else {
++		client = a.WA()
+@@ -90,3 +110,4 @@ func sendFile(ctx context.Context, a interface {
+-	upsertChat := func(jid, kind, name string, at time.Time) error { return a.DB().UpsertChat(jid, kind, name, at) }
+-	upsertMessage := func(p store.UpsertMessageParams) error { return a.DB().UpsertMessage(p) }
+-	upsertStatus := func(p store.UpsertStatusMessageParams) error { return a.DB().UpsertStatusMessage(p) }
++	var upsertChat func(string, string, string, time.Time) error
++	var upsertMessage func(store.UpsertMessageParams) error
++	var upsertStatus func(store.UpsertStatusMessageParams) error
++	var replyLookup replyMessageLookup
+@@ -102,0 +124,9 @@ func sendFile(ctx context.Context, a interface {
++		replyLookup = db
++	} else {
++		// Raw access is retained only for lightweight legacy doubles and callers
++		// that have not yet adopted the owned facet.
++		rawDB := a.DB()
++		upsertChat = func(jid, kind, name string, at time.Time) error { return rawDB.UpsertChat(jid, kind, name, at) }
++		upsertMessage = func(p store.UpsertMessageParams) error { return rawDB.UpsertMessage(p) }
++		upsertStatus = func(p store.UpsertStatusMessageParams) error { return rawDB.UpsertStatusMessage(p) }
++		replyLookup = rawReplyMessageLookup{db: rawDB}
+@@ -140 +170 @@ func sendFile(ctx context.Context, a interface {
+-		replyContext, err = buildReplyContextInfo(ctx, client, a.DB(), to, opts.replyTo, opts.replyToSender)
++		replyContext, err = buildReplyContextInfo(ctx, client, replyLookup, to, opts.replyTo, opts.replyToSender)
+diff --git a/cmd/wacli/send_sticker.go b/cmd/wacli/send_sticker.go
+index b0be542..e64a567 100644
+--- a/cmd/wacli/send_sticker.go
++++ b/cmd/wacli/send_sticker.go
+@@ -43,0 +44,3 @@ func sendSticker(ctx context.Context, a interface {
++	if err := validateOwnedSendFacets(a); err != nil {
++		return sendFileOutcome{}, err
++	}
+@@ -53,2 +56,37 @@ func sendSticker(ctx context.Context, a interface {
+-	// Quote before uploading, as file sends do.
+-	replyContext, err := buildReplyContextInfo(ctx, a.WA(), a.DB(), to, opts.replyTo, opts.replyToSender)
++	var client interface {
++		textMessageSender
++		ResolveChatName(context.Context, types.JID, string) string
++		Upload(context.Context, []byte, whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
++		SendProtoMessage(context.Context, types.JID, *waProto.Message) (types.MessageID, error)
++	}
++	if owned, ok := any(a).(interface {
++		OwnedWA(context.Context) (*app.OwnedWA, error)
++	}); ok {
++		ownedWA, err := owned.OwnedWA(ctx)
++		if err != nil {
++			return sendFileOutcome{}, err
++		}
++		client = ownedWA
++	} else {
++		client = a.WA()
++	}
++	var replyLookup replyMessageLookup
++	var upsertChat func(string, string, string, time.Time) error
++	var upsertMessage func(store.UpsertMessageParams) error
++	if owned, ok := any(a).(interface {
++		OwnedDB(context.Context) (*app.OwnedDB, error)
++	}); ok {
++		db, err := owned.OwnedDB(ctx)
++		if err != nil {
++			return sendFileOutcome{}, err
++		}
++		replyLookup = db
++		upsertChat = func(jid, kind, name string, at time.Time) error { return db.UpsertChat(ctx, jid, kind, name, at) }
++		upsertMessage = func(p store.UpsertMessageParams) error { return db.UpsertMessage(ctx, p) }
++	} else {
++		rawDB := a.DB()
++		replyLookup = rawReplyMessageLookup{db: rawDB}
++		upsertChat = func(jid, kind, name string, at time.Time) error { return rawDB.UpsertChat(jid, kind, name, at) }
++		upsertMessage = func(p store.UpsertMessageParams) error { return rawDB.UpsertMessage(p) }
++	}
++	replyContext, err := buildReplyContextInfo(ctx, client, replyLookup, to, opts.replyTo, opts.replyToSender)
+@@ -62 +100 @@ func sendSticker(ctx context.Context, a interface {
+-	up, err := a.WA().Upload(ctx, data, uploadType)
++	up, err := client.Upload(ctx, data, uploadType)
+@@ -68 +106 @@ func sendSticker(ctx context.Context, a interface {
+-	id, err := a.WA().SendProtoMessage(ctx, to, msg)
++	id, err := client.SendProtoMessage(ctx, to, msg)
+@@ -75 +113 @@ func sendSticker(ctx context.Context, a interface {
+-	chatName := a.WA().ResolveChatName(ctx, to, "")
++	chatName := client.ResolveChatName(ctx, to, "")
+@@ -77 +115 @@ func sendSticker(ctx context.Context, a interface {
+-	if err := a.DB().UpsertChat(to.String(), chatKindFromJID(to), chatName, now); err != nil {
++	if err := upsertChat(to.String(), chatKindFromJID(to), chatName, now); err != nil {
+@@ -80 +118 @@ func sendSticker(ctx context.Context, a interface {
+-	if err := a.DB().UpsertMessage(store.UpsertMessageParams{
++	if err := upsertMessage(store.UpsertMessageParams{
+diff --git a/cmd/wacli/send_test.go b/cmd/wacli/send_test.go
+index 0be77e5..88eed4d 100644
+--- a/cmd/wacli/send_test.go
++++ b/cmd/wacli/send_test.go
+@@ -443 +443 @@ func TestBuildTextReplyContextInfo(t *testing.T) {
+-			got, err := buildTextReplyContextInfo(db, tc.chat, types.EmptyJID, "quoted", "", self)
++			got, err := buildTextReplyContextInfo(context.Background(), rawReplyMessageLookup{db: db}, tc.chat, types.EmptyJID, "quoted", "", self)
+@@ -1112 +1112 @@ func TestBuildTextMessageCombinesReplyAndMentions(t *testing.T) {
+-	reply, err := buildReplyContextInfo(context.Background(), &recordingTextSender{}, db, chat, "quoted", "+15557654321")
++	reply, err := buildReplyContextInfo(context.Background(), &recordingTextSender{}, rawReplyMessageLookup{db: db}, chat, "quoted", "+15557654321")
+@@ -1197 +1197 @@ func TestBuildTextReplyContextInfoFindsQuoteUnderChatAlias(t *testing.T) {
+-			if _, err := buildTextReplyContextInfo(db, tc.addressed, types.EmptyJID, "quoted", "", ""); err == nil {
++			if _, err := buildTextReplyContextInfo(context.Background(), rawReplyMessageLookup{db: db}, tc.addressed, types.EmptyJID, "quoted", "", ""); err == nil {
+@@ -1201 +1201 @@ func TestBuildTextReplyContextInfoFindsQuoteUnderChatAlias(t *testing.T) {
+-			got, err := buildTextReplyContextInfo(db, tc.addressed, tc.storedIn, "quoted", "", "")
++			got, err := buildTextReplyContextInfo(context.Background(), rawReplyMessageLookup{db: db}, tc.addressed, tc.storedIn, "quoted", "", "")
+diff --git a/cmd/wacli/testdata/owned_handle_inventory.json b/cmd/wacli/testdata/owned_handle_inventory.json
+new file mode 100644
+index 0000000..2294c60
+--- /dev/null
++++ b/cmd/wacli/testdata/owned_handle_inventory.json
+@@ -0,0 +1,2122 @@
++[
++  {
++    "id": "cmd/wacli/auth.go:newAuthStatusCmd:WA:occurrence-1",
++    "path": "cmd/wacli/auth.go",
++    "function": "newAuthStatusCmd",
++    "accessor": "WA",
++    "line": 281,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/auth.go:newAuthStatusCmd:WA:occurrence-2",
++    "path": "cmd/wacli/auth.go",
++    "function": "newAuthStatusCmd",
++    "accessor": "WA",
++    "line": 289,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/auth.go:newAuthLogoutCmd:WA:occurrence-1",
++    "path": "cmd/wacli/auth.go",
++    "function": "newAuthLogoutCmd",
++    "accessor": "WA",
++    "line": 356,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/calls.go:newCallsListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/calls.go",
++    "function": "newCallsListCmd",
++    "accessor": "DB",
++    "line": 66,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsListCmd:WA:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsListCmd",
++    "accessor": "WA",
++    "line": 52,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsListCmd",
++    "accessor": "DB",
++    "line": 57,
++    "column": 36,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsInfoCmd:WA:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsInfoCmd",
++    "accessor": "WA",
++    "line": 117,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsInfoCmd:DB:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsInfoCmd",
++    "accessor": "DB",
++    "line": 125,
++    "column": 36,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsJoinCmd:WA:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsJoinCmd",
++    "accessor": "WA",
++    "line": 178,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsJoinCmd:WA:occurrence-2",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsJoinCmd",
++    "accessor": "WA",
++    "line": 185,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsJoinCmd:DB:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsJoinCmd",
++    "accessor": "DB",
++    "line": 189,
++    "column": 36,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/channels.go:newChannelsLeaveCmd:WA:occurrence-1",
++    "path": "cmd/wacli/channels.go",
++    "function": "newChannelsLeaveCmd",
++    "accessor": "WA",
++    "line": 236,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats.go:newChatsListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/chats.go",
++    "function": "newChatsListCmd",
++    "accessor": "DB",
++    "line": 81,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats.go:getChatForDisplay:DB:occurrence-1",
++    "path": "cmd/wacli/chats.go",
++    "function": "getChatForDisplay",
++    "accessor": "DB",
++    "line": 253,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats.go:getChatForDisplay:DB:occurrence-2",
++    "path": "cmd/wacli/chats.go",
++    "function": "getChatForDisplay",
++    "accessor": "DB",
++    "line": 266,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_cleanup.go:newChatsCleanupCmd:DB:occurrence-1",
++    "path": "cmd/wacli/chats_cleanup.go",
++    "function": "newChatsCleanupCmd",
++    "accessor": "DB",
++    "line": 49,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_cleanup.go:newChatsCleanupCmd:DB:occurrence-2",
++    "path": "cmd/wacli/chats_cleanup.go",
++    "function": "newChatsCleanupCmd",
++    "accessor": "DB",
++    "line": 93,
++    "column": 20,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_cleanup.go:newChatsCleanupCmd:DB:occurrence-3",
++    "path": "cmd/wacli/chats_cleanup.go",
++    "function": "newChatsCleanupCmd",
++    "accessor": "DB",
++    "line": 94,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_cleanup.go:cleanupSingleChat:DB:occurrence-1",
++    "path": "cmd/wacli/chats_cleanup.go",
++    "function": "cleanupSingleChat",
++    "accessor": "DB",
++    "line": 127,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_cleanup.go:cleanupSingleChat:DB:occurrence-2",
++    "path": "cmd/wacli/chats_cleanup.go",
++    "function": "cleanupSingleChat",
++    "accessor": "DB",
++    "line": 132,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_cleanup.go:cleanupSingleChat:DB:occurrence-3",
++    "path": "cmd/wacli/chats_cleanup.go",
++    "function": "cleanupSingleChat",
++    "accessor": "DB",
++    "line": 166,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/chats_state.go:runChatState:WA:occurrence-1",
++    "path": "cmd/wacli/chats_state.go",
++    "function": "runChatState",
++    "accessor": "WA",
++    "line": 243,
++    "column": 3,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contact_read.go:searchContactsForDisplay:DB:occurrence-1",
++    "path": "cmd/wacli/contact_read.go",
++    "function": "searchContactsForDisplay",
++    "accessor": "DB",
++    "line": 32,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contact_read.go:getContactForDisplay:DB:occurrence-1",
++    "path": "cmd/wacli/contact_read.go",
++    "function": "getContactForDisplay",
++    "accessor": "DB",
++    "line": 90,
++    "column": 19,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contact_read.go:contactsForDisplay:DB:occurrence-1",
++    "path": "cmd/wacli/contact_read.go",
++    "function": "contactsForDisplay",
++    "accessor": "DB",
++    "line": 158,
++    "column": 19,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contact_read.go:contactsForDisplay:DB:occurrence-2",
++    "path": "cmd/wacli/contact_read.go",
++    "function": "contactsForDisplay",
++    "accessor": "DB",
++    "line": 162,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts.go:newContactsRefreshCmd:WA:occurrence-1",
++    "path": "cmd/wacli/contacts.go",
++    "function": "newContactsRefreshCmd",
++    "accessor": "WA",
++    "line": 148,
++    "column": 15,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts.go:newContactsRefreshCmd:DB:occurrence-1",
++    "path": "cmd/wacli/contacts.go",
++    "function": "newContactsRefreshCmd",
++    "accessor": "DB",
++    "line": 156,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts.go:newContactsAliasCmd:DB:occurrence-1",
++    "path": "cmd/wacli/contacts.go",
++    "function": "newContactsAliasCmd",
++    "accessor": "DB",
++    "line": 207,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts.go:newContactsAliasCmd:DB:occurrence-2",
++    "path": "cmd/wacli/contacts.go",
++    "function": "newContactsAliasCmd",
++    "accessor": "DB",
++    "line": 239,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts.go:newContactsTagsCmd:DB:occurrence-1",
++    "path": "cmd/wacli/contacts.go",
++    "function": "newContactsTagsCmd",
++    "accessor": "DB",
++    "line": 283,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts.go:newContactsTagsCmd:DB:occurrence-2",
++    "path": "cmd/wacli/contacts.go",
++    "function": "newContactsTagsCmd",
++    "accessor": "DB",
++    "line": 316,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts_check.go:runContactsCheck:WA:occurrence-1",
++    "path": "cmd/wacli/contacts_check.go",
++    "function": "runContactsCheck",
++    "accessor": "WA",
++    "line": 117,
++    "column": 42,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts_import_system.go:newContactsImportSystemCmd:DB:occurrence-1",
++    "path": "cmd/wacli/contacts_import_system.go",
++    "function": "newContactsImportSystemCmd",
++    "accessor": "DB",
++    "line": 55,
++    "column": 35,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts_import_system.go:newContactsImportSystemCmd:DB:occurrence-2",
++    "path": "cmd/wacli/contacts_import_system.go",
++    "function": "newContactsImportSystemCmd",
++    "accessor": "DB",
++    "line": 63,
++    "column": 26,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts_import_system.go:newContactsImportSystemCmd:DB:occurrence-3",
++    "path": "cmd/wacli/contacts_import_system.go",
++    "function": "newContactsImportSystemCmd",
++    "accessor": "DB",
++    "line": 88,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/contacts_save.go:runContactsSave:WA:occurrence-1",
++    "path": "cmd/wacli/contacts_save.go",
++    "function": "runContactsSave",
++    "accessor": "WA",
++    "line": 100,
++    "column": 3,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/doctor.go:newDoctorCmd:DB:occurrence-1",
++    "path": "cmd/wacli/doctor.go",
++    "function": "newDoctorCmd",
++    "accessor": "DB",
++    "line": 198,
++    "column": 11,
++    "expression": "appInstance.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/doctor.go:newDoctorCmd:WA:occurrence-1",
++    "path": "cmd/wacli/doctor.go",
++    "function": "newDoctorCmd",
++    "accessor": "WA",
++    "line": 216,
++    "column": 15,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/doctor.go:newDoctorCmd:WA:occurrence-2",
++    "path": "cmd/wacli/doctor.go",
++    "function": "newDoctorCmd",
++    "accessor": "WA",
++    "line": 218,
++    "column": 19,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsCreateCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsCreateCmd",
++    "accessor": "WA",
++    "line": 65,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsCreateCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsCreateCmd",
++    "accessor": "DB",
++    "line": 78,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsCreateCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsCreateCmd",
++    "accessor": "WA",
++    "line": 78,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsTopicCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsTopicCmd",
++    "accessor": "WA",
++    "line": 134,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsTopicCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsTopicCmd",
++    "accessor": "WA",
++    "line": 137,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsTopicCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsTopicCmd",
++    "accessor": "DB",
++    "line": 138,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsTopicCmd:WA:occurrence-3",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsTopicCmd",
++    "accessor": "WA",
++    "line": 138,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsToggleCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsToggleCmd",
++    "accessor": "WA",
++    "line": 201,
++    "column": 25,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsToggleCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsToggleCmd",
++    "accessor": "WA",
++    "line": 204,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsToggleCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsToggleCmd",
++    "accessor": "DB",
++    "line": 205,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsToggleCmd:WA:occurrence-3",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsToggleCmd",
++    "accessor": "WA",
++    "line": 205,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsRequestsListCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsRequestsListCmd",
++    "accessor": "WA",
++    "line": 285,
++    "column": 21,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsRequestsListCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsRequestsListCmd",
++    "accessor": "WA",
++    "line": 290,
++    "column": 52,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsRequestsActionCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsRequestsActionCmd",
++    "accessor": "WA",
++    "line": 341,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsRequestsActionCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsRequestsActionCmd",
++    "accessor": "WA",
++    "line": 345,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsRequestsActionCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsRequestsActionCmd",
++    "accessor": "DB",
++    "line": 346,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_admin.go:newGroupsRequestsActionCmd:WA:occurrence-3",
++    "path": "cmd/wacli/groups_admin.go",
++    "function": "newGroupsRequestsActionCmd",
++    "accessor": "WA",
++    "line": 346,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsInfoCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsInfoCmd",
++    "accessor": "WA",
++    "line": 47,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsInfoCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsInfoCmd",
++    "accessor": "DB",
++    "line": 55,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsInfoCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsInfoCmd",
++    "accessor": "WA",
++    "line": 55,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsRenameCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsRenameCmd",
++    "accessor": "WA",
++    "line": 115,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsRenameCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsRenameCmd",
++    "accessor": "WA",
++    "line": 118,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsRenameCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsRenameCmd",
++    "accessor": "DB",
++    "line": 119,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsRenameCmd:WA:occurrence-3",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsRenameCmd",
++    "accessor": "WA",
++    "line": 119,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsLeaveCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsLeaveCmd",
++    "accessor": "WA",
++    "line": 164,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_info_rename.go:newGroupsLeaveCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_info_rename.go",
++    "function": "newGroupsLeaveCmd",
++    "accessor": "DB",
++    "line": 167,
++    "column": 8,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_invite_join.go:newGroupsInviteLinkGetCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_invite_join.go",
++    "function": "newGroupsInviteLinkGetCmd",
++    "accessor": "WA",
++    "line": 61,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_invite_join.go:newGroupsInviteLinkRevokeCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_invite_join.go",
++    "function": "newGroupsInviteLinkRevokeCmd",
++    "accessor": "WA",
++    "line": 107,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_invite_join.go:newGroupsJoinCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_invite_join.go",
++    "function": "newGroupsJoinCmd",
++    "accessor": "WA",
++    "line": 149,
++    "column": 16,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_invite_join.go:newGroupsJoinCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_invite_join.go",
++    "function": "newGroupsJoinCmd",
++    "accessor": "WA",
++    "line": 153,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_invite_join.go:newGroupsJoinCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_invite_join.go",
++    "function": "newGroupsJoinCmd",
++    "accessor": "DB",
++    "line": 154,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_invite_join.go:newGroupsJoinCmd:WA:occurrence-3",
++    "path": "cmd/wacli/groups_invite_join.go",
++    "function": "newGroupsJoinCmd",
++    "accessor": "WA",
++    "line": 154,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_participants.go:newGroupsParticipantsListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_participants.go",
++    "function": "newGroupsParticipantsListCmd",
++    "accessor": "DB",
++    "line": 51,
++    "column": 25,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_participants.go:newGroupsParticipantsActionCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_participants.go",
++    "function": "newGroupsParticipantsActionCmd",
++    "accessor": "WA",
++    "line": 118,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_participants.go:newGroupsParticipantsActionCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_participants.go",
++    "function": "newGroupsParticipantsActionCmd",
++    "accessor": "WA",
++    "line": 122,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_participants.go:newGroupsParticipantsActionCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_participants.go",
++    "function": "newGroupsParticipantsActionCmd",
++    "accessor": "DB",
++    "line": 123,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_participants.go:newGroupsParticipantsActionCmd:WA:occurrence-3",
++    "path": "cmd/wacli/groups_participants.go",
++    "function": "newGroupsParticipantsActionCmd",
++    "accessor": "WA",
++    "line": 123,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_prune.go:pruneGroups:DB:occurrence-1",
++    "path": "cmd/wacli/groups_prune.go",
++    "function": "pruneGroups",
++    "accessor": "DB",
++    "line": 66,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_prune.go:pruneGroups:DB:occurrence-2",
++    "path": "cmd/wacli/groups_prune.go",
++    "function": "pruneGroups",
++    "accessor": "DB",
++    "line": 103,
++    "column": 13,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_refresh_list.go:newGroupsRefreshCmd:WA:occurrence-1",
++    "path": "cmd/wacli/groups_refresh_list.go",
++    "function": "newGroupsRefreshCmd",
++    "accessor": "WA",
++    "line": 38,
++    "column": 15,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_refresh_list.go:newGroupsRefreshCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_refresh_list.go",
++    "function": "newGroupsRefreshCmd",
++    "accessor": "DB",
++    "line": 49,
++    "column": 31,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_refresh_list.go:newGroupsRefreshCmd:WA:occurrence-2",
++    "path": "cmd/wacli/groups_refresh_list.go",
++    "function": "newGroupsRefreshCmd",
++    "accessor": "WA",
++    "line": 49,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_refresh_list.go:newGroupsRefreshCmd:DB:occurrence-2",
++    "path": "cmd/wacli/groups_refresh_list.go",
++    "function": "newGroupsRefreshCmd",
++    "accessor": "DB",
++    "line": 50,
++    "column": 9,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_refresh_list.go:newGroupsRefreshCmd:DB:occurrence-3",
++    "path": "cmd/wacli/groups_refresh_list.go",
++    "function": "newGroupsRefreshCmd",
++    "accessor": "DB",
++    "line": 52,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/groups_refresh_list.go:newGroupsListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/groups_refresh_list.go",
++    "function": "newGroupsListCmd",
++    "accessor": "DB",
++    "line": 89,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/history.go:newHistoryCoverageCmd:DB:occurrence-1",
++    "path": "cmd/wacli/history.go",
++    "function": "newHistoryCoverageCmd",
++    "accessor": "DB",
++    "line": 48,
++    "column": 21,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/history.go:newHistoryFillCmd:DB:occurrence-1",
++    "path": "cmd/wacli/history.go",
++    "function": "newHistoryFillCmd",
++    "accessor": "DB",
++    "line": 98,
++    "column": 21,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/media_download.go:downloadExactMedia:DB:occurrence-1",
++    "path": "cmd/wacli/media_download.go",
++    "function": "downloadExactMedia",
++    "accessor": "DB",
++    "line": 57,
++    "column": 24,
++    "expression": "reader.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/media_download.go:downloadExactMedia:DB:occurrence-2",
++    "path": "cmd/wacli/media_download.go",
++    "function": "downloadExactMedia",
++    "accessor": "DB",
++    "line": 139,
++    "column": 15,
++    "expression": "roReader.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/media_download.go:executeExactMediaDownload:DB:occurrence-1",
++    "path": "cmd/wacli/media_download.go",
++    "function": "executeExactMediaDownload",
++    "accessor": "DB",
++    "line": 177,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/media_download.go:executeExactMediaDownload:WA:occurrence-1",
++    "path": "cmd/wacli/media_download.go",
++    "function": "executeExactMediaDownload",
++    "accessor": "WA",
++    "line": 197,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/media_download.go:executeExactMediaDownload:DB:occurrence-2",
++    "path": "cmd/wacli/media_download.go",
++    "function": "executeExactMediaDownload",
++    "accessor": "DB",
++    "line": 224,
++    "column": 13,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_changes.go:newMessagesChangesCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_changes.go",
++    "function": "newMessagesChangesCmd",
++    "accessor": "DB",
++    "line": 24,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:WA:occurrence-1",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "WA",
++    "line": 74,
++    "column": 25,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "DB",
++    "line": 78,
++    "column": 24,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:DB:occurrence-2",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "DB",
++    "line": 85,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:DB:occurrence-3",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "DB",
++    "line": 91,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:DB:occurrence-4",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "DB",
++    "line": 95,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:WA:occurrence-2",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "WA",
++    "line": 113,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesDeleteCmd:DB:occurrence-5",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesDeleteCmd",
++    "accessor": "DB",
++    "line": 118,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesRevokeCmd:WA:occurrence-1",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesRevokeCmd",
++    "accessor": "WA",
++    "line": 192,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_delete.go:newMessagesRevokeCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_delete.go",
++    "function": "newMessagesRevokeCmd",
++    "accessor": "DB",
++    "line": 198,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_edit.go:newMessagesEditCmd:WA:occurrence-1",
++    "path": "cmd/wacli/messages_edit.go",
++    "function": "newMessagesEditCmd",
++    "accessor": "WA",
++    "line": 83,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_edit.go:newMessagesEditCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_edit.go",
++    "function": "newMessagesEditCmd",
++    "accessor": "DB",
++    "line": 88,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_forward.go:newMessagesForwardCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_forward.go",
++    "function": "newMessagesForwardCmd",
++    "accessor": "DB",
++    "line": 58,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_forward.go:newMessagesForwardCmd:WA:occurrence-1",
++    "path": "cmd/wacli/messages_forward.go",
++    "function": "newMessagesForwardCmd",
++    "accessor": "WA",
++    "line": 74,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_forward.go:newMessagesForwardCmd:WA:occurrence-2",
++    "path": "cmd/wacli/messages_forward.go",
++    "function": "newMessagesForwardCmd",
++    "accessor": "WA",
++    "line": 83,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_forward.go:newMessagesForwardCmd:WA:occurrence-3",
++    "path": "cmd/wacli/messages_forward.go",
++    "function": "newMessagesForwardCmd",
++    "accessor": "WA",
++    "line": 90,
++    "column": 16,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_forward.go:newMessagesForwardCmd:DB:occurrence-2",
++    "path": "cmd/wacli/messages_forward.go",
++    "function": "newMessagesForwardCmd",
++    "accessor": "DB",
++    "line": 92,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_forward.go:newMessagesForwardCmd:DB:occurrence-3",
++    "path": "cmd/wacli/messages_forward.go",
++    "function": "newMessagesForwardCmd",
++    "accessor": "DB",
++    "line": 95,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_helpers.go:messageChatJIDFilter:DB:occurrence-1",
++    "path": "cmd/wacli/messages_helpers.go",
++    "function": "messageChatJIDFilter",
++    "accessor": "DB",
++    "line": 23,
++    "column": 42,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_helpers.go:resolveMessageSenderNames:DB:occurrence-1",
++    "path": "cmd/wacli/messages_helpers.go",
++    "function": "resolveMessageSenderNames",
++    "accessor": "DB",
++    "line": 77,
++    "column": 49,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_helpers.go:loadMessageMutationTarget:DB:occurrence-1",
++    "path": "cmd/wacli/messages_helpers.go",
++    "function": "loadMessageMutationTarget",
++    "accessor": "DB",
++    "line": 202,
++    "column": 37,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_pages.go:readListMessagePage:DB:occurrence-1",
++    "path": "cmd/wacli/messages_pages.go",
++    "function": "readListMessagePage",
++    "accessor": "DB",
++    "line": 20,
++    "column": 9,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_pages.go:readSearchMessagePage:DB:occurrence-1",
++    "path": "cmd/wacli/messages_pages.go",
++    "function": "readSearchMessagePage",
++    "accessor": "DB",
++    "line": 40,
++    "column": 9,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_purge.go:newMessagesPurgeCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_purge.go",
++    "function": "newMessagesPurgeCmd",
++    "accessor": "DB",
++    "line": 46,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_purge.go:newMessagesPurgeCmd:DB:occurrence-2",
++    "path": "cmd/wacli/messages_purge.go",
++    "function": "newMessagesPurgeCmd",
++    "accessor": "DB",
++    "line": 69,
++    "column": 23,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_purge.go:newMessagesPurgeCmd:DB:occurrence-3",
++    "path": "cmd/wacli/messages_purge.go",
++    "function": "newMessagesPurgeCmd",
++    "accessor": "DB",
++    "line": 76,
++    "column": 14,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesListCmd",
++    "accessor": "DB",
++    "line": 59,
++    "column": 41,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesSearchCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesSearchCmd",
++    "accessor": "DB",
++    "line": 139,
++    "column": 39,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesSearchCmd:DB:occurrence-2",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesSearchCmd",
++    "accessor": "DB",
++    "line": 183,
++    "column": 8,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesStarredCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesStarredCmd",
++    "accessor": "DB",
++    "line": 234,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesStarredCmd:DB:occurrence-2",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesStarredCmd",
++    "accessor": "DB",
++    "line": 249,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesShowCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesShowCmd",
++    "accessor": "DB",
++    "line": 288,
++    "column": 37,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/messages_read.go:newMessagesContextCmd:DB:occurrence-1",
++    "path": "cmd/wacli/messages_read.go",
++    "function": "newMessagesContextCmd",
++    "accessor": "DB",
++    "line": 334,
++    "column": 47,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:newPollVoteCmd:WA:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "newPollVoteCmd",
++    "accessor": "WA",
++    "line": 103,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:newPollVoteCmd:WA:occurrence-2",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "newPollVoteCmd",
++    "accessor": "WA",
++    "line": 122,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:buildPollVoteInfoForChats:DB:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "buildPollVoteInfoForChats",
++    "accessor": "DB",
++    "line": 231,
++    "column": 13,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:buildPollVoteInfoForChats:DB:occurrence-2",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "buildPollVoteInfoForChats",
++    "accessor": "DB",
++    "line": 259,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:buildPollVoteInfoForChats:WA:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "buildPollVoteInfoForChats",
++    "accessor": "WA",
++    "line": 277,
++    "column": 34,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:persistOutboundVote:WA:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "persistOutboundVote",
++    "accessor": "WA",
++    "line": 339,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:persistOutboundVote:DB:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "persistOutboundVote",
++    "accessor": "DB",
++    "line": 341,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:persistOutboundVote:DB:occurrence-2",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "persistOutboundVote",
++    "accessor": "DB",
++    "line": 344,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:persistOutboundVote:WA:occurrence-2",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "persistOutboundVote",
++    "accessor": "WA",
++    "line": 355,
++    "column": 11,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:persistOutboundVote:DB:occurrence-3",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "persistOutboundVote",
++    "accessor": "DB",
++    "line": 359,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:executeDelegatedPollVote:WA:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "executeDelegatedPollVote",
++    "accessor": "WA",
++    "line": 401,
++    "column": 10,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:getPollForShow:DB:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "getPollForShow",
++    "accessor": "DB",
++    "line": 477,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:getPollForShow:DB:occurrence-2",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "getPollForShow",
++    "accessor": "DB",
++    "line": 485,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:resolveVoterName:DB:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "resolveVoterName",
++    "accessor": "DB",
++    "line": 557,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:resolveVoterName:DB:occurrence-2",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "resolveVoterName",
++    "accessor": "DB",
++    "line": 558,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/poll_cmd.go:newPollsListCmd:DB:occurrence-1",
++    "path": "cmd/wacli/poll_cmd.go",
++    "function": "newPollsListCmd",
++    "accessor": "DB",
++    "line": 635,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/presence.go:runPresenceSubscribe:WA:occurrence-1",
++    "path": "cmd/wacli/presence.go",
++    "function": "runPresenceSubscribe",
++    "accessor": "WA",
++    "line": 103,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/presence.go:runPresenceSubscribe:WA:occurrence-2",
++    "path": "cmd/wacli/presence.go",
++    "function": "runPresenceSubscribe",
++    "accessor": "WA",
++    "line": 110,
++    "column": 7,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/presence.go:runPresence:WA:occurrence-1",
++    "path": "cmd/wacli/presence.go",
++    "function": "runPresence",
++    "accessor": "WA",
++    "line": 222,
++    "column": 10,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfileSetPictureCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfileSetPictureCmd",
++    "accessor": "WA",
++    "line": 75,
++    "column": 22,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfileRemovePictureCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfileRemovePictureCmd",
++    "accessor": "WA",
++    "line": 105,
++    "column": 22,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfileSetAboutCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfileSetAboutCmd",
++    "accessor": "WA",
++    "line": 138,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfileSetNameCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfileSetNameCmd",
++    "accessor": "WA",
++    "line": 170,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfilePictureInfoCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfilePictureInfoCmd",
++    "accessor": "WA",
++    "line": 204,
++    "column": 17,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfileGetAboutCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfileGetAboutCmd",
++    "accessor": "WA",
++    "line": 246,
++    "column": 42,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/profile.go:newProfileBusinessCmd:WA:occurrence-1",
++    "path": "cmd/wacli/profile.go",
++    "function": "newProfileBusinessCmd",
++    "accessor": "WA",
++    "line": 281,
++    "column": 20,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/recipient.go:resolveRecipient:DB:occurrence-1",
++    "path": "cmd/wacli/recipient.go",
++    "function": "resolveRecipient",
++    "accessor": "DB",
++    "line": 39,
++    "column": 37,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send.go:newSendTextCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send.go",
++    "function": "newSendTextCmd",
++    "accessor": "WA",
++    "line": 121,
++    "column": 37,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send.go:newSendTextCmd:WA:occurrence-2",
++    "path": "cmd/wacli/send.go",
++    "function": "newSendTextCmd",
++    "accessor": "WA",
++    "line": 132,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send.go:sendTextMessage:WA:occurrence-1",
++    "path": "cmd/wacli/send.go",
++    "function": "sendTextMessage",
++    "accessor": "WA",
++    "line": 293,
++    "column": 40,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send.go:sendTextMessage:DB:occurrence-1",
++    "path": "cmd/wacli/send.go",
++    "function": "sendTextMessage",
++    "accessor": "DB",
++    "line": 293,
++    "column": 48,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_file.go:sendFile:WA:occurrence-1",
++    "path": "cmd/wacli/send_file.go",
++    "function": "sendFile",
++    "accessor": "WA",
++    "line": 108,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_file.go:sendFile:DB:occurrence-1",
++    "path": "cmd/wacli/send_file.go",
++    "function": "sendFile",
++    "accessor": "DB",
++    "line": 128,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_file_cmd.go:newSendFileCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_file_cmd.go",
++    "function": "newSendFileCmd",
++    "accessor": "WA",
++    "line": 94,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_helpers.go:reconnectForSend:WA:occurrence-1",
++    "path": "cmd/wacli/send_helpers.go",
++    "function": "reconnectForSend",
++    "accessor": "WA",
++    "line": 165,
++    "column": 3,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedSend:WA:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedSend",
++    "accessor": "WA",
++    "line": 444,
++    "column": 45,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedPresence:WA:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedPresence",
++    "accessor": "WA",
++    "line": 555,
++    "column": 10,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedEdit:WA:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedEdit",
++    "accessor": "WA",
++    "line": 593,
++    "column": 10,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedEdit:DB:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedEdit",
++    "accessor": "DB",
++    "line": 598,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedText:WA:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedText",
++    "accessor": "WA",
++    "line": 619,
++    "column": 35,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedReact:WA:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedReact",
++    "accessor": "WA",
++    "line": 724,
++    "column": 10,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedReact:DB:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedReact",
++    "accessor": "DB",
++    "line": 730,
++    "column": 38,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:executeDelegatedReact:WA:occurrence-2",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "executeDelegatedReact",
++    "accessor": "WA",
++    "line": 730,
++    "column": 46,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_ipc.go:warmupDelegatedRecipient:WA:occurrence-1",
++    "path": "cmd/wacli/send_ipc.go",
++    "function": "warmupDelegatedRecipient",
++    "accessor": "WA",
++    "line": 801,
++    "column": 30,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_location_cmd.go:newSendLocationCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_location_cmd.go",
++    "function": "newSendLocationCmd",
++    "accessor": "WA",
++    "line": 103,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_location_cmd.go:newSendLocationCmd:WA:occurrence-2",
++    "path": "cmd/wacli/send_location_cmd.go",
++    "function": "newSendLocationCmd",
++    "accessor": "WA",
++    "line": 109,
++    "column": 37,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_location_cmd.go:persistOutboundLocation:DB:occurrence-1",
++    "path": "cmd/wacli/send_location_cmd.go",
++    "function": "persistOutboundLocation",
++    "accessor": "DB",
++    "line": 173,
++    "column": 42,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_location_cmd.go:persistOutboundLocation:WA:occurrence-1",
++    "path": "cmd/wacli/send_location_cmd.go",
++    "function": "persistOutboundLocation",
++    "accessor": "WA",
++    "line": 173,
++    "column": 50,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_location_cmd.go:executeDelegatedLocation:WA:occurrence-1",
++    "path": "cmd/wacli/send_location_cmd.go",
++    "function": "executeDelegatedLocation",
++    "accessor": "WA",
++    "line": 222,
++    "column": 35,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:newSendPollCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "newSendPollCmd",
++    "accessor": "WA",
++    "line": 92,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:newSendPollCmd:WA:occurrence-2",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "newSendPollCmd",
++    "accessor": "WA",
++    "line": 98,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:persistOutboundPoll:WA:occurrence-1",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "persistOutboundPoll",
++    "accessor": "WA",
++    "line": 173,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:persistOutboundPoll:DB:occurrence-1",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "persistOutboundPoll",
++    "accessor": "DB",
++    "line": 175,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:persistOutboundPoll:DB:occurrence-2",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "persistOutboundPoll",
++    "accessor": "DB",
++    "line": 178,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:persistOutboundPoll:DB:occurrence-3",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "persistOutboundPoll",
++    "accessor": "DB",
++    "line": 189,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:persistOutboundPoll:WA:occurrence-2",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "persistOutboundPoll",
++    "accessor": "WA",
++    "line": 192,
++    "column": 47,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_poll_cmd.go:executeDelegatedPoll:WA:occurrence-1",
++    "path": "cmd/wacli/send_poll_cmd.go",
++    "function": "executeDelegatedPoll",
++    "accessor": "WA",
++    "line": 240,
++    "column": 31,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_react_cmd.go:newSendReactCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_react_cmd.go",
++    "function": "newSendReactCmd",
++    "accessor": "WA",
++    "line": 70,
++    "column": 32,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_react_cmd.go:newSendReactCmd:WA:occurrence-2",
++    "path": "cmd/wacli/send_react_cmd.go",
++    "function": "newSendReactCmd",
++    "accessor": "WA",
++    "line": 75,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_react_cmd.go:newSendReactCmd:DB:occurrence-1",
++    "path": "cmd/wacli/send_react_cmd.go",
++    "function": "newSendReactCmd",
++    "accessor": "DB",
++    "line": 82,
++    "column": 40,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_react_cmd.go:newSendReactCmd:WA:occurrence-3",
++    "path": "cmd/wacli/send_react_cmd.go",
++    "function": "newSendReactCmd",
++    "accessor": "WA",
++    "line": 82,
++    "column": 48,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_select_cmd.go:newSendSelectCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_select_cmd.go",
++    "function": "newSendSelectCmd",
++    "accessor": "WA",
++    "line": 133,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_select_cmd.go:sendButtonListSelection:WA:occurrence-1",
++    "path": "cmd/wacli/send_select_cmd.go",
++    "function": "sendButtonListSelection",
++    "accessor": "WA",
++    "line": 202,
++    "column": 31,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_select_cmd.go:loadSelectTargetMessage:DB:occurrence-1",
++    "path": "cmd/wacli/send_select_cmd.go",
++    "function": "loadSelectTargetMessage",
++    "accessor": "DB",
++    "line": 230,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_select_cmd.go:persistOutboundSelection:WA:occurrence-1",
++    "path": "cmd/wacli/send_select_cmd.go",
++    "function": "persistOutboundSelection",
++    "accessor": "WA",
++    "line": 459,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_select_cmd.go:persistOutboundSelection:DB:occurrence-1",
++    "path": "cmd/wacli/send_select_cmd.go",
++    "function": "persistOutboundSelection",
++    "accessor": "DB",
++    "line": 461,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_select_cmd.go:persistOutboundSelection:DB:occurrence-2",
++    "path": "cmd/wacli/send_select_cmd.go",
++    "function": "persistOutboundSelection",
++    "accessor": "DB",
++    "line": 464,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_status_cmd.go:newSendStatusCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_status_cmd.go",
++    "function": "newSendStatusCmd",
++    "accessor": "WA",
++    "line": 111,
++    "column": 39,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_status_cmd.go:newSendStatusCmd:DB:occurrence-1",
++    "path": "cmd/wacli/send_status_cmd.go",
++    "function": "newSendStatusCmd",
++    "accessor": "DB",
++    "line": 123,
++    "column": 16,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_sticker.go:sendSticker:WA:occurrence-1",
++    "path": "cmd/wacli/send_sticker.go",
++    "function": "sendSticker",
++    "accessor": "WA",
++    "line": 71,
++    "column": 12,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_sticker.go:sendSticker:DB:occurrence-1",
++    "path": "cmd/wacli/send_sticker.go",
++    "function": "sendSticker",
++    "accessor": "DB",
++    "line": 87,
++    "column": 12,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_sticker_cmd.go:newSendStickerCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_sticker_cmd.go",
++    "function": "newSendStickerCmd",
++    "accessor": "WA",
++    "line": 75,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_text_history.go:sendTextWithHistory:DB:occurrence-1",
++    "path": "cmd/wacli/send_text_history.go",
++    "function": "sendTextWithHistory",
++    "accessor": "DB",
++    "line": 25,
++    "column": 43,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_text_history.go:sendTextWithHistory:WA:occurrence-1",
++    "path": "cmd/wacli/send_text_history.go",
++    "function": "sendTextWithHistory",
++    "accessor": "WA",
++    "line": 25,
++    "column": 51,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/send_voice_cmd.go:newSendVoiceCmd:WA:occurrence-1",
++    "path": "cmd/wacli/send_voice_cmd.go",
++    "function": "newSendVoiceCmd",
++    "accessor": "WA",
++    "line": 82,
++    "column": 33,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_cleanup.go:newStoreCleanupCmd:DB:occurrence-1",
++    "path": "cmd/wacli/store_cleanup.go",
++    "function": "newStoreCleanupCmd",
++    "accessor": "DB",
++    "line": 41,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_cleanup.go:newStoreCleanupCmd:DB:occurrence-2",
++    "path": "cmd/wacli/store_cleanup.go",
++    "function": "newStoreCleanupCmd",
++    "accessor": "DB",
++    "line": 56,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_cleanup.go:newStoreCleanupCmd:DB:occurrence-3",
++    "path": "cmd/wacli/store_cleanup.go",
++    "function": "newStoreCleanupCmd",
++    "accessor": "DB",
++    "line": 74,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_cleanup.go:newStoreCleanupCmd:DB:occurrence-4",
++    "path": "cmd/wacli/store_cleanup.go",
++    "function": "newStoreCleanupCmd",
++    "accessor": "DB",
++    "line": 96,
++    "column": 17,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_cleanup.go:newStoreCleanupCmd:DB:occurrence-5",
++    "path": "cmd/wacli/store_cleanup.go",
++    "function": "newStoreCleanupCmd",
++    "accessor": "DB",
++    "line": 97,
++    "column": 15,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_media_membership.go:newStoreVerifyMediaCmd:DB:occurrence-1",
++    "path": "cmd/wacli/store_media_membership.go",
++    "function": "newStoreVerifyMediaCmd",
++    "accessor": "DB",
++    "line": 27,
++    "column": 20,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-1",
++    "path": "cmd/wacli/store_stats.go",
++    "function": "newStoreStatsCmd",
++    "accessor": "DB",
++    "line": 26,
++    "column": 18,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-2",
++    "path": "cmd/wacli/store_stats.go",
++    "function": "newStoreStatsCmd",
++    "accessor": "DB",
++    "line": 31,
++    "column": 19,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-3",
++    "path": "cmd/wacli/store_stats.go",
++    "function": "newStoreStatsCmd",
++    "accessor": "DB",
++    "line": 36,
++    "column": 23,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "cmd/wacli/store_stats.go:newStoreStatsCmd:DB:occurrence-4",
++    "path": "cmd/wacli/store_stats.go",
++    "function": "newStoreStatsCmd",
++    "accessor": "DB",
++    "line": 41,
++    "column": 26,
++    "expression": "a.DB()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "internal/app/app.go:LocalResolver:WA:occurrence-1",
++    "path": "internal/app/app.go",
++    "function": "LocalResolver",
++    "accessor": "WA",
++    "line": 370,
++    "column": 10,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  },
++  {
++    "id": "internal/app/chat_state.go:AddChatStatePersistenceHandler:WA:occurrence-1",
++    "path": "internal/app/chat_state.go",
++    "function": "AddChatStatePersistenceHandler",
++    "accessor": "WA",
++    "line": 43,
++    "column": 14,
++    "expression": "a.WA()",
++    "status": "raw_escape"
++  }
++]
+diff --git a/internal/app/owned_db.go b/internal/app/owned_db.go
+index fcbcaa0..7b373bd 100644
+--- a/internal/app/owned_db.go
++++ b/internal/app/owned_db.go
+@@ -11 +11,7 @@ import (
+-// OwnedDB is the deliberately limited metadata-write facade used by file send.
++// ownedQuoteReader is private; callers cannot supply or borrow a raw DB through it.
++type ownedQuoteReader interface {
++	GetMessage(string, string) (store.Message, error)
++	GetMediaDownloadInfo(string, string) (store.MediaDownloadInfo, error)
++}
++
++// OwnedDB is the deliberately limited metadata and quote facade used by file send.
+@@ -15,2 +21,3 @@ type OwnedDB struct {
+-	db  *store.DB
+-	app *App
++	db    *store.DB
++	app   *App
++	quote ownedQuoteReader
+@@ -29 +36 @@ func (a *App) OwnedDB(ctx context.Context) (*OwnedDB, error) {
+-	return &OwnedDB{db: a.db, app: a}, nil
++	return &OwnedDB{db: a.db, app: a, quote: a.db}, nil
+@@ -42,0 +50,21 @@ func (d *OwnedDB) effect(ctx context.Context) (context.Context, func(error), err
++// GetMessage performs the narrow read needed to construct a quoted reply.
++// Like metadata writes, the lookup is covered by a per-invocation child lease.
++func (d *OwnedDB) GetMessage(ctx context.Context, chatJID, msgID string) (msg store.Message, err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return store.Message{}, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.quote.GetMessage(chatJID, msgID)
++}
++
++// GetMediaDownloadInfo performs the companion read needed when quoting media.
++func (d *OwnedDB) GetMediaDownloadInfo(ctx context.Context, chatJID, msgID string) (info store.MediaDownloadInfo, err error) {
++	_, finish, err := d.effect(ctx)
++	if err != nil {
++		return store.MediaDownloadInfo{}, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return d.quote.GetMediaDownloadInfo(chatJID, msgID)
++}
++
+diff --git a/internal/app/owned_quote_test.go b/internal/app/owned_quote_test.go
+new file mode 100644
+index 0000000..5dcd479
+--- /dev/null
++++ b/internal/app/owned_quote_test.go
+@@ -0,0 +1,182 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/store"
++	"go.mau.fi/whatsmeow/types"
++)
++
++type ownedQuoteProbe struct {
++	calls   atomic.Int32
++	entered chan struct{}
++	release chan struct{}
++	failure error
++	panics  bool
++}
++
++func (p *ownedQuoteProbe) read() error {
++	p.calls.Add(1)
++	if p.entered != nil {
++		close(p.entered)
++		<-p.release
++	}
++	if p.panics {
++		panic(p.failure)
++	}
++	return p.failure
++}
++func (p *ownedQuoteProbe) GetMessage(string, string) (store.Message, error) {
++	return store.Message{}, p.read()
++}
++func (p *ownedQuoteProbe) GetMediaDownloadInfo(string, string) (store.MediaDownloadInfo, error) {
++	return store.MediaDownloadInfo{}, p.read()
++}
++
++func TestOwnedQuoteRefusalHasZeroDBAndClientEffects(t *testing.T) {
++	for _, mode := range []string{"finished", "missing", "foreign", "canceled", "sealed-finished", "sealed-missing"} {
++		t.Run(mode, func(t *testing.T) {
++			a, client, ctx, finish := ownedTestApp(t)
++			db, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			wa, err := a.OwnedWA(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			probe := &ownedQuoteProbe{}
++			db.quote = probe
++			use := ctx
++			switch mode {
++			case "finished":
++				finish(nil)
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(ctx)
++				cancel()
++			case "sealed-finished", "sealed-missing":
++				finish(nil)
++				if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++					t.Fatalf("seal unexpectedly certified capture: %v %v", held, err)
++				}
++				if mode == "sealed-missing" {
++					use = context.Background()
++				}
++				if _, _, err := a.BeginScopedOperation(context.Background()); !errors.Is(err, ErrOperationSealed) {
++					t.Fatal(err)
++				}
++			}
++			if _, err := db.GetMessage(use, "synthetic", "quote"); !errors.Is(err, ErrHandleRevoked) {
++				t.Fatalf("message read: %v", err)
++			}
++			if _, err := db.GetMediaDownloadInfo(use, "synthetic", "quote"); !errors.Is(err, ErrHandleRevoked) {
++				t.Fatalf("media read: %v", err)
++			}
++			if _, err := wa.SendText(use, types.JID{}, "synthetic"); !errors.Is(err, ErrHandleRevoked) {
++				t.Fatalf("client admission: %v", err)
++			}
++			if probe.calls.Load() != 0 || client.calls.Load() != 0 {
++				t.Fatalf("refusal reached DB/client: %d/%d", probe.calls.Load(), client.calls.Load())
++			}
++		})
++	}
++}
++
++func TestOwnedQuoteLiveParentAfterSealAndActualReadJoin(t *testing.T) {
++	for _, media := range []bool{false, true} {
++		name := "message"
++		if media {
++			name = "media"
++		}
++		t.Run(name, func(t *testing.T) {
++			a, _, ctx, finish := ownedTestApp(t)
++			db, err := a.OwnedDB(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			failure := errors.New("synthetic quote read failure")
++			probe := &ownedQuoteProbe{entered: make(chan struct{}), release: make(chan struct{}), failure: failure}
++			db.quote = probe
++			canceled, cancel := context.WithCancel(context.Background())
++			cancel()
++			if held, err := a.BeginDrain(canceled); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++				t.Fatalf("seal: %v %v", held, err)
++			}
++			result := make(chan error, 1)
++			go func() {
++				var err error
++				if media {
++					_, err = db.GetMediaDownloadInfo(ctx, "synthetic", "quote")
++				} else {
++					_, err = db.GetMessage(ctx, "synthetic", "quote")
++				}
++				result <- err
++			}()
++			select {
++			case <-probe.entered:
++			case <-time.After(time.Second):
++				t.Fatal("accepted parent could not start quote read after seal")
++			}
++			finish(nil)
++			drained := make(chan error, 1)
++			go func() { _, err := a.BeginDrain(context.Background()); drained <- err }()
++			select {
++			case err := <-drained:
++				t.Fatalf("drain escaped active quote read: %v", err)
++			case <-time.After(20 * time.Millisecond):
++			}
++			close(probe.release)
++			if err := <-result; !errors.Is(err, failure) {
++				t.Fatal(err)
++			}
++			select {
++			case err := <-drained:
++				if !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++					t.Fatalf("lost failure or fail-closed coverage: %v", err)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("drain did not join completed quote read")
++			}
++			if probe.calls.Load() != 1 {
++				t.Fatal("unexpected query count")
++			}
++		})
++	}
++}
++
++func TestOwnedQuotePanicRetainsFailure(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	db, err := a.OwnedDB(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	failure := errors.New("synthetic quote panic")
++	db.quote = &ownedQuoteProbe{failure: failure, panics: true}
++	func() {
++		defer func() {
++			if recover() != failure {
++				t.Error("quote panic changed")
++			}
++		}()
++		_, _ = db.GetMessage(ctx, "synthetic", "quote")
++	}()
++	finish(nil)
++	if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("lost quote panic: %v %v", held, err)
++	}
++}
