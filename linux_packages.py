@@ -28,6 +28,7 @@ import node_lts_linux as node_lts_tools
 import opencode2_linux as opencode2_tools
 import pnpm_global_plan as pnpm_global_tools
 import google_workspace_cli_linux as gws_tools
+import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
 
@@ -420,24 +421,17 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
         cmd.append(f"{path}@{version}" if version else path)
         reason = f"{path}: pinned Go toolchain, CGO/native build prerequisites and explicit isolated GOBIN/cache destination preflight are not validated; no live-home build/install."
         if path == "github.com/openclaw/wacli/cmd/wacli" and version == "v0.15.0" and tags == ["sqlite_fts5"]:
-            reason = (f"{path}@{version}: upstream requires Go >=1.25.12, CGO_ENABLED=1, "
-                      "a C compiler/libc development headers and sqlite_fts5 (bundled go-sqlite3 "
-                      "v1.14.48 SQLite, not an external libsqlite3/FTS5 package); upstream documents "
-                      "CGO_CFLAGS=-Wno-error=missing-braces. Exact existing Go/compiler provenance "
-                      "and native prerequisites, full dependency/checksum verification, GOTOOLCHAIN=local "
-                      "with no automatic toolchain download, and explicit isolated GOBIN, GOPATH, "
-                      "GOMODCACHE, GOCACHE, GOTMPDIR and HOME/config roots with missing/overlap/symlink "
-                      "rejection are not validated. Ambient GOENV/GOFLAGS/GOWORK/CGO/compiler settings "
-                      "must not override the reviewed build. Official Go 1.25.12 Linux amd64/arm64 "
-                      "archive SHA-256/size metadata and all 31 declared module/go.mod checksum pairs "
-                      "are recorded, not verified archive bytes or a resolved Linux sqlite_fts5 build closure. "
-                      "Effective go env paths and compiler/sysroot provenance remain unverified; "
-                      "their toolchain/compiler execution is outside this dry-only review. "
-                      "No executor or cached-global-binary/release "
-                      "fallback; no live-home/PATH/cache changes or build/install; "
-                      "see docs/linux-wacli-build-review.md. Normal installation need not be portable: "
-                      "explicit-root encrypted state preservation is separate in wacli_state.py "
-                      "(docs/linux-wacli-state.md); it does not enable this build action.")
+            reason = (f"{path}@{version}: planned standard Linux Go install proposal only; "
+                      "normal GOBIN/~/go/bin and Go module/build caches, not a portable bundle. "
+                      "Go >=1.25.12, CGO_ENABLED=1, native C compiler/libc headers and sqlite_fts5; "
+                      "CGO_CFLAGS=-Wno-error=missing-braces. Official Go checksums and module/go.sum "
+                      "integrity evidence are recorded, not verified local bytes. Build/runtime not tested. "
+                      "No executor; --execute still rejects Go before any package preflight or mutation. "
+                      "PR #28 state preservation is separate: explicit stopped clean-store encrypted capture "
+                      "and offline export only, not live account activation; see docs/linux-wacli-build-review.md.")
+            actions.append(Action("go", path, cmd, version=version, tags=tags, source="go",
+                                  reason=reason, dry_plan=wacli_go_tools.build_dry_plan(architecture)))
+            continue
         blockers.append(reason)
         actions.append(Action("go", path, cmd, version=version, tags=tags, status="blocked", reason=reason, source="go"))
     # Backup roots are data/control metadata, never implicit Python install inputs.
@@ -508,6 +502,10 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
     chosen = [a for a in plan.actions if a.status == "planned" and
               (not selected_set or a.name in selected_set or
                (a.kind in {"apt", "anydesk-deb"} and a.name in coverage_targets))]
+    # Planned Go metadata is a proposal, never executor authorization. Reject
+    # before even another adapter's preflight can download or mutate anything.
+    if any(a.kind == "go" for a in chosen):
+        raise RuntimeError("Unvalidated command/runtime/destination: Go dry plan only; no install executor")
     for action in (a for a in chosen if a.kind == "gws-archive"):
         if action.name != "@googleworkspace/cli":
             raise RuntimeError("Google Workspace archive does not match selected product")
