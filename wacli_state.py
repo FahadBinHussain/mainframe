@@ -351,9 +351,14 @@ def main(argv=None):
     restore.add_argument('--destination', type=Path, required=True)
     windows = sub.add_parser('plan-windows-unlocked', help='metadata-only BLOCKED assessment; never extracts, migrates, installs or activates')
     windows.add_argument('--archive', type=Path, required=True)
+    sub.add_parser('plan-coordinated-capture', help='BLOCKED capability report; reads no source or receipt')
     args = parser.parse_args(argv)
     try:
-        if args.operation == 'plan-windows-unlocked':
+        if args.operation == 'plan-coordinated-capture':
+            from wacli_snapshot import capture_status
+            print(json.dumps(capture_status(), sort_keys=True))
+            return 3
+        elif args.operation == 'plan-windows-unlocked':
             print(json.dumps(plan_windows_unlocked(args.archive), sort_keys=True))
             return 3  # incomplete, not a successful migration
         elif args.operation == 'plan':
