@@ -209,6 +209,15 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
 
 
 class WindowsCaptureStillBlocked(unittest.TestCase):
+    def test_missing_powershell_skips_before_subprocess(self):
+        """A missing optional shell must skip, not fail or spawn a process."""
+        harness = windows_contract.WindowsWacliContractTests()
+        with patch.object(windows_contract.shutil, 'which', return_value=None), \
+                patch.object(windows_contract.subprocess, 'run', side_effect=AssertionError('spawned')):
+            with self.assertRaises(unittest.SkipTest):
+                harness.run_function(windows_contract.ROOT / 'backup.ps1',
+                                     'Assert-WindowsWhatsappCaptureSafe', '')
+
     def test_real_uncheckpointed_wal_is_blocked_even_with_version_metadata(self):
         harness = windows_contract.WindowsWacliContractTests()
         with tempfile.TemporaryDirectory(prefix='wacli-windows-synthetic-') as td:
@@ -237,12 +246,24 @@ class WindowsCaptureStillBlocked(unittest.TestCase):
             root = Path(td) / 'whatsapp'
             root.mkdir()
             for script in (windows_contract.ROOT / 'backup.ps1', windows_contract.ROOT / 'backup-secrets.ps1'):
-                body = ("function Get-ChildItem { throw [System.UnauthorizedAccessException]::new('synthetic permission denial') }; "
+                body = ("$ErrorActionPreference = 'Continue'; "
+                        "function Get-ChildItem { [CmdletBinding()] param([string]$LiteralPath, "
+                        "[switch]$File, [switch]$Directory, [switch]$Recurse, [switch]$Force) "
+                        "Write-Error 'synthetic permission denial' }; "
                         "try { Assert-WindowsWhatsappCaptureSafe -Source " + harness.ps_quote(str(root)) +
-                        "; 'UNEXPECTED_SUCCESS' } catch { 'EXPECTED_FAILURE' }")
+                        "; 'UNEXPECTED_SUCCESS' } catch { 'EXPECTED_FAILURE' }; "
+                        # Only mutate the extracted in-memory function as a negative
+                        # control. Repository scripts are never changed or invoked.
+                        "$weakened = (Get-Item Function:Assert-WindowsWhatsappCaptureSafe).ScriptBlock.ToString() "
+                        "-replace '-ErrorAction Stop', '-ErrorAction Continue'; "
+                        "Set-Item Function:Assert-WindowsWhatsappCaptureSafe ([scriptblock]::Create($weakened)); "
+                        "try { Assert-WindowsWhatsappCaptureSafe -Source " + harness.ps_quote(str(root)) +
+                        "; 'CONTROL_CONTINUED' } catch { 'CONTROL_FAILED' }")
                 output = harness.run_function(script, 'Assert-WindowsWhatsappCaptureSafe', body)
                 self.assertIn('EXPECTED_FAILURE', output)
                 self.assertNotIn('UNEXPECTED_SUCCESS', output)
+                self.assertIn('CONTROL_CONTINUED', output)
+                self.assertNotIn('CONTROL_FAILED', output)
 
 
 if __name__ == '__main__':
