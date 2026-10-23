@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import zipfile
 import tarfile
@@ -170,12 +171,22 @@ def _requirements_actions(root: Path, blockers: list[str], require_pip_freeze: b
             out.append(Action('pip-venv', req.name, status='blocked', reason=reason, source=str(req)))
             continue
         bad = []
+        windows_api_binding = False
         for line in lines:
-            package = line.split("[", 1)[0].split("==", 1)[0].split(">=", 1)[0].split("<=", 1)[0].strip().lower()
+            # Inspect only the normalized project name, never include raw
+            # requirements (which can contain private URLs/options) in reports.
+            match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?=\s*(?:\[|[<>=!~;@#]|$))", line)
+            package = re.sub(r"[-_.]+", "-", match[1]).lower() if match else ""
             if package in {"pywin32", "pypiwin32", "windows-curses", "pywin32-ctypes"} or any(marker in line.lower() for marker in ('win_amd64.whl', 'win32.whl', 'file:///c:', 'file:///d:', ' @ c:', ' @ d:')):
                 bad.append(line)
+                windows_api_binding |= package == "pywin32-ctypes"
         if bad:
             reason = f"Windows-only Python requirements in {req.name}; {len(bad)} declaration(s) need explicit translation (including pywin32 when present)."
+            if windows_api_binding:
+                reason += (" pywin32-ctypes wraps Windows DLL APIs; its pure-Python/any wheel is not native Linux functionality."
+                           " Upstream Unix testing uses Wine, not a Linux backend. A win32 environment marker would omit"
+                           " this functionality on Linux, not port it; no exclusion or substitute is approved."
+                           " The entire original manifest remains preserved and blocked; see docs/linux-pip-platform-review.md.")
             blockers.append(reason)
             out.append(Action("pip-venv", req.name, status="blocked", reason=reason, source=str(req)))
         else:
