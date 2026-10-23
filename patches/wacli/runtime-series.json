@@ -45,6 +45,10 @@
     {
       "path": "0011-owned-contacts.patch",
       "sha256": "34ec425f38a23552691b351a04873e2a3b3f07da9487a2612786b2b0b108db60"
+    },
+    {
+      "path": "0012-owned-auth-profile-presence.patch",
+      "sha256": "d21d221234810b528db9c1c59f0adb0c39c226c620924489bc0ffc49d871532d"
     }
   ],
   "whatsmeow": [

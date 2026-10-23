@@ -1,0 +1,1973 @@
+Subject: LOCAL SOURCE PROPOSAL: own auth, profile and presence effects through completion
+Status: unsubmitted and unaccepted upstream. Capture remains disabled.
+Applies after the preceding SHA-256-pinned runtime series only.
+
+diff --git a/cmd/wacli/auth.go b/cmd/wacli/auth.go
+index aabf5bf..788fefd 100644
+--- a/cmd/wacli/auth.go
++++ b/cmd/wacli/auth.go
+@@ -4,0 +5 @@ import (
++	"errors"
+@@ -82 +83 @@ func addAuthFlags(cmd *cobra.Command, opts *authOptions) {
+-func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
++func runAuth(flags *rootFlags, opts authOptions) (result appPkg.SyncResult, err error) {
+@@ -97,0 +99,3 @@ func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
++	if err := ctx.Err(); err != nil {
++		return appPkg.SyncResult{}, err
++	}
+@@ -103 +107,9 @@ func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
+-	defer closeApp(a, lk)
++	ctx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return appPkg.SyncResult{}, errors.Join(err, closeOwnedSession(a, lk))
++	}
++	defer func() { err = finishOwnedSession(a, lk, finish, err) }()
++	auth, err := a.OwnedAuth(ctx)
++	if err != nil {
++		return appPkg.SyncResult{}, err
++	}
+@@ -115 +127 @@ func runAuth(flags *rootFlags, opts authOptions) (appPkg.SyncResult, error) {
+-	return a.Sync(ctx, appPkg.SyncOptions{
++	return auth.Sync(ctx, appPkg.SyncOptions{
+@@ -252 +264 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (err error) {
+@@ -276,4 +288,6 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
+-			defer closeApp(a, lk)
+-
+-			if err := a.OpenWA(); err != nil {
+-				return err
++			if err := ctx.Err(); err != nil {
++				return errors.Join(err, closeOwnedSession(a, lk))
++			}
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return errors.Join(err, closeOwnedSession(a, lk))
+@@ -281,2 +295,2 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
+-			authed := a.WA().IsAuthed()
+-			revoked, err := appPkg.SessionRevoked(a.StoreDir())
++			defer func() { err = finishOwnedSession(a, lk, finish, err) }()
++			auth, err := a.OwnedAuth(ctx)
+@@ -286,4 +300,3 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
+-			authed = authed && !revoked
+-			var linkedJID string
+-			if authed {
+-				linkedJID = a.WA().LinkedJID()
++			authed, linkedJID, err := auth.Status(ctx)
++			if err != nil {
++				return err
+@@ -291 +303,0 @@ func newAuthStatusCmd(flags *rootFlags) *cobra.Command {
+-
+@@ -337 +349 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (err error) {
+@@ -348,4 +360,6 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
+-			defer closeApp(a, lk)
+-
+-			if err := a.EnsureAuthed(ctx); err != nil {
+-				return err
++			if err := ctx.Err(); err != nil {
++				return errors.Join(err, closeOwnedSession(a, lk))
++			}
++			ctx, finish, err := a.BeginScopedOperation(ctx)
++			if err != nil {
++				return errors.Join(err, closeOwnedSession(a, lk))
+@@ -353 +367,3 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
+-			if err := a.Connect(ctx, false, nil); err != nil {
++			defer func() { err = finishOwnedSession(a, lk, finish, err) }()
++			auth, err := a.OwnedAuth(ctx)
++			if err != nil {
+@@ -356 +372 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
+-			if err := a.WA().Logout(ctx); err != nil {
++			if err := auth.Logout(ctx); err != nil {
+@@ -359 +374,0 @@ func newAuthLogoutCmd(flags *rootFlags) *cobra.Command {
+-
+diff --git a/cmd/wacli/owned_presence_delegate_test.go b/cmd/wacli/owned_presence_delegate_test.go
+new file mode 100644
+index 0000000..3961d5c
+--- /dev/null
++++ b/cmd/wacli/owned_presence_delegate_test.go
+@@ -0,0 +1,142 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/app"
++)
++
++func TestOwnedDelegatedPresenceRoutesDoNotBorrowRawHandles(t *testing.T) {
++	fset := token.NewFileSet()
++	file, err := parser.ParseFile(fset, "send_ipc.go", nil, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	seen := 0
++	for _, decl := range file.Decls {
++		fn, ok := decl.(*ast.FuncDecl)
++		if !ok || (fn.Name.Name != "executeDelegatedPresence" && fn.Name.Name != "executeDelegatedPresenceSubscribe") {
++			continue
++		}
++		seen++
++		ast.Inspect(fn.Body, func(n ast.Node) bool {
++			sel, ok := n.(*ast.SelectorExpr)
++			if !ok {
++				return true
++			}
++			switch sel.Sel.Name {
++			case "WA", "DB", "WatchPresence", "LocalResolver":
++				t.Errorf("%s: delegated presence borrows %s", fset.Position(sel.Pos()), sel.Sel.Name)
++			}
++			return true
++		})
++	}
++	if seen != 2 {
++		t.Fatalf("guarded %d routes, want two", seen)
++	}
++}
++
++func TestOwnedDelegatedPresenceRefusedBeforeClientEffects(t *testing.T) {
++	for _, mode := range []string{"finished", "canceled", "sealed"} {
++		t.Run(mode, func(t *testing.T) {
++			a := &app.App{} // any attempted underlying client effect would panic
++			ctx, finish, err := a.BeginScopedOperation(context.Background())
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer finish(nil)
++			switch mode {
++			case "finished":
++				finish(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				ctx, cancel = context.WithCancel(ctx)
++				cancel()
++			case "sealed":
++				finish(nil)
++				_, _ = a.BeginDrain(context.Background())
++				ctx = context.Background()
++			}
++			_, err = executeDelegatedPresence(ctx, a, sendDelegateRequest{To: "15550000001@s.whatsapp.net", PresenceState: "composing"})
++			if err == nil {
++				t.Fatal("refused presence was accepted")
++			}
++			_, err = executeDelegatedPresenceSubscribe(ctx, a, sendDelegateRequest{To: "15550000001@s.whatsapp.net"})
++			if !errors.Is(err, app.ErrHandleRevoked) {
++				t.Fatalf("subscribe refusal = %v", err)
++			}
++		})
++	}
++}
++
++func TestOwnedPresenceCanceledAttemptRemainsJoined(t *testing.T) {
++	a := &app.App{}
++	parent, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	ctx, finish, err := a.BeginScopedOperation(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer finish(nil)
++	entered, release, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
++	var once sync.Once
++	defer once.Do(func() { close(release) })
++	var effects atomic.Int32
++	result := make(chan error, 1)
++	go func() {
++		result <- sendOwnedPresenceWithRetry(ctx, a, func(context.Context) error { t.Error("canceled presence reconnected"); return nil }, func(context.Context) error {
++			effects.Add(1)
++			close(entered)
++			<-release
++			close(returned)
++			return errors.New("synthetic delayed presence failure")
++		})
++	}()
++	select {
++	case <-entered:
++	case <-time.After(time.Second):
++		t.Fatal("attempt not started")
++	}
++	cancel()
++	select {
++	case err := <-result:
++		if !errors.Is(err, context.Canceled) {
++			t.Fatalf("caller result = %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("caller failed to cancel")
++	}
++	finish(nil)
++	drained := make(chan error, 1)
++	go func() { _, err := a.BeginDrain(context.Background()); drained <- err }()
++	select {
++	case err := <-drained:
++		t.Fatalf("drain escaped accepted attempt: %v", err)
++	case <-time.After(20 * time.Millisecond):
++	}
++	once.Do(func() { close(release) })
++	select {
++	case <-returned:
++	case <-time.After(time.Second):
++		t.Fatal("effect did not finish")
++	}
++	select {
++	case err := <-drained:
++		if !errors.Is(err, app.ErrDrainCoverageIncomplete) || !errors.Is(err, context.Canceled) {
++			t.Fatalf("drain lost refusal/cancellation: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join")
++	}
++	if effects.Load() != 1 {
++		t.Fatalf("effects = %d", effects.Load())
++	}
++}
+diff --git a/cmd/wacli/owned_profile_presence_routes_test.go b/cmd/wacli/owned_profile_presence_routes_test.go
+new file mode 100644
+index 0000000..c29bb2e
+--- /dev/null
++++ b/cmd/wacli/owned_profile_presence_routes_test.go
+@@ -0,0 +1,32 @@
++package main
++
++import (
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"testing"
++)
++
++func TestOwnedProfilePresenceRoutesUseOwnedFacade(t *testing.T) {
++	for _, name := range []string{"profile.go", "presence.go"} {
++		fset := token.NewFileSet()
++		file, err := parser.ParseFile(fset, name, nil, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		ast.Inspect(file, func(n ast.Node) bool {
++			if sel, ok := n.(*ast.SelectorExpr); ok {
++				switch sel.Sel.Name {
++				case "WA", "DB", "OpenWA", "EnsureAuthed", "LocalResolver", "ReadOnlyResolver":
++					t.Errorf("%s: migrated route borrows raw accessor/method value %s", fset.Position(sel.Pos()), sel.Sel.Name)
++				}
++			}
++			if call, ok := n.(*ast.CallExpr); ok {
++				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Connect" && len(call.Args) == 3 {
++					t.Errorf("%s calls raw App.Connect", fset.Position(call.Pos()))
++				}
++			}
++			return true
++		})
++	}
++}
+diff --git a/cmd/wacli/owned_session_cleanup.go b/cmd/wacli/owned_session_cleanup.go
+new file mode 100644
+index 0000000..4f18a6f
+--- /dev/null
++++ b/cmd/wacli/owned_session_cleanup.go
+@@ -0,0 +1,39 @@
++package main
++
++import (
++	"errors"
++
++	"github.com/openclaw/wacli/internal/app"
++	"github.com/openclaw/wacli/internal/lock"
++)
++
++// closeOwnedSession is for routes that own an App and optional lock. Unlike
++// closeApp, it retains durable drain/close failures for the command result.
++func closeOwnedSession(a *app.App, lk *lock.Lock) error {
++	var err error
++	if a != nil {
++		err = errors.Join(err, a.CloseWithError())
++	}
++	if lk != nil {
++		err = errors.Join(err, lk.Release())
++	}
++	return err
++}
++
++// Finish the command token before CloseWithError joins the owner. Already
++// accepted children keep their independent leases and are still joined by close.
++// Calling close first would wait forever for this very command token.
++func finishOwnedSession(a *app.App, lk *lock.Lock, finish func(error), resultErr error) error {
++	finish(resultErr)
++	return joinOwnedCommandAndClose(resultErr, closeOwnedSession(a, lk))
++}
++
++// The owner may have retained the exact command error during finish. Return
++// that close error intact instead of duplicating its message; distinct close
++// and lock failures must still survive alongside the command error.
++func joinOwnedCommandAndClose(resultErr, closeErr error) error {
++	if resultErr != nil && closeErr != nil && errors.Is(closeErr, resultErr) {
++		return closeErr
++	}
++	return errors.Join(resultErr, closeErr)
++}
+diff --git a/cmd/wacli/owned_session_cleanup_test.go b/cmd/wacli/owned_session_cleanup_test.go
+new file mode 100644
+index 0000000..6c7b240
+--- /dev/null
++++ b/cmd/wacli/owned_session_cleanup_test.go
+@@ -0,0 +1,109 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/app"
++)
++
++func TestOwnedSessionFinishPrecedesCloseAndRetainsFailure(t *testing.T) {
++	a := &app.App{}
++	_, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	cause := errors.New("synthetic command failure")
++	done := make(chan error, 1)
++	go func() { done <- finishOwnedSession(a, nil, finish, cause) }()
++	select {
++	case err := <-done:
++		if !errors.Is(err, cause) {
++			t.Fatalf("cleanup lost cause: %v", err)
++		}
++		if n := strings.Count(err.Error(), cause.Error()); n != 1 {
++			t.Fatalf("command failure printed %d times: %v", n, err)
++		}
++	case <-time.After(time.Second):
++		finish(cause) // unblock an erroneous close-first implementation
++		t.Fatal("close waited on its own unfinished command token")
++	}
++	if err := a.CloseWithError(); !errors.Is(err, cause) {
++		t.Fatalf("idempotent close lost command failure: %v", err)
++	}
++}
++
++func TestOwnedAuthRoutesDoNotBorrowRawHandles(t *testing.T) {
++	fset := token.NewFileSet()
++	file, err := parser.ParseFile(fset, "auth.go", nil, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	begins, finishes := 0, 0
++	ast.Inspect(file, func(n ast.Node) bool {
++		sel, ok := n.(*ast.SelectorExpr)
++		if ok {
++			switch sel.Sel.Name {
++			case "WA", "DB", "OpenWA", "EnsureAuthed":
++				t.Errorf("%s: auth route borrows %s", fset.Position(sel.Pos()), sel.Sel.Name)
++			case "BeginScopedOperation":
++				begins++
++			}
++		}
++		call, ok := n.(*ast.CallExpr)
++		if ok {
++			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "finishOwnedSession" {
++				finishes++
++			}
++		}
++		return true
++	})
++	if begins != 3 || finishes != 3 {
++		t.Fatalf("auth scope/cleanup routes = %d/%d, want 3/3", begins, finishes)
++	}
++}
++
++func TestOwnedSessionJoinDeduplicatesOnlyContainedCommandError(t *testing.T) {
++	commandErr := errors.New("synthetic command failure")
++	closeErr := errors.New("synthetic distinct close failure")
++	for _, tc := range []struct {
++		name           string
++		command, close error
++		commandCount   int
++	}{
++		{"nil", nil, nil, 0},
++		{"command-only", commandErr, nil, 1},
++		{"close-only", nil, closeErr, 0},
++		{"same", commandErr, commandErr, 1},
++		{"contained-with-distinct-close", commandErr, errors.Join(commandErr, closeErr), 1},
++		{"distinct", commandErr, closeErr, 1},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got := joinOwnedCommandAndClose(tc.command, tc.close)
++			if tc.command != nil && !errors.Is(got, tc.command) {
++				t.Fatalf("lost command cause: %v", got)
++			}
++			if tc.close != nil && !errors.Is(got, tc.close) {
++				t.Fatalf("lost close cause: %v", got)
++			}
++			if tc.command == nil && tc.close == nil && got != nil {
++				t.Fatalf("nil errors became %v", got)
++			}
++			if got != nil && strings.Count(got.Error(), commandErr.Error()) != tc.commandCount {
++				t.Fatalf("duplicated/missing command diagnostic: %v", got)
++			}
++		})
++	}
++	// Equal text is not identity: retain both different error values.
++	other := errors.New(commandErr.Error())
++	got := joinOwnedCommandAndClose(commandErr, other)
++	if !errors.Is(got, commandErr) || !errors.Is(got, other) || strings.Count(got.Error(), commandErr.Error()) != 2 {
++		t.Fatalf("string-based deduplication discarded a distinct cause: %v", got)
++	}
++}
+diff --git a/cmd/wacli/presence.go b/cmd/wacli/presence.go
+index 6a13a1b..702d6c4 100644
+--- a/cmd/wacli/presence.go
++++ b/cmd/wacli/presence.go
+@@ -4,0 +5 @@ import (
++	"errors"
+@@ -46 +47 @@ func newPresenceSubscribeCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -62 +63 @@ func newPresenceSubscribeCmd(flags *rootFlags) *cobra.Command {
+-func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) error {
++func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) (resultErr error) {
+@@ -85 +86,21 @@ func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) error
+-	defer closeApp(a, lk)
++	opCtx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return errors.Join(err, closeOwnedSession(a, lk))
++	}
++	onlineAttempted := false
++	defer func() {
++		var cleanupErr error
++		if onlineAttempted {
++			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(opCtx), 5*time.Second)
++			if cleanupOwned, ownErr := a.OwnedWA(cleanupCtx); ownErr != nil {
++				cleanupErr = ownErr
++			} else {
++				cleanupErr = cleanupOwned.SendPresence(cleanupCtx, types.PresenceUnavailable)
++			}
++			cleanupCancel()
++		}
++		if cleanupErr != nil {
++			resultErr = errors.Join(resultErr, fmt.Errorf("hide presence: %w", cleanupErr))
++		}
++		resultErr = finishOwnedSession(a, lk, finish, resultErr)
++	}()
+@@ -93 +114,2 @@ func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) error
+-	if err := a.EnsureAuthed(ctx); err != nil {
++	auth, err := a.OwnedAuth(opCtx)
++	if err != nil {
+@@ -96 +118,5 @@ func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) error
+-	if err := a.Connect(ctx, false, nil); err != nil {
++	if err := auth.Connect(opCtx); err != nil {
++		return err
++	}
++	owned, err := a.OwnedWA(opCtx)
++	if err != nil {
+@@ -103 +129,2 @@ func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) error
+-	if err := a.WA().SendPresence(ctx, types.PresenceAvailable); err != nil {
++	onlineAttempted = true
++	if err := owned.SendPresence(opCtx, types.PresenceAvailable); err != nil {
+@@ -106,7 +133 @@ func runPresenceSubscribe(flags *rootFlags, to string, wait time.Duration) error
+-	// Do not stay online after the answer: the connection closes next.
+-	defer func() {
+-		offCtx, offCancel := context.WithTimeout(context.Background(), 5*time.Second)
+-		defer offCancel()
+-		_ = a.WA().SendPresence(offCtx, types.PresenceUnavailable)
+-	}()
+-	state, err := a.WatchPresence(ctx, toJID, wait)
++	state, err := a.WatchPresenceOwned(opCtx, toJID, wait)
+@@ -150 +171 @@ func newPresenceTypingCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -166 +187 @@ func newPresencePausedCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -175 +196 @@ func newPresencePausedCmd(flags *rootFlags) *cobra.Command {
+-func runPresence(flags *rootFlags, to string, state types.ChatPresence, media string) error {
++func runPresence(flags *rootFlags, to string, state types.ChatPresence, media string) (resultErr error) {
+@@ -188,6 +209 @@ func runPresence(flags *rootFlags, to string, state types.ChatPresence, media st
+-		resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{
+-			Kind:          "presence",
+-			To:            to,
+-			PresenceState: string(state),
+-			PresenceMedia: media,
+-		})
++		resp, delegated, delegateErr := tryDelegateSend(ctx, flags, err, sendDelegateRequest{Kind: "presence", To: to, PresenceState: string(state), PresenceMedia: media})
+@@ -202,3 +218,7 @@ func runPresence(flags *rootFlags, to string, state types.ChatPresence, media st
+-	defer closeApp(a, lk)
+-
+-	if err := a.EnsureAuthed(ctx); err != nil {
++	opCtx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return errors.Join(err, closeOwnedSession(a, lk))
++	}
++	defer func() { resultErr = finishOwnedSession(a, lk, finish, resultErr) }()
++	auth, err := a.OwnedAuth(opCtx)
++	if err != nil {
+@@ -207 +227 @@ func runPresence(flags *rootFlags, to string, state types.ChatPresence, media st
+-	if err := a.Connect(ctx, false, nil); err != nil {
++	if err := auth.Connect(opCtx); err != nil {
+@@ -215,0 +236,5 @@ func runPresence(flags *rootFlags, to string, state types.ChatPresence, media st
++	owned, err := a.OwnedWA(opCtx)
++	if err != nil {
++		return err
++	}
++
+@@ -221,2 +246,2 @@ func runPresence(flags *rootFlags, to string, state types.ChatPresence, media st
+-	if err := sendOwnedPresenceWithRetry(ctx, a, reconnectForSend(a), func(ctx context.Context) error {
+-		return a.WA().SendChatPresence(ctx, toJID, state, chatMedia)
++	if err := sendOwnedPresenceWithRetry(opCtx, a, reconnectForOwnedPresence(a), func(ctx context.Context) error {
++		return owned.SendChatPresence(ctx, toJID, state, chatMedia)
+@@ -292,0 +318,27 @@ func sendOwnedPresenceWithRetry(ctx context.Context, a *app.App, reconnect func(
++
++func reconnectForOwnedPresence(a *app.App) func(context.Context) error {
++	return func(ctx context.Context) error {
++		ownedCtx, finish, err := a.BeginScopedOperation(ctx)
++		if err != nil {
++			return err
++		}
++		var resultErr error
++		defer func() { finish(resultErr) }()
++		owned, err := a.OwnedWA(ownedCtx)
++		if err != nil {
++			resultErr = err
++			return err
++		}
++		if err := owned.Disconnect(ownedCtx); err != nil {
++			resultErr = err
++			return err
++		}
++		auth, err := a.OwnedAuth(ownedCtx)
++		if err != nil {
++			resultErr = err
++			return err
++		}
++		resultErr = auth.Connect(ownedCtx)
++		return resultErr
++	}
++}
+diff --git a/cmd/wacli/presence_test.go b/cmd/wacli/presence_test.go
+index 597800e..9c11efe 100644
+--- a/cmd/wacli/presence_test.go
++++ b/cmd/wacli/presence_test.go
+@@ -356 +356 @@ type fakePresenceWatchApp struct {
+-func (f *fakePresenceWatchApp) WatchPresence(_ context.Context, jid types.JID, wait time.Duration) (*app.PresenceState, error) {
++func (f *fakePresenceWatchApp) WatchPresenceOwned(_ context.Context, jid types.JID, wait time.Duration) (*app.PresenceState, error) {
+diff --git a/cmd/wacli/profile.go b/cmd/wacli/profile.go
+index 006fd25..f376866 100644
+--- a/cmd/wacli/profile.go
++++ b/cmd/wacli/profile.go
+@@ -49 +49 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -59,4 +59 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel := withTimeout(context.Background(), flags)
+-			defer cancel()
+-
+-			a, lk, err := newApp(ctx, flags, true, false)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
+@@ -66,6 +63,3 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+-			defer closeApp(a, lk)
+-
+-			if err := a.EnsureAuthed(ctx); err != nil {
+-				return err
+-			}
+-			if err := a.Connect(ctx, false, nil); err != nil {
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
++			if err != nil {
+@@ -75 +69 @@ func newProfileSetPictureCmd(flags *rootFlags) *cobra.Command {
+-			pictureID, err := a.WA().SetProfilePicture(ctx, imgBytes)
++			pictureID, err := owned.SetProfilePicture(ctx, imgBytes)
+@@ -95 +89 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -99 +93,6 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
++			if err != nil {
++				return err
++			}
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
+@@ -103,3 +102 @@ func newProfileRemovePictureCmd(flags *rootFlags) *cobra.Command {
+-			defer cancel()
+-			defer closeApp(a, lk)
+-			pictureID, err := a.WA().SetProfilePicture(ctx, nil)
++			pictureID, err := owned.SetProfilePicture(ctx, nil)
+@@ -124 +121 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -132 +129 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
+@@ -136,3 +133,6 @@ func newProfileSetAboutCmd(flags *rootFlags) *cobra.Command {
+-			defer cancel()
+-			defer closeApp(a, lk)
+-			if err := a.WA().SetStatusMessage(ctx, about); err != nil {
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
++			if err != nil {
++				return err
++			}
++			if err := owned.SetStatusMessage(ctx, about); err != nil {
+@@ -156 +156 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -164 +164,6 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
++			if err != nil {
++				return err
++			}
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
+@@ -168,3 +173 @@ func newProfileSetNameCmd(flags *rootFlags) *cobra.Command {
+-			defer cancel()
+-			defer closeApp(a, lk)
+-			if err := a.WA().SetProfileName(ctx, name); err != nil {
++			if err := owned.SetProfileName(ctx, name); err != nil {
+@@ -190 +193 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -198 +201 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
+@@ -202,3 +205,6 @@ func newProfilePictureInfoCmd(flags *rootFlags) *cobra.Command {
+-			defer cancel()
+-			defer closeApp(a, lk)
+-			info, err := a.WA().GetProfilePictureInfo(ctx, target, preview, existingID)
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
++			if err != nil {
++				return err
++			}
++			info, err := owned.GetProfilePictureInfo(ctx, target, preview, existingID)
+@@ -232 +238 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -240 +246,6 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
++			if err != nil {
++				return err
++			}
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
+@@ -244,3 +255 @@ func newProfileGetAboutCmd(flags *rootFlags) *cobra.Command {
+-			defer cancel()
+-			defer closeApp(a, lk)
+-			output, err := fetchProfileAbout(ctx, a.WA(), target)
++			output, err := fetchProfileAbout(ctx, owned, target)
+@@ -267 +276 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+-		RunE: func(cmd *cobra.Command, args []string) error {
++		RunE: func(cmd *cobra.Command, args []string) (resultErr error) {
+@@ -275 +284 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+-			ctx, cancel, a, lk, err := openLiveProfileApp(flags, true)
++			ctx, cleanup, a, _, err := openLiveProfileApp(flags, true)
+@@ -279,3 +288,6 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+-			defer cancel()
+-			defer closeApp(a, lk)
+-			profile, err := a.WA().GetBusinessProfile(ctx, target)
++			defer func() { resultErr = joinOwnedCommandAndClose(resultErr, cleanup(resultErr)) }()
++			owned, err := a.OwnedWA(ctx)
++			if err != nil {
++				return err
++			}
++			profile, err := owned.GetBusinessProfile(ctx, target)
+@@ -297,3 +309,3 @@ func newProfileBusinessCmd(flags *rootFlags) *cobra.Command {
+-func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, context.CancelFunc, *app.App, *lock.Lock, error) {
+-	ctx, cancel := withTimeout(context.Background(), flags)
+-	a, lk, err := newApp(ctx, flags, needLock, false)
++func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, func(error) error, *app.App, *lock.Lock, error) {
++	rootCtx, cancel := withTimeout(context.Background(), flags)
++	a, lk, err := newApp(rootCtx, flags, needLock, false)
+@@ -304 +316,2 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+-	if err := a.EnsureAuthed(ctx); err != nil {
++	ctx, finish, err := a.BeginScopedOperation(rootCtx)
++	if err != nil {
+@@ -306,2 +319 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+-		closeApp(a, lk)
+-		return nil, nil, nil, nil, err
++		return nil, nil, nil, nil, joinOwnedCommandAndClose(err, closeOwnedSession(a, lk))
+@@ -309 +321,3 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+-	if err := a.Connect(ctx, false, nil); err != nil {
++	auth, err := a.OwnedAuth(ctx)
++	if err != nil {
++		finish(err)
+@@ -311,2 +325,11 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+-		closeApp(a, lk)
+-		return nil, nil, nil, nil, err
++		return nil, nil, nil, nil, joinOwnedCommandAndClose(err, closeOwnedSession(a, lk))
++	}
++	if err := auth.Connect(ctx); err != nil {
++		finish(err)
++		cancel()
++		return nil, nil, nil, nil, joinOwnedCommandAndClose(err, closeOwnedSession(a, lk))
++	}
++	cleanup := func(resultErr error) error {
++		cancel()
++		finish(resultErr)
++		return closeOwnedSession(a, lk)
+@@ -314 +337 @@ func openLiveProfileApp(flags *rootFlags, needLock bool) (context.Context, conte
+-	return ctx, cancel, a, lk, nil
++	return ctx, cleanup, a, lk, nil
+diff --git a/cmd/wacli/send_ipc.go b/cmd/wacli/send_ipc.go
+index 83b249f..56f4283 100644
+--- a/cmd/wacli/send_ipc.go
++++ b/cmd/wacli/send_ipc.go
+@@ -544 +544 @@ func executeDelegatedChatState(ctx context.Context, a delegatedChatStateApp, req
+-func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateRequest) (sendDelegateResponse, error) {
++func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateRequest) (response sendDelegateResponse, operationErr error) {
+@@ -553 +552,0 @@ func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateR
+-	toJID = warmupDelegatedRecipient(ctx, a, toJID)
+@@ -558,2 +557,15 @@ func executeDelegatedPresence(ctx context.Context, a *app.App, req sendDelegateR
+-	if err := sendOwnedPresenceWithRetry(ctx, a, reconnectForSend(a), func(ctx context.Context) error {
+-		return a.WA().SendChatPresence(ctx, toJID, state, chatMedia)
++	if a == nil {
++		return sendDelegateResponse{}, app.ErrOperationScopeMissing
++	}
++	ctx, finish, err := a.BeginScopedOperation(ctx)
++	if err != nil {
++		return sendDelegateResponse{}, err
++	}
++	defer func() { finish(operationErr) }()
++	owned, err := a.OwnedWA(ctx)
++	if err != nil {
++		return sendDelegateResponse{}, err
++	}
++	toJID = warmupRecipient(ctx, owned, toJID, os.Stderr)
++	if err := sendOwnedPresenceWithRetry(ctx, a, reconnectForOwnedPresence(a), func(ctx context.Context) error {
++		return owned.SendChatPresence(ctx, toJID, state, chatMedia)
+@@ -567 +579 @@ type delegatedPresenceWatchApp interface {
+-	WatchPresence(context.Context, types.JID, time.Duration) (*app.PresenceState, error)
++	WatchPresenceOwned(context.Context, types.JID, time.Duration) (*app.PresenceState, error)
+@@ -578 +590 @@ func executeDelegatedPresenceSubscribe(ctx context.Context, a delegatedPresenceW
+-	state, err := a.WatchPresence(ctx, toJID, time.Duration(req.PresenceWaitMS)*time.Millisecond)
++	state, err := a.WatchPresenceOwned(ctx, toJID, time.Duration(req.PresenceWaitMS)*time.Millisecond)
+diff --git a/cmd/wacli/testdata/owned_handle_inventory.json b/cmd/wacli/testdata/owned_handle_inventory.json
+index b59ebf3..a73f0b3 100644
+--- a/cmd/wacli/testdata/owned_handle_inventory.json
++++ b/cmd/wacli/testdata/owned_handle_inventory.json
+@@ -2,30 +1,0 @@
+-  {
+-    "id": "cmd/wacli/auth.go:newAuthStatusCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/auth.go",
+-    "function": "newAuthStatusCmd",
+-    "accessor": "WA",
+-    "line": 281,
+-    "column": 14,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/auth.go:newAuthStatusCmd:WA:occurrence-2",
+-    "path": "cmd/wacli/auth.go",
+-    "function": "newAuthStatusCmd",
+-    "accessor": "WA",
+-    "line": 289,
+-    "column": 17,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/auth.go:newAuthLogoutCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/auth.go",
+-    "function": "newAuthLogoutCmd",
+-    "accessor": "WA",
+-    "line": 356,
+-    "column": 14,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+@@ -1122,100 +1091,0 @@
+-  {
+-    "id": "cmd/wacli/presence.go:runPresenceSubscribe:WA:occurrence-1",
+-    "path": "cmd/wacli/presence.go",
+-    "function": "runPresenceSubscribe",
+-    "accessor": "WA",
+-    "line": 103,
+-    "column": 12,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/presence.go:runPresenceSubscribe:WA:occurrence-2",
+-    "path": "cmd/wacli/presence.go",
+-    "function": "runPresenceSubscribe",
+-    "accessor": "WA",
+-    "line": 110,
+-    "column": 7,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/presence.go:runPresence:WA:occurrence-1",
+-    "path": "cmd/wacli/presence.go",
+-    "function": "runPresence",
+-    "accessor": "WA",
+-    "line": 222,
+-    "column": 10,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfileSetPictureCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfileSetPictureCmd",
+-    "accessor": "WA",
+-    "line": 75,
+-    "column": 22,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfileRemovePictureCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfileRemovePictureCmd",
+-    "accessor": "WA",
+-    "line": 105,
+-    "column": 22,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfileSetAboutCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfileSetAboutCmd",
+-    "accessor": "WA",
+-    "line": 138,
+-    "column": 14,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfileSetNameCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfileSetNameCmd",
+-    "accessor": "WA",
+-    "line": 170,
+-    "column": 14,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfilePictureInfoCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfilePictureInfoCmd",
+-    "accessor": "WA",
+-    "line": 204,
+-    "column": 17,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfileGetAboutCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfileGetAboutCmd",
+-    "accessor": "WA",
+-    "line": 246,
+-    "column": 42,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+-  {
+-    "id": "cmd/wacli/profile.go:newProfileBusinessCmd:WA:occurrence-1",
+-    "path": "cmd/wacli/profile.go",
+-    "function": "newProfileBusinessCmd",
+-    "accessor": "WA",
+-    "line": 281,
+-    "column": 20,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+@@ -1312,10 +1181,0 @@
+-  {
+-    "id": "cmd/wacli/send_ipc.go:executeDelegatedPresence:WA:occurrence-1",
+-    "path": "cmd/wacli/send_ipc.go",
+-    "function": "executeDelegatedPresence",
+-    "accessor": "WA",
+-    "line": 559,
+-    "column": 10,
+-    "expression": "a.WA()",
+-    "status": "raw_escape"
+-  },
+@@ -1327 +1187 @@
+-    "line": 597,
++    "line": 609,
+@@ -1337 +1197 @@
+-    "line": 602,
++    "line": 614,
+@@ -1347 +1207 @@
+-    "line": 623,
++    "line": 635,
+@@ -1357 +1217 @@
+-    "line": 728,
++    "line": 740,
+@@ -1367 +1227 @@
+-    "line": 734,
++    "line": 746,
+@@ -1377 +1237 @@
+-    "line": 734,
++    "line": 746,
+@@ -1387 +1247 @@
+-    "line": 805,
++    "line": 817,
+diff --git a/internal/app/owned_auth.go b/internal/app/owned_auth.go
+new file mode 100644
+index 0000000..fcb4280
+--- /dev/null
++++ b/internal/app/owned_auth.go
+@@ -0,0 +1,107 @@
++package app
++
++import (
++	"context"
++	"errors"
++)
++
++// OwnedAuth is the application-owned authentication facade. Its methods admit
++// one operation and retain that lease until the underlying operation returns.
++// Callers never borrow the SDK client or the application database.
++type OwnedAuth struct{ app *App }
++
++// OwnedAuth returns an authentication facade only for a live application-owned
++// operation scope.
++func (a *App) OwnedAuth(ctx context.Context) (*OwnedAuth, error) {
++	if err := a.admitHandle(ctx); err != nil {
++		return nil, err
++	}
++	return &OwnedAuth{app: a}, nil
++}
++
++func (h *OwnedAuth) effect(ctx context.Context) (context.Context, func(error), error) {
++	if err := h.app.admitHandle(ctx); err != nil {
++		return nil, nil, err
++	}
++	child, finish, err := RegisterOperationChild(ctx)
++	if err != nil {
++		return nil, nil, errors.Join(ErrHandleRevoked, err)
++	}
++	return child, finish, nil
++}
++
++// Sync runs the complete authentication/bootstrap lifecycle under one owned
++// lease. Cancellation is passed to Sync, but the lease is not released until
++// Sync itself has returned.
++func (h *OwnedAuth) Sync(ctx context.Context, opts SyncOptions) (result SyncResult, err error) {
++	child, finish, err := h.effect(ctx)
++	if err != nil {
++		return SyncResult{}, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return h.app.Sync(child, opts)
++}
++
++// Connect ensures authentication and connects the session under one accepted
++// child lease. Callers must use this rather than borrowing the SDK client.
++func (h *OwnedAuth) Connect(ctx context.Context) (err error) {
++	child, finish, err := h.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	if err = h.app.EnsureAuthed(child); err != nil {
++		return err
++	}
++	return h.app.Connect(child, false, nil)
++}
++
++// Status opens the session through the application and reports its durable
++// authentication identity. Refused calls do not open the session.
++func (h *OwnedAuth) Status(ctx context.Context) (authed bool, linkedJID string, err error) {
++	child, finish, err := h.effect(ctx)
++	if err != nil {
++		return false, "", err
++	}
++	defer finishOwnedEffect(finish, &err)
++	_ = child // application-local status reads have no context-bearing SDK call
++	if err = h.app.OpenWA(); err != nil {
++		return false, "", err
++	}
++	h.app.waMu.Lock()
++	client := h.app.wa
++	h.app.waMu.Unlock()
++	if client == nil {
++		return false, "", ErrHandleRevoked
++	}
++	authed = client.IsAuthed()
++	if revoked, e := SessionRevoked(h.app.StoreDir()); e != nil {
++		return false, "", e
++	} else if revoked {
++		authed = false
++	}
++	if authed {
++		linkedJID = client.LinkedJID()
++	}
++	return authed, linkedJID, nil
++}
++
++// Logout ensures an authenticated session, connects it if necessary, then
++// invalidates it. All SDK interaction remains inside the accepted lease.
++func (h *OwnedAuth) Logout(ctx context.Context) (err error) {
++	child, finish, err := h.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	if err = h.app.EnsureAuthed(child); err != nil {
++		return err
++	}
++	if err = h.app.Connect(child, false, nil); err != nil {
++		return err
++	}
++	h.app.waMu.Lock()
++	client := h.app.wa
++	h.app.waMu.Unlock()
++	return client.Logout(child)
++}
+diff --git a/internal/app/owned_auth_test.go b/internal/app/owned_auth_test.go
+new file mode 100644
+index 0000000..e440d56
+--- /dev/null
++++ b/internal/app/owned_auth_test.go
+@@ -0,0 +1,365 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"os"
++	"path/filepath"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/openclaw/wacli/internal/wa"
++)
++
++// countedAuthWA embeds the complete fake client so any unexpected SDK method
++// still panics through the nil embedded client, while the methods exercised by
++// OwnedAuth are counted and (when requested) held at the SDK boundary.
++type countedAuthWA struct {
++	*fakeWA
++	isAuthedCalls  atomic.Int32
++	connectCalls   atomic.Int32
++	logoutCalls    atomic.Int32
++	statusEntered  chan struct{}
++	statusRelease  chan struct{}
++	connectEntered chan struct{}
++	connectRelease chan struct{}
++	connectErr     error
++	logoutEntered  chan struct{}
++	logoutRelease  chan struct{}
++	logoutErr      error
++}
++
++func (w *countedAuthWA) IsAuthed() bool {
++	w.isAuthedCalls.Add(1)
++	if w.statusEntered != nil {
++		select {
++		case <-w.statusEntered:
++		default:
++			close(w.statusEntered)
++		}
++		<-w.statusRelease
++	}
++	return w.fakeWA.IsAuthed()
++}
++
++func (w *countedAuthWA) Connect(ctx context.Context, opts wa.ConnectOptions) error {
++	w.connectCalls.Add(1)
++	if w.connectEntered != nil {
++		select {
++		case <-w.connectEntered:
++		default:
++			close(w.connectEntered)
++		}
++		<-w.connectRelease
++	}
++	if w.connectErr != nil {
++		return w.connectErr
++	}
++	return w.fakeWA.Connect(ctx, opts)
++}
++
++func (w *countedAuthWA) Logout(ctx context.Context) error {
++	w.logoutCalls.Add(1)
++	if w.logoutEntered != nil {
++		close(w.logoutEntered)
++		<-w.logoutRelease
++	}
++	if w.logoutErr != nil {
++		return w.logoutErr
++	}
++	return w.fakeWA.Logout(ctx)
++}
++
++func newCountedAuthApp(t *testing.T) (*App, *countedAuthWA, context.Context, func(error)) {
++	t.Helper()
++	a := newTestApp(t)
++	client := &countedAuthWA{fakeWA: newFakeWA()}
++	a.wa = client
++	// Install the fake first; no SDK client or session database is constructed.
++	if err := a.OpenWA(); err != nil {
++		t.Fatalf("OpenWA: %v", err)
++	}
++	ctx, finish, err := a.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatalf("BeginScopedOperation: %v", err)
++	}
++	t.Cleanup(func() { finish(nil) })
++	return a, client, ctx, finish
++}
++
++func TestOwnedAuthRefusesMissingForeignFinishedAndCanceledContextsWithoutEffects(t *testing.T) {
++	for _, mode := range []string{"missing", "foreign", "finished", "canceled"} {
++		t.Run(mode, func(t *testing.T) {
++			a, client, parent, finish := newCountedAuthApp(t)
++			auth, err := a.OwnedAuth(parent)
++			if err != nil {
++				t.Fatal(err)
++			}
++			use := parent
++			switch mode {
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &App{}
++				var end func(error)
++				use, end, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer end(nil)
++			case "finished":
++				finish(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(parent)
++				cancel()
++			}
++
++			ops := []struct {
++				name string
++				call func() error
++			}{
++				{"sync", func() error {
++					_, e := auth.Sync(use, SyncOptions{Mode: SyncModeOnce, IdleExit: time.Millisecond})
++					return e
++				}},
++				{"connect", func() error { return auth.Connect(use) }},
++				{"status", func() error { _, _, e := auth.Status(use); return e }},
++				{"logout", func() error { return auth.Logout(use) }},
++			}
++			for _, op := range ops {
++				if e := op.call(); !errors.Is(e, ErrHandleRevoked) {
++					t.Errorf("%s refusal = %v", op.name, e)
++				}
++			}
++			if got := client.isAuthedCalls.Load() + client.connectCalls.Load() + client.logoutCalls.Load(); got != 0 {
++				t.Fatalf("refused calls reached SDK %d times", got)
++			}
++			if _, err := os.Stat(filepath.Join(a.StoreDir(), "SESSION_REVOKED")); !errors.Is(err, os.ErrNotExist) {
++				t.Fatalf("refused calls changed session marker: %v", err)
++			}
++		})
++	}
++}
++
++func TestOwnedAuthConnectJoinsBlockedSDKCallAndPreservesFailure(t *testing.T) {
++	a, client, parent, finish := newCountedAuthApp(t)
++	failure := errors.New("synthetic connect failure")
++	client.connectEntered = make(chan struct{})
++	client.connectRelease = make(chan struct{})
++	client.connectErr = failure
++	auth, err := a.OwnedAuth(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result := make(chan error, 1)
++	go func() { result <- auth.Connect(parent) }()
++	select {
++	case <-client.connectEntered:
++	case <-time.After(time.Second):
++		t.Fatal("Connect did not reach SDK")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++	select {
++	case e := <-drain:
++		t.Fatalf("drain escaped blocked Connect: %v", e)
++	case <-time.After(25 * time.Millisecond):
++	}
++	close(client.connectRelease)
++	if e := <-result; !errors.Is(e, failure) {
++		t.Fatalf("Connect error = %v, want failure", e)
++	}
++	select {
++	case e := <-drain:
++		if !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++			t.Fatalf("drain error = %v, want failure and coverage", e)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join Connect")
++	}
++}
++
++func TestOwnedAuthSyncJoinsBlockedConnectWithValidOptions(t *testing.T) {
++	a, client, parent, finish := newCountedAuthApp(t)
++	failure := errors.New("synthetic sync connect failure")
++	client.connectEntered = make(chan struct{})
++	client.connectRelease = make(chan struct{})
++	client.connectErr = failure
++	auth, err := a.OwnedAuth(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result := make(chan error, 1)
++	go func() {
++		_, e := auth.Sync(parent, SyncOptions{Mode: SyncModeOnce, PresenceMode: SyncPresenceModeQuiet, IdleExit: time.Millisecond})
++		result <- e
++	}()
++	select {
++	case <-client.connectEntered:
++	case <-time.After(time.Second):
++		t.Fatal("Sync did not reach SDK Connect")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++	select {
++	case e := <-drain:
++		t.Fatalf("drain escaped blocked Sync: %v", e)
++	case <-time.After(25 * time.Millisecond):
++	}
++	close(client.connectRelease)
++	if e := <-result; !errors.Is(e, failure) {
++		t.Fatalf("Sync error = %v, want failure", e)
++	}
++	select {
++	case e := <-drain:
++		if !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++			t.Fatalf("drain error = %v, want failure and coverage", e)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join Sync")
++	}
++}
++
++func TestOwnedAuthStatusJoinsBlockedSDKRead(t *testing.T) {
++	a, client, parent, finish := newCountedAuthApp(t)
++	client.statusEntered = make(chan struct{})
++	client.statusRelease = make(chan struct{})
++	auth, err := a.OwnedAuth(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result := make(chan struct {
++		authed bool
++		jid    string
++		err    error
++	}, 1)
++	go func() {
++		authed, jid, e := auth.Status(parent)
++		result <- struct {
++			authed bool
++			jid    string
++			err    error
++		}{authed, jid, e}
++	}()
++	select {
++	case <-client.statusEntered:
++	case <-time.After(time.Second):
++		t.Fatal("Status did not reach SDK IsAuthed")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++	select {
++	case e := <-drain:
++		t.Fatalf("drain escaped blocked Status: %v", e)
++	case <-time.After(25 * time.Millisecond):
++	}
++	close(client.statusRelease)
++	got := <-result
++	if got.err != nil || !got.authed || got.jid == "" {
++		t.Fatalf("Status = %#v, want authenticated identity", got)
++	}
++	select {
++	case e := <-drain:
++		if !errors.Is(e, ErrDrainCoverageIncomplete) {
++			t.Fatalf("drain error = %v, want coverage", e)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join Status")
++	}
++}
++
++func TestOwnedAuthStatusHonorsSessionRevokedMarker(t *testing.T) {
++	a, client, parent, _ := newCountedAuthApp(t)
++	if err := MarkSessionRevoked(a.StoreDir(), "synthetic logout"); err != nil {
++		t.Fatal(err)
++	}
++	auth, err := a.OwnedAuth(parent)
++	if err != nil {
++		t.Fatal(err)
++	}
++	authed, jid, err := auth.Status(parent)
++	if err != nil {
++		t.Fatalf("Status: %v", err)
++	}
++	if authed || jid != "" {
++		t.Fatalf("Status = authed %v jid %q despite revocation", authed, jid)
++	}
++	if client.isAuthedCalls.Load() != 1 {
++		t.Fatalf("IsAuthed calls = %d, want 1", client.isAuthedCalls.Load())
++	}
++}
++
++func TestOwnedAuthLogoutJoinsActualEffectAfterCancelAndTimeout(t *testing.T) {
++	for _, mode := range []string{"cancel", "deadline", "close"} {
++		t.Run(mode, func(t *testing.T) {
++			a, client, parent, finish := newCountedAuthApp(t)
++			client.logoutEntered = make(chan struct{})
++			client.logoutRelease = make(chan struct{})
++			failure := errors.New("synthetic delayed logout failure")
++			client.logoutErr = failure
++			ctx, cancel := context.WithCancel(parent)
++			if mode == "deadline" {
++				cancel()
++				ctx, cancel = context.WithTimeout(parent, 100*time.Millisecond)
++			}
++			defer cancel()
++			auth, err := a.OwnedAuth(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			result := make(chan error, 1)
++			go func() { result <- auth.Logout(ctx) }()
++			select {
++			case <-client.logoutEntered:
++			case <-time.After(time.Second):
++				t.Fatal("logout never reached actual SDK effect")
++			}
++			if mode == "deadline" {
++				<-ctx.Done()
++			} else {
++				cancel()
++			}
++			finish(nil)
++			joined := make(chan error, 1)
++			go func() {
++				if mode == "close" {
++					joined <- a.CloseWithError()
++				} else {
++					_, e := a.BeginDrain(context.Background())
++					joined <- e
++				}
++			}()
++			select {
++			case e := <-joined:
++				close(client.logoutRelease)
++				t.Fatalf("owner escaped logout effect: %v", e)
++			case <-time.After(20 * time.Millisecond):
++			}
++			close(client.logoutRelease)
++			select {
++			case e := <-result:
++				if !errors.Is(e, failure) {
++					t.Fatalf("logout lost effect failure: %v", e)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("logout failed to return")
++			}
++			select {
++			case e := <-joined:
++				if !errors.Is(e, failure) {
++					t.Fatalf("owner lost logout failure: %v", e)
++				}
++			case <-time.After(time.Second):
++				t.Fatal("owner failed to join logout")
++			}
++			if client.logoutCalls.Load() != 1 {
++				t.Fatalf("logout calls = %d", client.logoutCalls.Load())
++			}
++		})
++	}
++}
+diff --git a/internal/app/owned_profile_presence.go b/internal/app/owned_profile_presence.go
+new file mode 100644
+index 0000000..575cad9
+--- /dev/null
++++ b/internal/app/owned_profile_presence.go
+@@ -0,0 +1,99 @@
++package app
++
++import (
++	"context"
++	"time"
++
++	"go.mau.fi/whatsmeow/types"
++)
++
++// Profile and presence operations are exposed only through the borrowed facade;
++// the underlying client never escapes command ownership.
++func (w *OwnedWA) SetProfilePicture(ctx context.Context, avatar []byte) (id string, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return "", err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SetProfilePicture(ctx, avatar)
++}
++func (w *OwnedWA) GetProfilePictureInfo(ctx context.Context, jid types.JID, preview bool, existingID string) (info *types.ProfilePictureInfo, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.GetProfilePictureInfo(ctx, jid, preview, existingID)
++}
++func (w *OwnedWA) SetStatusMessage(ctx context.Context, msg string) (err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SetStatusMessage(ctx, msg)
++}
++func (w *OwnedWA) SetProfileName(ctx context.Context, name string) (err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SetProfileName(ctx, name)
++}
++func (w *OwnedWA) GetUserInfo(ctx context.Context, jids []types.JID) (info map[types.JID]types.UserInfo, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.GetUserInfo(ctx, jids)
++}
++func (w *OwnedWA) GetBusinessProfile(ctx context.Context, jid types.JID) (profile *types.BusinessProfile, err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.GetBusinessProfile(ctx, jid)
++}
++func (w *OwnedWA) SendPresence(ctx context.Context, state types.Presence) (err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SendPresence(ctx, state)
++}
++func (w *OwnedWA) SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) (err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SendChatPresence(ctx, jid, state, media)
++}
++func (w *OwnedWA) SubscribePresence(ctx context.Context, jid types.JID) (err error) {
++	ctx, finish, err := w.effect(ctx)
++	if err != nil {
++		return err
++	}
++	defer finishOwnedEffect(finish, &err)
++	return w.client.SubscribePresence(ctx, jid)
++}
++
++// WatchPresence retains an effect lease for the complete subscription/wait.
++func (a *App) WatchPresenceOwned(ctx context.Context, jid types.JID, wait time.Duration) (*PresenceState, error) {
++	owned, err := a.OwnedWA(ctx)
++	if err != nil {
++		return nil, err
++	}
++	child, finish, err := owned.effect(ctx)
++	if err != nil {
++		return nil, err
++	}
++	var resultErr error
++	defer finishOwnedEffect(finish, &resultErr)
++	state, resultErr := a.WatchPresence(child, jid, wait)
++	return state, resultErr
++}
+diff --git a/internal/app/owned_profile_presence_test.go b/internal/app/owned_profile_presence_test.go
+new file mode 100644
+index 0000000..749c1e7
+--- /dev/null
++++ b/internal/app/owned_profile_presence_test.go
+@@ -0,0 +1,452 @@
++package app
++
++import (
++	"context"
++	"errors"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"go.mau.fi/whatsmeow/types"
++)
++
++type countedProfilePresenceWA struct {
++	*fakeWA
++	calls          atomic.Int32
++	resolverCalls  atomic.Int32
++	entered        chan struct{}
++	release        chan struct{}
++	failure        error
++	panicOnProfile bool
++}
++
++func newCountedProfilePresenceWA() *countedProfilePresenceWA {
++	return &countedProfilePresenceWA{fakeWA: newFakeWA()}
++}
++func (w *countedProfilePresenceWA) hit() { w.calls.Add(1) }
++func (w *countedProfilePresenceWA) SetProfilePicture(context.Context, []byte) (string, error) {
++	w.hit()
++	w.blockOrPanic()
++	return "synthetic-picture", w.failure
++}
++func (w *countedProfilePresenceWA) GetProfilePictureInfo(context.Context, types.JID, bool, string) (*types.ProfilePictureInfo, error) {
++	w.hit()
++	return nil, w.failure
++}
++func (w *countedProfilePresenceWA) SetStatusMessage(context.Context, string) error {
++	w.hit()
++	return w.failure
++}
++func (w *countedProfilePresenceWA) SetProfileName(context.Context, string) error {
++	w.hit()
++	return w.failure
++}
++func (w *countedProfilePresenceWA) GetUserInfo(context.Context, []types.JID) (map[types.JID]types.UserInfo, error) {
++	w.hit()
++	return nil, w.failure
++}
++func (w *countedProfilePresenceWA) GetBusinessProfile(context.Context, types.JID) (*types.BusinessProfile, error) {
++	w.hit()
++	return nil, w.failure
++}
++func (w *countedProfilePresenceWA) SendPresence(context.Context, types.Presence) error {
++	w.hit()
++	w.blockOrPanic()
++	return w.failure
++}
++func (w *countedProfilePresenceWA) SendChatPresence(context.Context, types.JID, types.ChatPresence, types.ChatPresenceMedia) error {
++	w.hit()
++	return w.failure
++}
++func (w *countedProfilePresenceWA) SubscribePresence(ctx context.Context, jid types.JID) error {
++	w.hit()
++	if w.entered != nil {
++		select {
++		case <-w.entered:
++		default:
++			close(w.entered)
++		}
++		select {
++		case <-w.release:
++		case <-ctx.Done():
++			return ctx.Err()
++		}
++	}
++	return w.failure
++}
++func (w *countedProfilePresenceWA) ResolvePNToLID(ctx context.Context, jid types.JID) types.JID {
++	w.resolverCalls.Add(1)
++	return w.fakeWA.ResolvePNToLID(ctx, jid)
++}
++func (w *countedProfilePresenceWA) ResolveLIDToPN(ctx context.Context, jid types.JID) types.JID {
++	w.resolverCalls.Add(1)
++	return w.fakeWA.ResolveLIDToPN(ctx, jid)
++}
++func (w *countedProfilePresenceWA) blockOrPanic() {
++	if w.entered != nil {
++		select {
++		case <-w.entered:
++		default:
++			close(w.entered)
++		}
++		<-w.release
++	}
++	if w.panicOnProfile {
++		panic(w.failure)
++	}
++}
++
++func profilePresenceArgs() (types.JID, types.Presence, types.ChatPresence, types.ChatPresenceMedia) {
++	return types.NewJID("15550000001", types.DefaultUserServer), types.PresenceAvailable, types.ChatPresenceComposing, types.ChatPresenceMediaText
++}
++
++func callAllProfilePresenceMethods(t *testing.T, w *OwnedWA, ctx context.Context) {
++	t.Helper()
++	jid, presence, chat, media := profilePresenceArgs()
++	if _, err := w.SetProfilePicture(ctx, []byte("synthetic")); err == nil {
++		t.Error("SetProfilePicture unexpectedly succeeded")
++	}
++	if _, err := w.GetProfilePictureInfo(ctx, jid, false, ""); err == nil {
++		t.Error("GetProfilePictureInfo unexpectedly succeeded")
++	}
++	if err := w.SetStatusMessage(ctx, "synthetic"); err == nil {
++		t.Error("SetStatusMessage unexpectedly succeeded")
++	}
++	if err := w.SetProfileName(ctx, "synthetic"); err == nil {
++		t.Error("SetProfileName unexpectedly succeeded")
++	}
++	if _, err := w.GetUserInfo(ctx, []types.JID{jid}); err == nil {
++		t.Error("GetUserInfo unexpectedly succeeded")
++	}
++	if _, err := w.GetBusinessProfile(ctx, jid); err == nil {
++		t.Error("GetBusinessProfile unexpectedly succeeded")
++	}
++	if err := w.SendPresence(ctx, presence); err == nil {
++		t.Error("SendPresence unexpectedly succeeded")
++	}
++	if err := w.SendChatPresence(ctx, jid, chat, media); err == nil {
++		t.Error("SendChatPresence unexpectedly succeeded")
++	}
++	if err := w.SubscribePresence(ctx, jid); err == nil {
++		t.Error("SubscribePresence unexpectedly succeeded")
++	}
++}
++
++func TestOwnedProfileRefusesAllInvalidScopes(t *testing.T) {
++	for _, mode := range []string{"missing", "foreign", "finished", "canceled"} {
++		t.Run(mode, func(t *testing.T) {
++			a, _, root, finish := ownedTestApp(t)
++			defer finish(nil)
++			w, err := a.OwnedWA(root)
++			if err != nil {
++				t.Fatal(err)
++			}
++			use := root
++			var otherFinish func(error)
++			switch mode {
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &App{}
++				use, otherFinish, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer otherFinish(nil)
++			case "finished":
++				finish(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(root)
++				cancel()
++			}
++			fake := newCountedProfilePresenceWA()
++			a.wa = fake
++			callAllProfilePresenceMethods(t, w, use)
++			if got := fake.calls.Load(); got != 0 {
++				t.Fatalf("client calls = %d, want zero", got)
++			}
++		})
++	}
++}
++
++func TestOwnedProfileRootSealedFacadeSelectionDoesNotReachClient(t *testing.T) {
++	a, _, _, finish := ownedTestApp(t)
++	defer finish(nil)
++	fake := newCountedProfilePresenceWA()
++	a.wa = fake
++	sealed, cancel := context.WithCancel(context.Background())
++	cancel()
++	if held, err := a.BeginDrain(sealed); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("seal = %v %v", held, err)
++	}
++	if _, err := a.OwnedWA(context.Background()); !(errors.Is(err, ErrOperationSealed) || errors.Is(err, ErrHandleRevoked)) {
++		t.Fatalf("OwnedWA after root seal = %v", err)
++	}
++	if fake.calls.Load() != 0 {
++		t.Fatalf("client calls = %d, want zero", fake.calls.Load())
++	}
++}
++
++func TestOwnedProfileAcceptedEffectWaitsAndRetainsFailure(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	failure := errors.New("synthetic profile failure")
++	fake := newCountedProfilePresenceWA()
++	fake.failure = failure
++	fake.entered = make(chan struct{})
++	fake.release = make(chan struct{})
++	a.wa = fake
++	w, err := a.OwnedWA(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result := make(chan error, 1)
++	go func() { _, e := w.SetProfilePicture(ctx, []byte("synthetic")); result <- e }()
++	select {
++	case <-fake.entered:
++	case <-time.After(time.Second):
++		t.Fatal("profile effect did not enter")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++	select {
++	case e := <-drain:
++		t.Fatalf("drain escaped active profile effect: %v", e)
++	case <-time.After(30 * time.Millisecond):
++	}
++	close(fake.release)
++	if e := <-result; !errors.Is(e, failure) {
++		t.Fatalf("profile failure = %v", e)
++	}
++	select {
++	case e := <-drain:
++		if !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++			t.Fatalf("drain lost profile failure: %v", e)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join")
++	}
++}
++
++func TestOwnedProfilePanicRetainsFailure(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	failure := errors.New("synthetic profile panic")
++	fake := newCountedProfilePresenceWA()
++	fake.failure = failure
++	fake.panicOnProfile = true
++	a.wa = fake
++	w, err := a.OwnedWA(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	func() {
++		defer func() {
++			if got := recover(); got != failure {
++				t.Fatalf("panic = %v", got)
++			}
++		}()
++		_, _ = w.SetProfilePicture(ctx, nil)
++	}()
++	finish(nil)
++	if held, err := a.BeginDrain(context.Background()); held != nil || !errors.Is(err, failure) || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("panic drain = %v %v", held, err)
++	}
++}
++
++func TestOwnedPresenceRefusesAllInvalidScopes(t *testing.T) {
++	for _, mode := range []string{"missing", "foreign", "finished", "canceled"} {
++		t.Run(mode, func(t *testing.T) {
++			a, _, root, finish := ownedTestApp(t)
++			defer finish(nil)
++			fake := newCountedProfilePresenceWA()
++			a.wa = fake
++			w, err := a.OwnedWA(root)
++			if err != nil {
++				t.Fatal(err)
++			}
++			use := root
++			var otherFinish func(error)
++			switch mode {
++			case "missing":
++				use = context.Background()
++			case "foreign":
++				other := &App{}
++				use, otherFinish, err = other.BeginScopedOperation(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer otherFinish(nil)
++			case "finished":
++				finish(nil)
++			case "canceled":
++				var cancel context.CancelFunc
++				use, cancel = context.WithCancel(root)
++				cancel()
++			}
++			jid, presence, chat, media := profilePresenceArgs()
++			_, _ = w.SetProfilePicture(use, nil)
++			_, _ = w.GetProfilePictureInfo(use, jid, false, "")
++			_ = w.SetStatusMessage(use, "")
++			_ = w.SetProfileName(use, "")
++			_, _ = w.GetUserInfo(use, nil)
++			_, _ = w.GetBusinessProfile(use, jid)
++			_ = w.SendPresence(use, presence)
++			_ = w.SendChatPresence(use, jid, chat, media)
++			_ = w.SubscribePresence(use, jid)
++			if fake.calls.Load() != 0 {
++				t.Fatalf("client calls = %d, want zero", fake.calls.Load())
++			}
++		})
++	}
++}
++
++func TestOwnedPresenceRootSealedFacadeSelectionDoesNotReachClient(t *testing.T) {
++	a, _, _, finish := ownedTestApp(t)
++	defer finish(nil)
++	fake := newCountedProfilePresenceWA()
++	a.wa = fake
++	sealed, cancel := context.WithCancel(context.Background())
++	cancel()
++	if held, err := a.BeginDrain(sealed); held != nil || !errors.Is(err, ErrDrainCoverageIncomplete) {
++		t.Fatalf("seal = %v %v", held, err)
++	}
++	if _, err := a.OwnedWA(context.Background()); !(errors.Is(err, ErrOperationSealed) || errors.Is(err, ErrHandleRevoked)) {
++		t.Fatalf("OwnedWA after root seal = %v", err)
++	}
++	if fake.calls.Load() != 0 {
++		t.Fatal("sealed selection reached client")
++	}
++}
++
++func TestOwnedPresenceWatchHoldsLeaseThroughSubscribeFailure(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	failure := errors.New("synthetic subscribe failure")
++	fake := newCountedProfilePresenceWA()
++	fake.failure = failure
++	fake.entered = make(chan struct{})
++	fake.release = make(chan struct{})
++	a.wa = fake
++	jid, _, _, _ := profilePresenceArgs()
++	result := make(chan error, 1)
++	go func() { _, e := a.WatchPresenceOwned(ctx, jid, 0); result <- e }()
++	select {
++	case <-fake.entered:
++	case <-time.After(time.Second):
++		t.Fatal("subscribe did not enter")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++	select {
++	case e := <-drain:
++		t.Fatalf("drain escaped watch: %v", e)
++	case <-time.After(30 * time.Millisecond):
++	}
++	close(fake.release)
++	if e := <-result; !errors.Is(e, failure) {
++		t.Fatalf("watch error = %v", e)
++	}
++	select {
++	case e := <-drain:
++		if !errors.Is(e, failure) {
++			t.Fatalf("drain lost watch failure: %v", e)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join watch")
++	}
++}
++
++func TestOwnedPresenceWatchRegistersAndRemovesEventHandler(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	fake := newCountedProfilePresenceWA()
++	a.wa = fake
++	jid, _, _, _ := profilePresenceArgs()
++	if _, err := a.WatchPresenceOwned(ctx, jid, 5*time.Millisecond); err != nil {
++		t.Fatal(err)
++	}
++	fake.mu.Lock()
++	handlers := len(fake.handlers)
++	fake.mu.Unlock()
++	if handlers != 0 {
++		t.Fatalf("handlers retained = %d", handlers)
++	}
++	if fake.resolverCalls.Load() == 0 {
++		t.Fatal("resolver was not used")
++	}
++}
++
++func TestOwnedPresenceSubscribeAcceptedEffectCallsClient(t *testing.T) {
++	a, _, ctx, finish := ownedTestApp(t)
++	defer finish(nil)
++	fake := newCountedProfilePresenceWA()
++	a.wa = fake
++	w, err := a.OwnedWA(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	jid, _, _, _ := profilePresenceArgs()
++	if err := w.SubscribePresence(ctx, jid); err != nil {
++		t.Fatal(err)
++	}
++	if fake.calls.Load() != 1 {
++		t.Fatalf("SubscribePresence calls = %d", fake.calls.Load())
++	}
++}
++
++func TestOwnedPresenceCleanupWithoutCancelRetainsFailure(t *testing.T) {
++	a, _, root, finish := ownedTestApp(t)
++	failure := errors.New("synthetic cleanup failure")
++	fake := newCountedProfilePresenceWA()
++	fake.failure = failure
++	fake.entered = make(chan struct{})
++	fake.release = make(chan struct{})
++	a.wa = fake
++	w, err := a.OwnedWA(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	parent, cancel := context.WithCancel(root)
++	cancel()
++	result := make(chan error, 1)
++	go func() { result <- w.SendPresence(context.WithoutCancel(parent), types.PresenceUnavailable) }()
++	select {
++	case <-fake.entered:
++	case <-time.After(time.Second):
++		t.Fatal("cleanup presence did not enter")
++	}
++	finish(nil)
++	drain := make(chan error, 1)
++	go func() { _, e := a.BeginDrain(context.Background()); drain <- e }()
++	select {
++	case e := <-drain:
++		t.Fatalf("drain escaped cleanup effect: %v", e)
++	case <-time.After(30 * time.Millisecond):
++	}
++	close(fake.release)
++	if e := <-result; !errors.Is(e, failure) {
++		t.Fatalf("cleanup failure = %v", e)
++	}
++	select {
++	case e := <-drain:
++		if !errors.Is(e, failure) || !errors.Is(e, ErrDrainCoverageIncomplete) {
++			t.Fatalf("drain lost cleanup failure: %v", e)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("drain did not join cleanup effect")
++	}
++	if err := w.SendPresence(context.WithoutCancel(parent), types.PresenceUnavailable); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatalf("finished token revived by WithoutCancel: %v", err)
++	}
++	other := &App{}
++	foreign, otherFinish, err := other.BeginScopedOperation(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer otherFinish(nil)
++	if err := w.SendPresence(context.WithoutCancel(foreign), types.PresenceUnavailable); !errors.Is(err, ErrHandleRevoked) {
++		t.Fatalf("foreign token accepted by WithoutCancel: %v", err)
++	}
++}
