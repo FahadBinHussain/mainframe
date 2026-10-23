@@ -7,6 +7,8 @@ metadata and proposed paths do not prove installed runtimes or contain scripts.
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Any, Mapping
@@ -110,18 +112,33 @@ def manifest(name: str, selector: str = "latest") -> dict[str, Any]:
     if not isinstance(dist, Mapping) or dist.get("tarball") != url:
         raise ValueError("Missing or unsafe registry tarball source")
     integrity = registry._integrity(dist.get("integrity"))
-    for key in ("scripts", "dependencies", "optionalDependencies", "engines"):
+    for key in ("scripts", "dependencies", "optionalDependencies", "peerDependencies", "peerDependenciesMeta", "engines"):
         if key in meta and not isinstance(meta[key], Mapping):
             raise ValueError(f"Invalid registry {key}")
     scripts = meta.get("scripts", {})
     if any(not isinstance(k, str) or not isinstance(v, str) or not v or
            any(c in v for c in "\x00\r\n") for k, v in scripts.items()):
         raise ValueError("Invalid registry script metadata")
-    for key in ("dependencies", "optionalDependencies"):
+    for key in ("dependencies", "optionalDependencies", "peerDependencies"):
         if any(not isinstance(k, str) or not NAME.fullmatch(k) or
                not isinstance(v, str) or not v or any(c in v for c in "\x00\r\n")
                for k, v in meta.get(key, {}).items()):
             raise ValueError("Invalid registry dependency metadata")
+    peers = meta.get("peerDependenciesMeta", {})
+    if any(not isinstance(k, str) or not NAME.fullmatch(k) or not isinstance(v, Mapping) or
+           ("optional" in v and not isinstance(v["optional"], bool)) for k, v in peers.items()):
+        raise ValueError("Invalid registry optional peer metadata")
+    bundled = {k: meta[k] for k in ("bundledDependencies", "bundleDependencies") if k in meta}
+    for value in bundled.values():
+        if not isinstance(value, bool) and (not isinstance(value, list) or
+                any(not isinstance(n, str) or not NAME.fullmatch(n) for n in value)):
+            raise ValueError("Invalid registry bundled dependency metadata")
+    for key in ("os", "cpu", "libc"):
+        if key in meta and (not isinstance(meta[key], list) or any(
+                not isinstance(v, str) or not v or any(c in v for c in "\x00\r\n") for v in meta[key])):
+            raise ValueError("Invalid registry platform metadata")
+    if "hasInstallScript" in meta and not isinstance(meta["hasInstallScript"], bool):
+        raise ValueError("Invalid registry implicit build metadata")
     return {"name": name, "version": version,
             "source": f"{REGISTRY}/{name}/{version}", "selector_source": source,
             "tarball": url, "integrity": integrity,
@@ -129,14 +146,33 @@ def manifest(name: str, selector: str = "latest") -> dict[str, Any]:
             "install_scripts": {k: v for k, v in scripts.items() if k in HOOKS},
             "dependencies": dict(meta.get("dependencies", {})),
             "optional_dependencies": dict(meta.get("optionalDependencies", {})),
+            "peer_dependencies": dict(meta.get("peerDependencies", {})),
+            "peer_dependencies_meta": dict(peers), "bundled_dependencies": bundled,
+            "has_install_script": meta.get("hasInstallScript"),
+            "platform": {k: meta[k] for k in ("os", "cpu", "libc") if k in meta},
+            "implicit_build_review": "binding.gyp and archive-only hooks unknown until verified artifact review",
             "bin": meta.get("bin")}
+
+
+def pinned_manifest(name: str) -> dict[str, Any]:
+    """Resolve latest once, then require the exact endpoint to agree.
+
+    The comparison binds every recorded install-relevant field, not just SRI.
+    This detects inconsistent metadata; it is not a tarball signature check.
+    """
+    selected = manifest(name)
+    exact = manifest(name, selected["version"])
+    if {k: v for k, v in selected.items() if k != "selector_source"} != {
+            k: v for k, v in exact.items() if k != "selector_source"}:
+        raise ValueError("Registry latest/exact metadata drift; re-plan before mutation")
+    return selected
 
 
 def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
                    *, architecture: str, protected: tuple[Path, ...] = ()) -> dict[str, Any]:
     """Validate proposed future roots/runtime metadata; never inspect credentials.
 
-    Only exact direct dependencies are inspected. Non-exact and transitive
+    Only exact direct/optional dependencies are inspected. Non-exact and transitive
     dependencies are explicit execution prerequisites, not silently resolved.
     """
     if architecture != "x86_64":
@@ -154,8 +190,10 @@ def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
     if _version(pr["version"])[0] != 12:
         raise ValueError("Unreviewed pnpm major; isolated global/build-policy contract requires pnpm 12")
     pm = manifest("pnpm", pr["version"])
-    package = manifest(name)
-    deps = package["dependencies"]
+    package = pinned_manifest(name)
+    # Optional dependencies override identically named regular dependencies,
+    # matching normal package-manager semantics. Never discard platform binaries.
+    deps = {**package["dependencies"], **package["optional_dependencies"]}
     if len(deps) > MAX_DIRECT:
         raise ValueError("Direct dependency metadata exceeds review bound")
     exact = [(n, v) for n, v in deps.items() if VERSION.fullmatch(v)]
@@ -172,18 +210,30 @@ def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
         checks.append({"package": meta["name"], "requirement": engine, "satisfied_by": nr["version"]})
     scripts = [{"package": m["name"], "version": m["version"], "source": m["source"],
                 "hooks": m["install_scripts"]} for m in [package, *direct] if m["install_scripts"]]
-    builds = sorted({entry["package"] for entry in scripts if entry["package"] != name})
+    requirements = [{**entry, "integrity": m["integrity"],
+                     "approval": "required-not-granted", "matcher": f"{m['name']}@{m['version']}",
+                     "metadata_sha256": hashlib.sha256(json.dumps(
+                         m, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                     "trust_requirement": "Review verified artifact and full build closure before exact-version allowBuilds approval; metadata alone does not approve script code, network or subprocess effects."}
+                    for m in [package, *direct] for entry in scripts
+                    if (m["name"], m["version"]) == (entry["package"], entry["version"])]
     settings = {"pnpmHomeDir": roots["pnpm_home"], "globalDir": roots["global"],
                 "globalBinDir": roots["bin"], "storeDir": roots["store"],
                 "cacheDir": roots["cache"], "configDir": roots["config"],
                 "stateDir": roots["state"], "strictDepBuilds": True,
-                "ignoreScripts": False, "dangerouslyAllowAllBuilds": False}
+                "ignoreScripts": False, "dangerouslyAllowAllBuilds": False,
+                "verifyStoreIntegrity": True, "strictStorePkgContentCheck": True,
+                "engineStrict": True, "ignorePnpmfile": True,
+                "sideEffectsCache": False, "globalShims": False}
     # A draft command, never accepted by linux_packages.execute(). Unknown
     # transitive builds must fail strictDepBuilds, not gain blanket approval.
+    # No --allow-build: that flag grants name-wide approval across versions.
     command = [str(Path(roots["pnpm"]) / "pnpm"), "add", "--global",
                *[f"--config.{k}={str(v).lower() if isinstance(v, bool) else v}" for k, v in settings.items()],
-               *[f"--allow-build={n}" for n in builds], "--", f"{name}@{package['version']}"]
+               "--", f"{name}@{package['version']}"]
     environment = {"HOME": roots["home"], "PNPM_HOME": roots["pnpm_home"],
+                   "PNPM_CONFIG_GLOBAL_DIR": roots["global"],
+                   "PNPM_CONFIG_GLOBAL_BIN_DIR": roots["bin"],
                    "XDG_CONFIG_HOME": roots["config"], "XDG_CACHE_HOME": roots["cache"],
                    "XDG_DATA_HOME": roots["data"], "XDG_STATE_HOME": roots["state"],
                    "TMPDIR": roots["temp"], "TMP": roots["temp"], "TEMP": roots["temp"],
@@ -196,19 +246,37 @@ def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
             "runtime_status": "proposed pinned runtimes; binaries not installed, probed or executed",
             "engine_checks": checks, "direct_dependencies_reviewed": direct,
             "unresolved_direct_ranges": pending, "install_scripts": scripts,
-            "script_policy": {"allow_builds_proposal": {n: True for n in builds},
-                              "required_version_scoped_policy": {f"{m['package']}@{m['version']}": True for m in scripts if m["package"] != name},
-                              "draft_cli_approval_scope": "--allow-build names are name-wide, not version-specific; not execution approval",
+            "script_policy": {"allow_builds_proposal": {},
+                              "required_version_scoped_policy": {r["matcher"]: "review-required" for r in requirements},
+                              "approval_requirements": requirements,
+                              "draft_cli_approval_scope": "No --allow-build or name-wide approval; exact-version requirements are not granted approvals",
                               "strict_unknown_builds": True, "runs_scripts_if_later_authorized": True,
-                              "inventory": "root and exact direct dependencies only; not exhaustive"},
+                              "inventory": "root and exact direct/optional dependencies only; not exhaustive; implicit node-gyp builds unverified",
+                              "strict_failure_is_not_transactional": "pnpm may fetch, write or run approved builds before reporting an unknown build; validate the entire closure before any executor mutation"},
+            "effective_paths": {"status": "expected-not-probed",
+                                "expected_global_install_base": str(Path(roots["global"]) / "v11"),
+                                "layout_contract": {"pnpm_version": pr["version"],
+                                                    "source": "https://pnpm.io/global-packages",
+                                                    "confirmed_by_probe": False,
+                                                    "on_mismatch": "Block before installation; documented v11 layout is an expectation, not proof for an unprobed pnpm patch release"},
+                                "global_bin": roots["bin"],
+                                "store_root": roots["store"],
+                                "node_executable": str(Path(roots["node"]) / "bin/node"),
+                                "pnpm_executable": str(Path(roots["pnpm"]) / "pnpm"),
+                                "settings": settings,
+                                "verification_required": "Compare pinned runtime identity/version and effective pnpm config, bin -g and store path against these roots in a fresh child before package installation; reject ancestor workspace/config discovery and runtime auto-downloads"},
+            "integrity_policy": {"metadata_only": True, "full_lockfile_reviewed": False,
+                                 "required": "Every resolved registry artifact (including transitive/peer/optional packages) must have pinned identity, official URL and SRI in the reviewed lockfile. pnpm verifies fetched tarballs against resolution integrity; verifyStoreIntegrity checks cached content and strictStorePkgContentCheck checks package identity. Neither approves scripts or makes an untrusted writable store safe.",
+                                 "drift_action": "Reject changed graph, integrity, script, runtime or effective path; re-plan and review before any selected action mutates"},
             "optional_policy": "Keep normal optional dependencies; pnpm filters OS/CPU/libc. Do not use --no-optional or enable experimental native Vercel execution.",
             "proposed_command": command, "proposed_environment": environment,
             "environment_policy": "Construct fresh child environment from these entries; never inherit tokens, npm config or VERCEL native-mode flags; do not change parent HOME/PATH/profile.",
             "proposed_cwd": roots["work"],
             "execution_blockers": [
-                "No global-package executor exists; this is a dry plan, not install authorization.",
-                "Replace name-wide draft --allow-build entries with reviewed version-scoped allowBuilds matchers after full lockfile review; no broad approval is authorized.",
-                "Install/verify pinned runtimes and validate effective pnpm config/paths in the isolated child before package installation.",
-                "Resolve and review full transitive/peer/optional lockfile, engine/platform compatibility, integrity and lifecycle/implicit node-gyp builds; direct metadata inventory is not a lockfile.",
+                "No reviewed pnpm-resolved full dependency/build closure: exact-version lifecycle approval cannot safely be finalized from registry metadata alone; generating/verifying that closure requires separately authorized package-manager/artifact validation."],
+            "future_executor_gates": [
+                "No global-package executor exists; keep every global action non-executable until implemented and separately validated.",
+                "Before ANY selected mutation, validate the full transitive/peer/optional lockfile, engine/platform compatibility, integrity and explicit/implicit builds; reject all drift and unapproved exact-version scripts.",
+                "Validate pinned runtimes and effective pnpm config/paths in a fresh isolated child; never infer runtime validation from metadata or silently provision another Node.",
                 "Review scripts and their network/toolchain/child-process effects; isolated path routing is NOT an OS security sandbox.",
                 "Revalidate all new roots with safe no-replace publication before writes; prevent symlink races and source/backup overlap."]}
