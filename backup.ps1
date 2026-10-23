@@ -222,7 +222,6 @@ function Write-NativePersistArchive {
                     continue
                 }
 
-                Assert-WindowsWhatsappCaptureSafe -Source $source -Context "native persist $($app.Name)"
                 $destination = Join-Path $nativeDir $entry.ArchivePath
                 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
 
@@ -240,8 +239,14 @@ function Write-NativePersistArchive {
                         $vssInfo = $null
                     }
                 }
-                Invoke-RobocopyLockedAware -RobocopyArgs @($actualSource, $destination, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', 'Thumbnail Cache', 'Cache', 'logs') -Context "native persist $($app.Name)"
-                if ($vssInfo) { Remove-VssShadow -VssLink $vssInfo.Link }
+                # Validate the path that will actually be copied.  A VSS remap
+                # can expose SQLite sidecars that are absent from the live view.
+                try {
+                    Assert-WindowsWhatsappCaptureSafe -Source $actualSource -Context "native persist $($app.Name)"
+                    Invoke-RobocopyLockedAware -RobocopyArgs @($actualSource, $destination, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', 'Thumbnail Cache', 'Cache', 'logs') -Context "native persist $($app.Name)"
+                } finally {
+                    if ($vssInfo) { Remove-VssShadow -VssLink $vssInfo.Link }
+                }
             }
         } finally {
             if ($serviceWasRunning) {

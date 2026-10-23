@@ -188,6 +188,23 @@ class WacliStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ws.restore_unlocked(encrypted, Path(self.tmp.name) / "encrypted-out")
 
+    def test_restore_accepts_conventional_root_directory_marker(self):
+        archive = self._plain_archive([(ws.PREFIX, b''), (ws.PREFIX + 'config.yaml', b'dummy bytes')], 'root-dir.zip')
+        destination = Path(self.tmp.name) / 'root-dir-export'
+        ws.restore_unlocked(archive, destination)
+        self.assertEqual((destination / 'config.yaml').read_bytes(), b'dummy bytes')
+
+    def test_root_marker_does_not_hide_special_or_unsafe_entries(self):
+        archive = Path(self.tmp.name) / 'special-root.zip'
+        with ZipFile(archive, 'w') as z:
+            info = ZipInfo(ws.PREFIX)
+            info.create_system = 3
+            info.external_attr = (stat.S_IFLNK | 0o700) << 16
+            z.writestr(info, b'dummy')
+            z.writestr(ws.PREFIX + 'config.yaml', b'unchanged')
+        with self.assertRaises(ValueError):
+            ws.restore_unlocked(archive, Path(self.tmp.name) / 'special-root-out')
+
     def test_windows_account_only_archive_is_not_remapped(self):
         archive = self._plain_archive([("AppData/account.sqlite", b"windows")])
         with self.assertRaises(ValueError):
