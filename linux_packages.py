@@ -19,7 +19,7 @@ from typing import Any, Iterable
 import android_commandline_tools as android_tools
 import anydesk_linux as anydesk_tools
 import bitwarden_cli_linux as bitwarden_tools
-
+import bun_linux as bun_tools
 APT_MAP = {
     "7zip": "7zip", "cacert": "ca-certificates", "cmake": "cmake",
     "coreutils": "coreutils", "curl": "curl", "fd": "fd-find", "ffmpeg": "ffmpeg",
@@ -235,6 +235,17 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                           reason="Official Bitwarden CLI Linux x86_64 OSS archive. Install requires explicit "
                                                  "--bitwarden-cli-root pointing to a new directory; no profile, PATH, or "
                                                  "credential state is migrated. The native binary is not executed during install."))
+        elif name == "bun":
+            try:
+                release = bun_tools.resolve_release(architecture)
+            except (RuntimeError, OSError, ValueError) as exc:
+                reason = f"Cannot resolve official Linux Bun: {exc}"
+                blockers.append(reason); actions.append(_blocked("bun-archive", name, reason, "scoop"))
+            else:
+                actions.append(Action("bun-archive", name, version=release["version"], source="scoop", archive=release,
+                                      reason="Official Bun Linux x64 baseline archive matching current Scoop Bun version; "
+                                             "requires explicit new --bun-root. No profile, PATH, package installation, "
+                                             "Windows state migration or native binary execution. Source mapping is not runtime validation."))
         elif name in UNVALIDATED_NATIVE:
             reason = f"No validated Linux source/adapter for package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
         elif name in VARIANT_DRIFT:
@@ -319,7 +330,7 @@ class PackageExecutionError(RuntimeError):
 def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess.run,
             *, android_sdk_root: Path | None = None, android_sdk_terms_accepted: bool = False,
             anydesk_terms_accepted: bool = False, anydesk_service_allowed: bool = False,
-            bitwarden_cli_root: Path | None = None) -> dict[str, Any]:
+            bitwarden_cli_root: Path | None = None, bun_root: Path | None = None) -> dict[str, Any]:
     if not plan.supported: raise RuntimeError("Unsupported host; no restore commands are permitted")
     actual = host_info()
     if actual != (plan.distro, plan.architecture):
@@ -355,6 +366,19 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
         if bitwarden_cli_root is None:
             raise RuntimeError("Bitwarden CLI installation requires --bitwarden-cli-root pointing to a new directory")
         bitwarden_tools.validate_install(action.archive, bitwarden_cli_root)
+    for action in (a for a in chosen if a.kind == "bun-archive"):
+        if bun_root is None:
+            raise RuntimeError("Bun installation requires --bun-root pointing to a new directory")
+        bun_tools.validate_install(action.archive, bun_root)
+    if any(a.kind == "bun-archive" for a in chosen):
+        allowed = {"apt", "bun-archive", "bitwarden-cli", "anydesk-deb", "android-sdk-archive"}
+        if any(a.kind not in allowed for a in chosen):
+            raise RuntimeError("Bun cannot be combined with commands lacking isolated runtime/destination preflight")
+        roots = [Path(root).expanduser().resolve(strict=False) for root in
+                 (bun_root, bitwarden_cli_root if any(a.kind == "bitwarden-cli" for a in chosen) else None,
+                  android_sdk_root if any(a.kind == "android-sdk-archive" for a in chosen) else None) if root is not None]
+        if len(roots) != len(set(roots)):
+            raise RuntimeError("Bun and other selected archives require distinct installation roots")
     if any(a.kind == "pip-venv" and (Path(".linux-restore-venv").exists() or Path(".linux-restore-venv").is_symlink()) for a in chosen):
         raise RuntimeError("Refusing to overwrite existing .linux-restore-venv; choose a new working directory")
     _apt_preflight([a for a in chosen if a.kind == "apt"], runner)
@@ -368,6 +392,8 @@ def execute(plan: Plan, selected: Iterable[str] | None = None, runner=subprocess
                                               allow_service=anydesk_service_allowed, runner=runner)
             elif action.kind == "bitwarden-cli":
                 bitwarden_tools.install_release(action.archive, bitwarden_cli_root)
+            elif action.kind == "bun-archive":
+                bun_tools.install_release(action.archive, bun_root)
             else:
                 result = runner(action.command, check=False, shell=False, timeout=300)
                 code = getattr(result, "returncode", result if isinstance(result, int) else 0)
@@ -397,6 +423,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="explicitly permit vendor DEB installation including its service and possible automatic start")
     ap.add_argument("--bitwarden-cli-root", type=Path,
                     help="new explicit Bitwarden CLI directory; no default home location or overwrite")
+    ap.add_argument("--bun-root", type=Path,
+                    help="new explicit Bun directory; no default home location, PATH edit or binary execution")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture)
@@ -408,7 +436,7 @@ def main(argv: list[str] | None = None) -> int:
                              android_sdk_terms_accepted=args.android_sdk_terms_accepted,
                              anydesk_terms_accepted=args.anydesk_terms_accepted,
                              anydesk_service_allowed=args.anydesk_service_allowed,
-                             bitwarden_cli_root=args.bitwarden_cli_root)
+                             bitwarden_cli_root=args.bitwarden_cli_root, bun_root=args.bun_root)
             output = {"plan": plan.to_dict(), "report": report}
         except PackageExecutionError as exc:
             print(json.dumps({"plan": plan.to_dict(), "error": str(exc), "report": exc.report}, indent=2)); return 1

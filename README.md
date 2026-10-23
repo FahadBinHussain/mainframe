@@ -208,6 +208,27 @@ describes comparing SHA-256 against the GitHub asset digest. Metadata matching
 and synthetic tests do not establish runtime compatibility or a usable session;
 the real binary has not been run as part of this dry restore review.
 
+**Bun: same official runtime, native Linux baseline.** On glibc x86_64 the
+planner reads the current [Scoop Bun manifest](https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/bun.json)
+and requires the exact stable [official Bun release](https://github.com/oven-sh/bun/releases).
+The Linux baseline ZIP's SHA-256 must match both GitHub's asset digest and the
+release checksum file; that checksum file is itself verified against its asset
+size and digest. Missing or ambiguous metadata stays blocked. No version/hash
+is hardcoded, and no alternative runtime or shell installer is substituted.
+[Bun's Linux requirements](https://bun.com/docs/installation) still apply:
+baseline requires SSE4.2, not arbitrary x64 hardware. This adapter conservatively
+supports glibc x86_64 only, not every platform supported by Bun itself.
+
+A separately authorized future partial installation would use `--execute
+--select bun --bun-root /absolute/new/bun-directory`. The root must be new;
+supplying it alone is still a dry run. The installer validates platform/root
+before selected changes, verifies archive size/SHA-256 and exact ZIP/ELF layout,
+and publishes without replacing existing state. It never runs Bun, edits PATH
+or profiles, imports Windows state or credentials, or installs dependencies.
+Mixed global-manager commands without isolated runtime/destination preflight
+are rejected before mutation. Checksums are not independent release signatures,
+and synthetic tests do not establish actual Bun runtime compatibility.
+
 Selected package installs are sequential, not transactional. Terms, destination,
 and APT metadata checks happen before installs, but a later download or install
 can still fail after an earlier package changed the machine. Error JSON includes

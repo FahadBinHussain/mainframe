@@ -55,6 +55,9 @@ class LinuxPackagesTests(unittest.TestCase):
         bitwarden_metadata = patch.object(lp.bitwarden_tools, 'resolve_release', return_value=dict(BITWARDEN_RELEASE))
         bitwarden_metadata.start()
         self.addCleanup(bitwarden_metadata.stop)
+        bun_metadata = patch.object(lp.bun_tools, 'resolve_release', return_value={"version": "1.2.3", "sha256": "d" * 64})
+        bun_metadata.start()
+        self.addCleanup(bun_metadata.stop)
 
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
