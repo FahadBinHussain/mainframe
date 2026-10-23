@@ -1,0 +1,34 @@
+{
+  "base": "5578d1b6892f50a8f2329b11a6b6e27a1a81f88b",
+  "dependency": "go.mau.fi/whatsmeow@v0.0.0-20261017175727-b2b1e71d45e2",
+  "wacli": [
+    {
+      "path": "0001-blocked-snapshot-protocol.patch",
+      "sha256": "0d0d0636a96cdc7fade79597b2cc4e00e54a67660f60ed260f3541f5bdcdfc76"
+    },
+    {
+      "path": "0002-synthetic-writer-boundary-probe.patch",
+      "sha256": "546b1913c3f837855f8db9566dc347b9c229aa3d99b685ec138b4b7f33f1c185"
+    },
+    {
+      "path": "0003-synthetic-dependency-boundary-probes.patch",
+      "sha256": "5b77630ed73c44065bd680de6beb6c0f1d536378f502a369e3720bd2c42c1fc9"
+    },
+    {
+      "path": "0004-synthetic-shutdown-boundary-probes.patch",
+      "sha256": "3366e268ab692e942e2ecf0791bc72eace5c0640381cbfb843b34c832b96a579"
+    },
+    {
+      "path": "0005-runtime-admission-and-keyshare-drain.patch",
+      "sha256": "a5544cdf7494f97d05746ac321c82603f149a78b6f92b9a203da9e89b5102287"
+    }
+  ],
+  "whatsmeow": [
+    {
+      "path": "whatsmeow/0001-scoped-keyshare-drain.patch",
+      "sha256": "e620b68bfa2a900060b6b50ed5c8873fe5965a85292472c6ddff9342d932f80a"
+    }
+  ],
+  "wacli_test_pattern": "^(TestSnapshot|TestStoreSnapshot|TestClose|TestMediaDownload(ReadOnlyOutput|LockedStore))",
+  "dependency_test_pattern": "^TestKeyShareDrain"
+}

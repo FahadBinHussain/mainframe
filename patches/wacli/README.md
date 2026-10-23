@@ -71,3 +71,29 @@ Use Go 1.27.3, without editing `go.mod`. The key-share fixture runs the real det
 The media fixture uses the real CLI path in a separate helper process against disposable synthetic metadata and verified cache bytes. It proves `--read-only media download --output` publishes outside the store despite a held store lock, verified by competing lock acquisition before and after. It opens no WhatsApp connection or session database. No real account, database, credentials, chats or personal media is accessed.
 
 Passing counterexamples mean the audited shutdown/root boundary remains unsafe; they do not certify capture or restore. Replace them with positive contract tests when the corresponding semantics are actually fixed. See [the shutdown feasibility result and complete required contract](../../docs/wacli-snapshot-shutdown-boundary.md). Capture remains disabled and no Windows runtime validation is claimed.
+
+## Runtime admission and narrow dependency drain
+
+`0005-runtime-admission-and-keyshare-drain.patch` is **production-code source**, not another diagnostics-only patch. Apply it after all of `0001`–`0004` to the exact WACLI base above. It requires the coupled `whatsmeow/0001-scoped-keyshare-drain.patch` against the exact declared dependency `go.mau.fi/whatsmeow@v0.0.0-20261017175727-b2b1e71d45e2`. Neither patch is installed, released or accepted upstream by this repository. Mainframe does not run them automatically.
+
+The WACLI changes join accepted delegate handlers, seal lazy application opens during an idempotent close, retain errors through an additive `CloseWithError`, join the SDK's narrow key-share boundary before session SQL closure, and make explicit read-only media publication participate in its store lock. Compatibility `Close()` APIs still discard their returned error; they must not be used as a capture receipt. The SDK changes register protocol key-share work before launch, preserve accepted detached contexts, join explicitly scoped missing-key request children, reject late admission, and retain the first worker failure. The first retained failure is enough to deny a successful frontier without an unbounded lifetime error list.
+
+The former delegate and key-share SQL-loss tests become positive regressions rather than being skipped. Coverage includes both sides of the first synthetic SQL effect, application metadata failures, concurrent/idempotent close, idle drains, repeated batches, cancel/retry, child registration after sealing, grandchildren and rejection after parent completion. The node-queue counterexample remains. The media diagnostic now verifies **both** the fixed read-only path and the still-independent writable cache-output path, so it does not pretend that all media writers are fenced.
+
+### Explicit disposable verifier
+
+With the repository-required Go 1.27.3 toolchain first in `PATH`, run:
+
+```sh
+python3 patches/wacli/verify_runtime.py --wacli-source /path/to/existing/wacli-source
+# Optional complete WACLI repository gate in the same disposable source tree:
+python3 patches/wacli/verify_runtime.py --wacli-source /path/to/existing/wacli-source --full-gate
+```
+
+The source repository only needs to contain the exact pinned base object; its current branch and uncommitted files are not used. The verifier checks the SHA-256 manifest, archives the exact base into a temporary directory, applies the five WACLI patches, obtains the pinned dependency through Go's normal checksum-verified module download, copies it without editing the module cache, applies the SDK patch, and sets a local `replace` **only inside the disposable tree**. It runs ten repetitions of the focused WACLI/SDK tests both plain and with `-race`, checks the unchanged blocked plan, and tests create refusal against disposable dummy bytes. Temporary HOME/XDG paths are used; no account source is discovered. Public Go/tool dependencies may be downloaded. The optional full gate additionally needs the existing pnpm/Node prerequisites and performs the standard Windows cross-compilation, not a Windows runtime run.
+
+### What this does not authorize
+
+Capture remains disabled, with a deny-all policy for unproven media-root ownership before source I/O and no approval/force override. `DrainAppStateKeyShares` does **not** join all SDK roots or arbitrary work spawned by event callbacks; the public/raw SDK and application handles are not an exhaustive admission façade. Read-only publication now blocks behind a held source-store lock, but writable/delegated cache output, other stores, aliases and foreign open handles are not thereby fenced. No held capture, media relocation, activation or Linux account-usability claim is made.
+
+See [the exact remaining lifecycle API and platform ownership contract](../../docs/wacli-snapshot-held-capture-audit.md). These are implementable missing guarantees, not a claim of technical impossibility. Windows runtime validation has not been performed.
