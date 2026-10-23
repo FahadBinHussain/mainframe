@@ -179,6 +179,35 @@ incoming Linux sessions need Xorg; Wayland supports outgoing sessions only.
 Package resolution and offline tests do not validate GUI, networking or
 unattended-access behavior, and this adapter does not purchase a license.
 
+**Bitwarden CLI: matching official OSS binary, not a vault restore.** Scoop's
+`bitwarden-cli` currently selects the OSS build. On Debian/Ubuntu x86_64 the
+planner reads that manifest and requires the same version and OSS variant in
+the [official Bitwarden release](https://github.com/bitwarden/clients/releases),
+including a published SHA-256 digest and archive size. It never substitutes the
+default non-OSS build, an npm package, a Windows checksum, or another version.
+Missing or ambiguous metadata blocks the action. Other architectures remain
+unsupported by this adapter. Planning fetches public metadata only.
+
+For a separately authorized future installation into a **new** directory:
+
+```bash
+python3 ./linux_packages.py --execute --select bitwarden-cli \
+  --bitwarden-cli-root /path/to/new/bitwarden-cli
+```
+
+The native binary needs no Node/npm bootstrap. The adapter verifies the archive
+size and SHA-256 before accepting its executable; existing destinations and
+unsafe archives are refused. Installation requires glibc, Linux `renameat2`,
+`/proc/self/fd`, and ancestors owned by root or the installing user. Staging and
+publication are anchored to an opened parent directory, not a later path lookup.
+It does not change PATH or shell profiles, log in,
+unlock a vault, read credentials, or import Windows Bitwarden state. Invoke
+`/path/to/new/bitwarden-cli/bw` manually after reviewing the installation.
+[Bitwarden's checksum guidance](https://bitwarden.com/help/security-faqs/)
+describes comparing SHA-256 against the GitHub asset digest. Metadata matching
+and synthetic tests do not establish runtime compatibility or a usable session;
+the real binary has not been run as part of this dry restore review.
+
 Selected package installs are sequential, not transactional. Terms, destination,
 and APT metadata checks happen before installs, but a later download or install
 can still fail after an earlier package changed the machine. Error JSON includes
