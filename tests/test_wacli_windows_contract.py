@@ -56,6 +56,11 @@ if (-not $definition) { throw "function not found: $FunctionName" }
         output = self.run_function(script, "Assert-WindowsWhatsappCaptureSafe", body)
         return "PASS" in output, output
 
+    def invoke_reserved_check(self, script: Path, source: Path) -> bool:
+        body = f"if (Test-WacliReservedArchiveSource -Source {self.ps_quote(str(source))}) {{ 'BLOCK' }} else {{ 'PASS' }}"
+        output = self.run_function(script, "Test-WacliReservedArchiveSource", body)
+        return "BLOCK" in output
+
     @staticmethod
     def ps_quote(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
@@ -94,6 +99,37 @@ if (-not $definition) { throw "function not found: $FunctionName" }
                 (whatsapp / "messages.sqlite").write_bytes(b"synthetic")
                 passed, output = self.invoke_guard(script, whatsapp)
                 self.assertFalse(passed, output)
+
+    def test_backup_vss_guard_checks_remapped_source(self):
+        script = ROOT / "backup.ps1"
+        text = script.read_text(encoding="utf-8")
+        self.assertLess(text.index("$actualSource = $source"), text.index("Assert-WindowsWhatsappCaptureSafe -Source $actualSource"))
+        with tempfile.TemporaryDirectory(prefix="wacli-win-vss-") as td:
+            root = Path(td)
+            live = root / "live" / "WhatsApp"
+            snapshot = root / "vss" / "WhatsApp"
+            live.mkdir(parents=True)
+            snapshot.mkdir(parents=True)
+            (snapshot / "msgstore.db-wal").write_bytes(b"synthetic snapshot sidecar")
+            self.assertTrue(self.invoke_guard(script, live)[0])
+            passed, output = self.invoke_guard(script, snapshot)
+            self.assertFalse(passed, output)
+            self.assertIn("live SQLite state", output)
+
+    def test_restore_reserved_native_tree_is_blocked_for_custom_manifest_sources(self):
+        for script in (ROOT / "restore.ps1", ROOT / "restore-secrets.ps1"):
+            with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-reserved-") as td:
+                root = Path(td)
+                native = root / "NativeState" / "wacli"
+                native.mkdir(parents=True)
+                (native / "state.sqlite").write_bytes(b"synthetic native payload")
+                self.assertTrue(self.invoke_reserved_check(script, native))
+                self.assertTrue(self.invoke_reserved_check(script, native / "state.sqlite"))
+                self.assertTrue(self.invoke_reserved_check(script, root))
+                safe = root / "ordinary" / "config.json"
+                safe.parent.mkdir(parents=True)
+                safe.write_text("{}", encoding="utf-8")
+                self.assertFalse(self.invoke_reserved_check(script, safe))
 
     def test_restore_embedded_native_payload_is_report_only(self):
         script = ROOT / "restore.ps1"

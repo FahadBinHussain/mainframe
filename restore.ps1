@@ -256,6 +256,25 @@ function Report-WacliPayloadPreserved {
     }
 }
 
+function Test-WacliReservedArchiveSource {
+    param([Parameter(Mandatory)][string]$Source)
+
+    # A custom manifest may point at NativeState/wacli itself, a descendant,
+    # or a parent directory containing that tree.  Never selectively merge
+    # such a source into a Windows account target.
+    $normalized = $Source -replace '\\', '/'
+    if ($normalized -match '(?i)(^|/)NativeState/wacli(/|$)') {
+        return $true
+    }
+    if (Test-Path -LiteralPath $Source -PathType Container) {
+        $reserved = Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction Stop |
+            Where-Object { ($_.FullName -replace '\\', '/') -match '(?i)(^|/)NativeState/wacli(/|$)' } |
+            Select-Object -First 1
+        if ($reserved) { return $true }
+    }
+    return $false
+}
+
 function Restore-SecretItem {
     param(
         [Parameter(Mandatory)][PSCustomObject]$Item,
@@ -277,6 +296,11 @@ function Restore-SecretItem {
 
     if (-not (Test-Path -LiteralPath $source)) {
         Write-Warning "Secret entry not found in backup, skipping $($Item.Name): $archiveRelativePath"
+        return
+    }
+
+    if (Test-WacliReservedArchiveSource -Source $source) {
+        Write-Warning "Skipping secret item '$($Item.Name)': archive source contains reserved NativeState/wacli payload; it is preserved and never copied to a Windows target."
         return
     }
 

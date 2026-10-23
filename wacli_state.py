@@ -241,7 +241,10 @@ def restore_unlocked(archive, destination):
     parent = destination_parent(destination, archive)
     try:
         with opened_file(archive.parent, archive.name) as raw, ZipFile(raw) as z:
-            members = [i for i in z.infolist() if i.filename.replace('\\', '/').startswith(PREFIX)]
+            members = [i for i in z.infolist()
+                       if i.filename.replace('\\', '/').startswith(PREFIX)
+                       and not (i.filename == PREFIX and i.is_dir()
+                                and not link_or_special(i) and not i.flag_bits & 1)]
             if not members:
                 raise StateError('No native WACLI state found; Windows profiles are not a Linux migration.')
             seen, files = set(), set()
