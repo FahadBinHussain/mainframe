@@ -6,6 +6,7 @@ are synthetic temporary files/zips and do not touch a real profile or archive.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +21,8 @@ PWsh = "pwsh"
 class WindowsWacliContractTests(unittest.TestCase):
     def run_function(self, script: Path, function: str, body: str) -> str:
         """Extract and invoke exactly one function definition from *script*."""
+        if shutil.which(PWsh) is None:
+            self.skipTest('PowerShell unavailable; AST guard contract not executed')
         harness = r'''
 param([string]$Source, [string]$FunctionName, [string]$Body)
 $tokens = $null
