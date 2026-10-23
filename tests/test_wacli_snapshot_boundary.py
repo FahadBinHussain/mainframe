@@ -37,7 +37,10 @@ def epoch(path):
 
 
 class SnapshotBoundaryCounterexamples(unittest.TestCase):
+    """Demonstrate unsafe source combinations without authorizing capture."""
+
     def assert_uncertified(self, receipt):
+        """Require preparation to retain every fail-closed capability marker."""
         self.assertEqual(receipt['status'], 'PREPARATION')
         self.assertEqual(receipt['boundary'], 'UNVERIFIED')
         self.assertEqual(receipt['cross_database_consistency'], 'NOT_CERTIFIED')
@@ -111,6 +114,7 @@ class SnapshotBoundaryCounterexamples(unittest.TestCase):
                                  (str(external),))
 
     def test_reference_preservation_is_not_media_resolution_or_relocation(self):
+        """Preserve reference rows without resolving missing or external bytes."""
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             root = Path(temporary)
             stage = root / 'private-stage'; stage.mkdir(mode=0o700)
