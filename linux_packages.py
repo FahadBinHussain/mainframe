@@ -7,6 +7,7 @@ secret archive payloads.
 """
 from __future__ import annotations
 import argparse
+import http.client
 import json
 import os
 import platform
@@ -28,6 +29,7 @@ import node_lts_linux as node_lts_tools
 import opencode2_linux as opencode2_tools
 import pnpm_global_plan as pnpm_global_tools
 import google_workspace_cli_linux as gws_tools
+import ngrok_linux as ngrok_tools
 import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
@@ -80,7 +82,7 @@ NATIVE_REVIEW_REASONS = {
     "gcloud": "Official Linux CLI exists, but matching bundled-runtime archive/checksum and non-mutating installer are not validated; no initialization or credential migration.",
     "herdr": "Repo-local Windows manifest selects a preview fork/channel; upstream stable Linux is not a verified same-variant replacement.",
     "mpv-git": "Requested git variant is not distro stable mpv; no validated matching commit/build/checksum adapter.",
-    "ngrok": "Official Linux agent exists, but no validated pinned vendor checksum/install adapter; no repository, service, or account setup inferred.",
+    "ngrok": "The explicit metadata-only plan can match current Windows/Linux version and checksum metadata; Linux archive layout and a bounded installer remain unvalidated, with no repository, service, or account setup inferred.",
     "nuget": "Requested nuget.exe has no equivalent native Linux command surface; Mono and dotnet nuget are not silent substitutes.",
     "parsec": "Official Linux app is client-only, without hosting; Windows role/state and a pinned checksum/install adapter are unresolved.",
     "pwsh": "Official Linux PowerShell exists, but supported distro/runtime dependencies and pinned package/checksum installation are not validated; Windows modules are not ported.",
@@ -231,6 +233,7 @@ def _anydesk_action(architecture: str, blockers: list[str], source: str) -> Acti
 
 def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None = None, architecture: str | None = None,
                *, pnpm_plan_config: dict[str, Any] | None = None,
+               ngrok_metadata_plan: bool = False,
                gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -301,6 +304,23 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                                       reason="Same-product official Linux artifact matched to the Windows manifest version/variant. "
                                              "Future install requires an explicit new --native-root NAME=PATH; no PATH/profile, "
                                              "service, credentials, or Windows state migration. Metadata/fixture validation is not runtime validation."))
+        elif name == "ngrok" and ngrok_metadata_plan:
+            try:
+                detail = ngrok_tools.build_dry_plan(architecture)
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"ngrok: official metadata-only review failed: {detail}"
+                blockers.append(reason)
+                actions.append(_blocked("ngrok-metadata", name, reason, "scoop"))
+            else:
+                version = detail["package"]["version"]
+                reason = (f"ngrok current Scoop version observation {version} matches the official Linux amd64 archive/checksum metadata; "
+                          "this is not a user-selected restore pin, and archive layout, safe extraction, runtime and activation remain unvalidated. "
+                          "No archive was downloaded and no token/configuration, service or PATH state was read or changed.")
+                blockers.append(reason)
+                actions.append(Action("ngrok-metadata", name, version=version, status="blocked",
+                                      reason=reason, source="scoop", dry_plan=detail))
         elif name in NATIVE_REVIEW_REASONS:
             reason = f"{name}: {NATIVE_REVIEW_REASONS[name]}"
             blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
@@ -628,10 +648,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="explicit new Google Workspace CLI root; dry-plans isolated binary/state paths; never invokes npm or gws")
     ap.add_argument("--pnpm-plan-config", type=Path,
                     help="JSON containing explicit isolated roots for Vercel metadata-only planning; never enables installation")
+    ap.add_argument("--ngrok-metadata-plan", action="store_true",
+                    help="explicitly compare public Scoop and ngrok archive-index metadata only; never downloads a binary or enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     if args.pnpm_plan_config and args.execute:
         ap.error("--pnpm-plan-config is dry-only and cannot be combined with --execute")
+    if args.ngrok_metadata_plan and args.execute:
+        ap.error("--ngrok-metadata-plan is dry-only and cannot be combined with --execute")
+    if args.ngrok_metadata_plan and args.pnpm_plan_config:
+        ap.error("Choose only one explicit metadata review per package-planning run")
     native_roots = {}
     for entry in args.native_root:
         name, separator, path = entry.partition("=")
@@ -646,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
             ap.error(f"Cannot read pnpm dry-plan config: {exc}")
         if not isinstance(options["pnpm_plan_config"], dict):
             ap.error("pnpm dry-plan config must be a JSON object")
+    options["ngrok_metadata_plan"] = args.ngrok_metadata_plan
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:
