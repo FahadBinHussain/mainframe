@@ -31,6 +31,26 @@ fail-loud contract does not change the restore's existing internal policies.
 `bootstrap.ps1` rejects Linux and other operating systems with guidance to use
 Bash on Linux; it no longer dispatches Bash from PowerShell.
 
+#### Per-user setting: Bitwarden email
+
+On a machine where the Bitwarden CLI has never been logged in, `boot.ps1`
+needs your Bitwarden account email once. Set it in the project instead of
+typing it: copy `mainframe.config.example.json` to `mainframe.config.json`
+in the project root and set `bitwardenEmail`:
+
+```json
+{ "bitwardenEmail": "you@example.com" }
+```
+
+`mainframe.config.json` is git-ignored, so your address stays local and is
+never committed. `boot.ps1` looks for the email in this order: the
+`MAINFRAME_BW_EMAIL` environment variable, `mainframe.config.json` (next to
+the script, or in the cloned project folder), the address saved by a
+previous run under `%APPDATA%\mainframe`, then `git config user.email`. If
+none of those has it, it asks once and saves the answer for next time.
+(Users running a private fork may commit the file in their own fork instead
+— that is their exposure decision to make.)
+
 ### Linux: Bash (no PowerShell dependency)
 
 **Linux now has a lossless archive-recovery path, explicit native export targets,
