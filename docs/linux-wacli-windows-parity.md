@@ -4,7 +4,7 @@
 
 ## What the Windows backup actually does
 
-The public [manifest](../tool-secrets.manifest.json) captures `%APPDATA%\mainframe\accounts` under `AppData/Roaming/mainframe/accounts` inside `tool-secrets.zip`. [The Windows helper](../whatsapp-account.ps1) places WhatsApp profiles below `whatsapp/<E.164-phone>/`, with:
+The public [manifest](../tool-secrets.manifest.json) covers `%APPDATA%\mainframe\accounts` under `AppData/Roaming/mainframe/accounts`. WACLI's `whatsapp/` subtree is now copied separately through the held-VSS helper into `WacliWindowsVss/`; it is not taken by the later generic live copy. [The Windows helper](../whatsapp-account.ps1) places WhatsApp profiles below `whatsapp/<E.164-phone>/`, with:
 
 | Item | Meaning | Linux conversion state |
 | --- | --- | --- |
@@ -12,13 +12,13 @@ The public [manifest](../tool-secrets.manifest.json) captures `%APPDATA%\mainfra
 | `<phone>/mainframe-whatsapp.json` | `phone`, `kind`, `ownerEmail`, `storePath`, `binary`, `updatedAt` | Preserve all fields; not upstream WACLI config |
 | `<phone>/store/session.db` | WACLI/whatsmeow linked-device identity and protocol state | Compatibility and complete snapshot unproven |
 | `<phone>/store/wacli.db` | Local messages, contacts, groups, search and other indexed state | Schema/history and path conversion unproven |
-| `<phone>/store/media/` and other store files | Downloaded media and remaining store contents | Preserve all; references can point outside this root |
+| `<phone>/store/media/` and other store files | Downloaded media and remaining store contents | Raw files are included; references can point outside this root |
 
-`login --store` can reference an external directory. `run` prefers a local store containing `session.db`, then metadata `storePath`, then the legacy `%USERPROFILE%\.wacli` store. The broad manifest does **not** follow `storePath` and does **not** independently capture `%USERPROFILE%\.wacli` or its config. It records neither the producing WACLI/whatsmeow version nor a snapshot-consistency receipt. The `go-allowed.json` install pin is the **target** version, not provenance for existing account data.
+`login --store` can reference an external directory. `run` prefers a local store containing `session.db`, then metadata `storePath`, then the legacy `%USERPROFILE%\.wacli` store. The VSS backup enumerates the profile tree, metadata `storePath`, existing legacy `.wacli`, and explicit config/media roots represented in supported profile metadata; a missing required root fails the backup. It does not read SQLite to discover external media paths that appear only in database rows. The payload records neither the producing WACLI/whatsmeow version nor a producer-consistency receipt. The `go-allowed.json` install pin is the **target** version, not provenance for existing account data.
 
-Current [backup.ps1](../backup.ps1) and [backup-secrets.ps1](../backup-secrets.ps1) explicitly block any WhatsApp subtree containing SQLite databases or sidecars, even a database with no visible WAL. That guard is retained, including the VSS-remapped source check. Therefore current Windows capture does **not** promise that these database bytes were backed up at all. Historical archives might contain them, but their completeness/consistency cannot be inferred. Older broad-copy rules exclude `*.db-wal`, `*.db-shm`, and `*.db-journal`; a base database alone cannot reconstruct omitted committed WAL transactions. Do not delete sidecars or weaken the guard.
+Current [backup.ps1](../backup.ps1) and [backup-secrets.ps1](../backup-secrets.ps1) retain the live-copy blocker for WhatsApp SQLite trees. A separate native VSS path now captures the exact supported roots, including databases and WAL/SHM/journal sidecars, in one writerless multi-volume set; after success, the generic account copy excludes only that exact profile root. Failure never falls back to live copying. This is crash-consistent raw preservation only—not application consistency, a guarantee of usable databases, or complete media membership when paths are stored only in SQLite.
 
-Windows restore copies manifest-selected account trees back to Windows locations, backing up existing targets by default. This is not a cross-platform schema/path adapter and does not establish that a login works. `NativeState/wacli/` remains reserved for the separate explicit Linux-state capture; it is never silently remapped into Windows profiles.
+Windows restore copies manifest-selected account trees back to Windows locations, backing up existing targets by default. The separate `WacliWindowsVss/` payload is not activated or remapped by restore. This is not a cross-platform schema/path adapter and does not establish that a login works. `NativeState/wacli/` remains reserved for the separate explicit Linux-state capture; it is never silently remapped into Windows profiles.
 
 ## What the official Linux target expects
 
@@ -32,9 +32,9 @@ The reviewed target is [WACLI v0.15.0](https://github.com/openclaw/wacli/tree/v0
 
 ### Copying media bytes is not enough
 
-[Media output resolution](https://github.com/openclaw/wacli/blob/v0.15.0/internal/app/media.go) makes downloaded paths absolute, including default output paths. [The database writer](https://github.com/openclaw/wacli/blob/v0.15.0/internal/store/media.go) stores that path unchanged. Both `messages.local_path` and `message_local_media_aliases.local_path` require a complete, collision-safe relocation map for Windows-to-Linux restoration. Nonempty paths are treated as already downloaded, so simply copying a database can leave unusable media references. Custom output can be outside `store/media`; a missing external file cannot be recovered from the database alone. App-state recovery intents do not fix filesystem paths.
+[Media output resolution](https://github.com/openclaw/wacli/blob/v0.15.0/internal/app/media.go) makes downloaded paths absolute, including default output paths. [The database writer](https://github.com/openclaw/wacli/blob/v0.15.0/internal/store/media.go) stores that path unchanged. Both `messages.local_path` and `message_local_media_aliases.local_path` require a complete, collision-safe relocation map for Windows-to-Linux restoration. The VSS backup does not read those rows; external media roots are copied only when explicitly represented in supported profile metadata. Nonempty database paths may therefore remain unresolved, and copying bytes alone can leave unusable media references. App-state recovery intents do not fix filesystem paths.
 
-Unknown or non-native metadata must remain in the encrypted original backup and, in any future authorized adapter, a private lossless preserve-only export with explicit unconverted status. Never call such an export converted or usable. No schema-dropping, table-subset export, secret/key recreation, automatic external-store traversal or path guessing is implemented here.
+Unknown or non-native metadata must remain in the encrypted original backup and, in any future authorized adapter, a private lossless preserve-only export with explicit unconverted status. Never call such an export converted or usable. No schema-dropping, table-subset export, database-derived path mapping, secret/key recreation or restore activation is implemented here.
 
 ## What this change implements
 
@@ -46,11 +46,11 @@ No private archive was used to invoke this command. Generic recovery still prese
 
 ## Exact work still required for 100%
 
-1. **Capture evidence and all source data.** Establish actual producing versions, both full schemas and migration histories without exposing credential/chat rows. Enumerate explicitly approved external stores and media. Implement a coordinated consistent-capture protocol, preserving every file and secret in the encrypted backup. None of this is implied by a target install declaration.
+1. **Establish app-consistency and provenance evidence.** The writerless backup preserves supported roots but does not establish actual producing versions, both full schemas and migration histories, complete database-referenced media membership or a coordinated application boundary. Do not expose credential/chat rows. None of this is implied by a target install declaration or a crash-consistent byte copy.
 2. **SQLite-safe adapter.** Use SQLite's backup/snapshot API on a proven consistent, privately staged source, including committed WAL contents; do not copy a live base file alone, discard WAL, run a checkpoint against the source, or assume separate per-database snapshots are cross-store consistent. The original encrypted payload must remain intact. An API snapshot cannot undo a torn historical archive or recover omitted WAL.
 3. **Lossless semantics.** Prove compatibility of both stores, preserve all tables/unknown files, rewrite every proven media/config path on the staged copy, map profile selection explicitly, and retain/export unsupported metadata. Add synthetic source-schema fixtures covering FTS5, media aliases, app-state state and session data shapes—not merely dummy filenames or a minimal messages table.
 4. **Explicit activation and validation.** After separate authorization for installation/runtime/account access, the normal restore flow must review the staged result, stop concurrent source use, handle existing destinations explicitly, activate without silent overwrite, and validate local data/media/search plus linked-device usability. WhatsApp can invalidate a linked device; retained keys alone do not prove acceptance. Those actions are not authorized or performed in this task.
 
 No generic Windows-to-Linux migration adapter is enabled because requirements 1–3 cannot be proven from the existing capture contract or public code alone. Broader access approval by itself would not repair missing capture evidence. The exact gaps remain machine-readable and blocked rather than claiming 100% restoration.
 
-The focused [Windows capture safety assessment](wacli-windows-capture-safety.md) adds synthetic WAL/mutation and two-database consistency evidence plus a proposed versioned capture contract. It enables no capture path: the source-capture blocker and both Windows guards remain unchanged.
+The focused [Windows capture safety assessment](wacli-windows-capture-safety.md) adds synthetic WAL/mutation and two-database consistency evidence plus a proposed versioned capture contract. Coordinated/application-consistent capture remains blocked; the normal Windows backup now has a separate raw VSS path and only that verified path bypasses the live source guard.

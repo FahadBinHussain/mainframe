@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'wacli-vss-backup.psm1') -Force
 
 # === Elevation guard ===
 # VSS shadow creation and /COPYALL robocopies require admin. Refuse to produce a broken backup otherwise.
@@ -166,7 +167,7 @@ function Get-MainframeAccountRoot {
 }
 
 function Assert-WindowsWhatsappCaptureSafe {
-    param([Parameter(Mandatory)][string]$Source, [string]$Context = 'Windows account capture')
+    param([Parameter(Mandatory)][string]$Source, [string]$Context = 'Windows account capture', [string]$VerifiedVssRoot)
     # Windows WhatsApp is a live SQLite tree, not a WACLI migration target.
     # Inspect names only and block unless a consistent snapshot is proven.
     $roots = @()
@@ -177,6 +178,10 @@ function Assert-WindowsWhatsappCaptureSafe {
             Where-Object { $_.Name -ieq 'whatsapp' } | Select-Object -ExpandProperty FullName)
     }
     foreach ($root in $roots) {
+        if ($VerifiedVssRoot -and [string]::Equals([System.IO.Path]::GetFullPath($root).TrimEnd([char[]]@('\', '/')),
+                [System.IO.Path]::GetFullPath($VerifiedVssRoot).TrimEnd([char[]]@('\', '/')), [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
         $sqliteFiles = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop |
             Where-Object { $_.Name -match '(?i)(-wal|-shm|-journal)$|\.(sqlite3?|db)(-wal|-shm|-journal)?$' })
         if ($sqliteFiles.Count -gt 0) {
@@ -264,6 +269,14 @@ function Write-ToolSecretsArchive {
     $manifest = Get-Content -LiteralPath $SecretsManifestPath -Raw | ConvertFrom-Json
     $secretsDir = Join-Path $OutputDir 'secrets'
     New-Item -ItemType Directory -Force -Path $secretsDir | Out-Null
+    $wacliInputs = Get-WacliVssInputs
+    $verifiedWacliRoot = $null
+    if ($wacliInputs.HasState) {
+        Invoke-WacliVssCopy -Inputs $wacliInputs -DestinationRoot (Join-Path $secretsDir 'WacliWindowsVss') -RepositoryRoot $PSScriptRoot | Out-Null
+        if (Test-Path -LiteralPath $wacliInputs.ProfileRoot -PathType Container) {
+            $verifiedWacliRoot = $wacliInputs.ProfileRoot
+        }
+    }
     $values = @{
         AppData = $env:APPDATA
         LocalAppData = $env:LOCALAPPDATA
@@ -277,7 +290,13 @@ function Write-ToolSecretsArchive {
             Write-Warning "Secret path not found, skipping $($item.Name): $source"
             continue
         }
-        Assert-WindowsWhatsappCaptureSafe -Source $source -Context "secret $($item.Name)"
+        $verifiedSourceRoot = $null
+        $accountsRoot = Join-Path (Join-Path $env:APPDATA 'mainframe') 'accounts'
+        if ($verifiedWacliRoot -and [string]::Equals([System.IO.Path]::GetFullPath($source).TrimEnd([char[]]@('\', '/')),
+                [System.IO.Path]::GetFullPath($accountsRoot).TrimEnd([char[]]@('\', '/')), [StringComparison]::OrdinalIgnoreCase)) {
+            $verifiedSourceRoot = $verifiedWacliRoot
+        }
+        Assert-WindowsWhatsappCaptureSafe -Source $source -Context "secret $($item.Name)" -VerifiedVssRoot $verifiedSourceRoot
         $dest = Join-Path $secretsDir $item.ArchivePath
         Write-Host "Copying secret: $($item.Name)"
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
@@ -298,6 +317,10 @@ function Write-ToolSecretsArchive {
             if ($item.ExcludeFiles) {
                 $rcArgs += '/XF'
                 $rcArgs += @($item.ExcludeFiles)
+            }
+            if ($verifiedSourceRoot) {
+                $rcArgs += '/XD'
+                $rcArgs += $verifiedSourceRoot
             }
             Invoke-RobocopyLockedAware -RobocopyArgs $rcArgs -Context "secret $($item.Name)"
         } else {

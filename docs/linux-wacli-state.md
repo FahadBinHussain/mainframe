@@ -28,7 +28,7 @@ A future backend must establish all of the following before copying:
 3. Identity-based records of which long-running services were actually running before capture. Restart only those services; never replay authentication, send, import or other one-shot commands, and never start an initially stopped service. Restart failure must be reported honestly.
 4. Synthetic Windows acceptance evidence for launch races, uncontrolled writers, held handles, clean-close failure, timeout, sidecars, interrupted/failed copy and safe restart. Linux mocks or cross-compilation alone are not Windows validation.
 
-No stop/restart wrapper is added while these primitives are absent: it could interrupt legitimate work without establishing a safe snapshot. Both Windows backup guards remain unchanged, including the VSS-remapped guard. See [the Windows safety audit](wacli-windows-capture-safety.md) and [the shutdown boundary evidence](wacli-snapshot-shutdown-boundary.md).
+No stop/restart wrapper is added while these primitives are absent: it could interrupt legitimate work without establishing a safe snapshot. The separate Windows backup path now has a writerless VSS byte-copy stage; its source guards remain strict for live/non-VSS paths and bypass only the exact profile root after successful held-set verification. That route is crash-consistent only, not application-consistent or restore activation. See [the Windows safety audit](wacli-windows-capture-safety.md) and [the shutdown boundary evidence](wacli-snapshot-shutdown-boundary.md).
 
 ## Explicit offline export remains available
 
