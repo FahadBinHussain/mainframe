@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $Repo = 'FahadBinHussain/mainframe'
 $BackupRepo = 'FahadBinHussain/mainframe-production'
+$BwServer = 'https://vaultwardenn.onrender.com'
 $MainframeDir = Join-Path $HOME 'Downloads\mainframe'
 $script:BootTempDir = $null
 
@@ -159,6 +160,11 @@ function Unseal-BwEmail {
 
 # --- 2. bitwarden unlock (the ONE password you type) ---
 Step 'unlocking bitwarden vault'
+# The account lives on a self-hosted Vaultwarden, not bitwarden.com: a
+# fresh machine's bw CLI has no server configured and would log in
+# against the wrong service. Point it at the right server first
+# (idempotent on machines already configured).
+& bw config server $BwServer | Out-Null
 $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
 if ($bwStatus.status -eq 'unauthenticated') {
     # Fresh machine: the bw CLI has never been logged in here, so
