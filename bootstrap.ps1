@@ -8,10 +8,48 @@ function Get-MainframePlatform {
     throw 'bootstrap.ps1 supports Windows only. On Linux, use Bash with bootstrap.sh; no automatic fallback is performed.'
 }
 
+function Get-MainframePwshPath {
+    # $PSHOME only contains pwsh.exe when the current host is already
+    # PowerShell 7. Under Windows PowerShell 5.1 - the only shell on a fresh
+    # machine, and the one 'irm ... | iex' runs in - $PSHOME is
+    # ...\WindowsPowerShell\v1.0, which holds powershell.exe, not pwsh.exe.
+    # So probe the places PowerShell 7 actually installs to, in order.
+    $candidates = @()
+    if ($PSHOME) { $candidates += Join-Path $PSHOME 'pwsh.exe' }
+    $onPath = Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue
+    if (-not $onPath) { $onPath = Get-Command 'pwsh' -ErrorAction SilentlyContinue }
+    if ($onPath) { $candidates += $onPath.Source }
+    if ($env:ProgramFiles) {
+        $candidates += Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'
+        $candidates += Join-Path $env:ProgramFiles 'PowerShell\6\pwsh.exe'
+    }
+    if ($env:LOCALAPPDATA) { $candidates += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe' }
+    if ($HOME) { $candidates += Join-Path $HOME 'scoop\apps\pwsh\current\pwsh.exe' }
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) { return $candidate }
+    }
+    return $null
+}
+
 function Invoke-MainframeNativeBootstrap {
     param([string]$Platform, [string]$Path)
     if ($Platform -ne 'Windows') { throw 'bootstrap.ps1 supports Windows only. On Linux, use Bash with bootstrap.sh.' }
-    & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -ExecutionPolicy Bypass -File $Path
+    $pwsh = Get-MainframePwshPath
+    if (-not $pwsh) {
+        # Fresh machine with no PowerShell 7 at all: boot.ps1 installs it via
+        # winget, but boot.ps1 cannot start until pwsh exists, so the
+        # launcher has to do this one step itself.
+        if (Get-Command 'winget' -ErrorAction SilentlyContinue) {
+            Write-Host 'mainframe: PowerShell 7 not found - installing it with winget'
+            winget install -e --id Microsoft.PowerShell --accept-source-agreements --accept-package-agreements --silent 2>$null
+            $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+            $pwsh = Get-MainframePwshPath
+        }
+    }
+    if (-not $pwsh) {
+        throw "PowerShell 7 (pwsh.exe) was not found on this machine and could not be installed automatically. Install it (winget install Microsoft.PowerShell) and re-run. Note: under Windows PowerShell 5.1, `$PSHOME contains powershell.exe, not pwsh.exe."
+    }
+    & $pwsh -NoProfile -ExecutionPolicy Bypass -File $Path
     if ($LASTEXITCODE -ne 0) {
         throw "mainframe $Platform bootstrap failed (exit $LASTEXITCODE)."
     }
