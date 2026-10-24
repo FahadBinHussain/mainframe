@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: offline fixture-tested recovery and Git subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: offline fixture-tested recovery plus Git and mpv subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -8,7 +8,7 @@ The Linux path is deliberately **offline and non-destructive**:
 
 - `linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
 - `--apply-portable` may additionally copy explicitly classified files into a **new** `home-staging/` tree. It never writes the live home directory, activates services, changes global agent instructions, imports credentials, or executes Windows files.
-- `--convert-portable` separately opts into the exact Git settings adapter documented below. It reads only the verified root `.gitconfig` for conversion, emits an offline allowlisted subset, and never activates it. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
+- `--convert-portable` separately opts into the exact Git and mpv settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
 - Every native target below is a **staging candidate layout, not confirmed operational**. A staged byte is not proof that its application, plugins, identity, paths, permissions, or behavior work on Linux.
 - This is **not the user's requested 100% Linux runtime**. It is a lossless-byte-preservation and selective-native-staging tool with explicit blockers.
 
@@ -46,7 +46,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `megatools` | Native staging candidate | `.config/megatools/`; layout and credentials/config semantics are unverified. |
 | `micmute` | Blocked | Windows audio bindings have no native state import. |
 | `mpc-hc` | Blocked | Windows-only player configuration. |
-| `mpv` | Native staging candidate | `.config/mpv/`; config/scripts are staged as candidates, but paths, shaders, fonts, and plugins need review. |
+| `mpv` | Native staging candidate plus bounded converter | `--convert-portable` reads only `persist/mpv/portable_config/mpv.conf` and emits an allowlisted subset at `.config/mpv/mpv.conf`; all other files remain candidates/raw and unverified. |
 | `mpv-git` | Native staging candidate | `.config/mpv/`; same target as `mpv`; version/fork behavior is unverified. |
 | `parsec` | Blocked | Windows host/identity state is not a Linux host restore. |
 | `proton-vpn` | Blocked | VPN credentials and network integration must be recreated through a native client. |
@@ -105,6 +105,52 @@ not all settings converted. Runtime status remains `incomplete`, and the CLI
 retains exit 3 for incomplete operational restoration, even for a blocked
 conversion with successfully preserved originals. No package/setting activation
 is performed. See [the phased plan](../plan.md) for the remaining work.
+
+## Implemented conversion map: mpv portable options v1
+
+The Windows backup copies a Scoop app's `persist` directory under
+`persist/<app>/`. The upstream [Scoop Extras mpv manifest](https://github.com/ScoopInstaller/Extras/blob/master/bucket/mpv.json)
+declares `portable_config` as the persistent directory, so the exact supported
+source file is `persist/mpv/portable_config/mpv.conf`. The [mpv manual](https://mpv.io/manual/stable/#files)
+documents that `portable_config` next to `mpv.exe` is the Windows portable config
+directory; the [configuration-files section](https://mpv.io/manual/stable/#configuration-files)
+documents `~/.config/mpv/mpv.conf` as the user config file on Linux. Conversion
+is enabled only by `--recover --convert-portable` and targets offline
+`home-staging/.config/mpv/mpv.conf`.
+
+The adapter accepts only simple global boolean forms for these documented
+options:
+
+| Option | Accepted form |
+|---|---|
+| `fullscreen` | `yes` or `no` |
+| `force-window` | `yes` or `no` (`immediate` is not migrated) |
+| `input-default-bindings` | `yes` or `no` |
+| `osc` | `yes` or `no` |
+| `save-position-on-quit` | `yes` or `no` |
+
+The mpv config syntax documents a valueless option as enabled, so a bare
+allowlisted boolean is normalized to `yes`. The adapter does not flatten
+profile-scoped settings (except that `[default]` returns parsing to global
+scope), resolve includes, or interpret the full mpv grammar. Duplicate supported
+settings, invalid syntax/encoding, and unsupported values are excluded. Unknown
+settings—including Windows paths, device references, scripts, shader paths,
+includes, and script-owned options—are counted as blocked without recording
+names or values. No accepted option means no generated output; conflicts across
+archives or with an existing candidate target never choose a winner.
+
+Only `mpv.conf` is converted. `input.conf` contains command bindings; scripts and
+`script-opts/` depend on code-defined semantics; cache and `watch_later/` are
+state, often tied to Windows media paths; and shader/font/plugin dependencies
+are not inferred. These remain original bytes and, if `--apply-portable` is also
+requested, may appear only as inactive staging candidates under the preserved
+portable-config layout. The archive does not prove the source executable version
+or Linux target version; the supported subset is not a runtime compatibility or
+operational-equivalence claim. `mpv-git` keeps its separate version/fork blocker.
+
+The converter never invokes mpv, installs a package, reads a live profile, or
+changes the user's home. Generated output is private, deterministic, hash-verified,
+and review-required; installation and activation remain separate future work.
 
 ## Source action coverage
 
