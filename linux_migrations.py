@@ -42,6 +42,7 @@ MPV_BOOLEAN_OPTIONS = frozenset({
     'fullscreen', 'force-window', 'input-default-bindings', 'osc',
     'save-position-on-quit',
 })
+MPV_FLAG_ALIASES = {'fs': 'fullscreen'}
 
 
 def convert_git_config(payload, runner=subprocess.run):
@@ -169,12 +170,16 @@ def convert_mpv_config(payload):
         if in_profile:
             profile_count += 1
             continue
-        if name not in MPV_BOOLEAN_OPTIONS:
+        canonical_name = name[3:] if name.startswith('no-') else name
+        canonical_name = MPV_FLAG_ALIASES.get(canonical_name, canonical_name)
+        if canonical_name not in MPV_BOOLEAN_OPTIONS:
             unknown_count += 1
             continue
-        counts[name] += 1
-        if counts[name] == 1:
-            raw_values[name] = value
+        counts[canonical_name] += 1
+        if counts[canonical_name] == 1:
+            # Alternate spellings are counted against the canonical option but
+            # never migrated alone; this also blocks aliases from overriding it.
+            raw_values[canonical_name] = value if canonical_name == name else None
 
     if unknown_count:
         result['decisions'].append({'status': 'blocked',

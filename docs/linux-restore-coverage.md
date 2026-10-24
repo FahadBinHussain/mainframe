@@ -117,6 +117,9 @@ directory; the [configuration-files section](https://mpv.io/manual/stable/#confi
 documents `~/.config/mpv/mpv.conf` as the user config file on Linux. Conversion
 is enabled only by `--recover --convert-portable` and targets offline
 `home-staging/.config/mpv/mpv.conf`.
+The archive member must match the migration-map path exactly; case/Unicode
+case-fold variants are never passed to an adapter, and a competing variant
+blocks an exact source rather than letting either archive path win.
 
 The adapter accepts only simple global boolean forms for these documented
 options:
@@ -132,8 +135,12 @@ options:
 The mpv config syntax documents a valueless option as enabled, so a bare
 allowlisted boolean is normalized to `yes`. The adapter does not flatten
 profile-scoped settings (except that `[default]` returns parsing to global
-scope), resolve includes, or interpret the full mpv grammar. Duplicate supported
-settings, invalid syntax/encoding, and unsupported values are excluded. Unknown
+scope), resolve includes, or interpret the full mpv grammar. The [mpv manual]
+(https://mpv.io/manual/stable/) documents `--fs` as an alias for `--fullscreen`
+and no-flag counterparts for flag options. These alternate spellings are counted
+against the canonical option for duplicate detection, but are never accepted on
+their own or emitted. Duplicate supported settings, invalid syntax/encoding, and
+unsupported values are excluded. Unknown
 settings—including Windows paths, device references, scripts, shader paths,
 includes, and script-owned options—are counted as blocked without recording
 names or values. No accepted option means no generated output; conflicts across

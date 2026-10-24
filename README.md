@@ -121,8 +121,11 @@ The mpv adapter reads only the exact Scoop persist member
 `home-staging/.config/mpv/mpv.conf` subset. It accepts five documented global
 booleans (`fullscreen`, `force-window`, `input-default-bindings`, `osc`, and
 `save-position-on-quit`) as `yes`/`no` or the documented valueless-flag form.
-Profiles, path/device/script options, unknown settings, `input.conf`, scripts,
-script options, shaders, fonts, cache, and watch-later data are not converted.
+Non-default profiles are not flattened; `[default]` resumes global scope. The
+`no-` flag counterparts and aliases such as `fs` are blocked rather than migrated;
+they participate in duplicate detection against their canonical option. Path,
+device, and script options, unknown settings, `input.conf`, scripts, script
+options, shaders, fonts, cache, and watch-later data are not converted.
 The source file and original ZIP remain unchanged; the archive does not establish
 that the Linux package version or runtime behavior matches. `mpv-git` remains a
 version/fork candidate, not a supported package substitution.
