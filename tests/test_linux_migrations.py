@@ -213,6 +213,23 @@ class MpvAdapterTests(unittest.TestCase):
         self.assertIn('unsupported-value', json.dumps(result))
         self.assertNotIn('auto', json.dumps(result))
 
+    def test_no_flag_and_fs_aliases_are_blocked_and_collide_canonically(self):
+        for config, option in (
+                ('osc=yes\nno-osc\n', 'osc'),
+                ('fullscreen=yes\nfs=no\n', 'fullscreen')):
+            with self.subTest(option=option):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                decision = next(d for d in result['decisions'] if d.get('key') == option)
+                self.assertEqual(decision['reason'], 'duplicate-setting')
+                self.assertEqual(decision['count'], 2)
+        for config, option in (('no-osc\n', 'osc'), ('fs\n', 'fullscreen')):
+            with self.subTest(lone_alias=config):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                decision = next(d for d in result['decisions'] if d.get('key') == option)
+                self.assertEqual(decision['reason'], 'unsupported-value')
+
     def test_unknown_only_empty_malformed_and_invalid_encoding_inputs(self):
         for payload, reason in (
                 (b'', 'no-supported-settings'),
@@ -296,12 +313,27 @@ class MigrationRecoveryTests(unittest.TestCase):
                 with patch.object(lr, 'convert_git_config', side_effect=AssertionError('conflict must preclude parsing')):
                     report = self.recover(mode='full', convert_portable=True)
                 self.assertFalse((self.dest / 'home-staging/.gitconfig').exists())
-                self.assertEqual(report['conversion_counts'], {'blocked': 2})
+                self.assertEqual(report['conversion_counts'],
+                                 {'blocked': 2 if second == '.gitconfig' else 1})
                 self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
-                for entry in report['entries']:
-                    self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+                exact = next(e for e in report['entries'] if e['path'] == '.gitconfig')
+                self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+                if second == '.gitconfig':
+                    for entry in report['entries']:
+                        self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+                else:
+                    alias = next(e for e in report['entries'] if e['path'] == '.GITCONFIG')
+                    self.assertNotIn('migration', alias)
                 import shutil
                 shutil.rmtree(self.dest)
+
+    def test_case_variant_root_config_is_not_an_adapter_input(self):
+        self.archive('mainframe-quick.zip', [('.GITCONFIG', self.payload)])
+        with patch.object(lr, 'convert_git_config', side_effect=AssertionError('variant path must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.gitconfig').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all('migration' not in entry for entry in report['entries']))
 
     def test_preexisting_output_is_not_overwritten(self):
         report = self.recover(convert_portable=True)
@@ -484,6 +516,31 @@ class MpvMigrationRecoveryTests(unittest.TestCase):
         self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
                             for e in report['entries']))
         self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
+
+    def test_case_and_unicode_casefold_variants_are_not_adapter_inputs(self):
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            ('PERSIST/MPV/PORTABLE_CONFIG/MPV.CONF', b'fullscreen=yes\n'),
+            ('perſist/mpv/portable_config/mpv.conf', b'osc=no\n'),
+        ])
+        with patch.object(lr, 'convert_mpv_config', side_effect=AssertionError('variant path must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all('migration' not in entry for entry in report['entries']))
+
+    def test_casefold_alias_conflict_blocks_exact_source_without_parsing_alias(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'fullscreen=yes\n')])
+        alias = 'persist/MPV/portable_config/mpv.conf'
+        self.archive('mainframe-persist.zip', [(alias, b'fullscreen=no\n')])
+        with patch.object(lr, 'convert_mpv_config', side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
 
     def test_candidate_output_collision_is_not_overwritten(self):
         self.archive('mainframe-quick.zip', [])

@@ -338,14 +338,23 @@ def write_private_json(path, obj):
 def stage_conversions(report, destination):
     """Convert only explicit maps; keep conversion failures separate from A.
 
-    Count all mapped source records before reading any payload so quick/full
-    duplicates (even blocked members) cannot pick an archive-order winner.
+    Count exact source records and case/Unicode aliases before reading payloads
+    so quick/full duplicates cannot pick an archive-order winner. Only exact
+    allowlisted paths are ever passed to an adapter.
     """
     stage = destination / 'home-staging'
-    sources = [(e, unicodedata.normalize('NFC', e.get('normalized_path') or '').casefold())
-               for e in report['entries']]
-    sources = [(e, key) for e, key in sources if key in MIGRATION_MAP]
+    sources = [(e, e.get('normalized_path')) for e in report['entries']
+               if e.get('normalized_path') in MIGRATION_MAP]
     targets = Counter(MIGRATION_MAP[key]['target'] for _, key in sources)
+    folded_targets = {unicodedata.normalize('NFC', key).casefold(): mapping['target']
+                      for key, mapping in MIGRATION_MAP.items()}
+    for entry in report['entries']:
+        path = entry.get('normalized_path')
+        if path is None or path in MIGRATION_MAP:
+            continue
+        alias_target = folded_targets.get(unicodedata.normalize('NFC', path).casefold())
+        if alias_target:
+            targets[alias_target] += 1
     for entry, source_key in sources:
         mapping = MIGRATION_MAP[source_key]
         audit = {'adapter': mapping['adapter'], 'status': 'blocked', 'activation': 'not-performed'}
