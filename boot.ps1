@@ -111,6 +111,20 @@ Set-Location $MainframeDir
 # --- 2. bitwarden unlock (the ONE password you type) ---
 Step 'unlocking bitwarden vault'
 $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
+if ($bwStatus.status -eq 'unauthenticated') {
+    # Fresh machine: the bw CLI has never been logged in here, so
+    # 'bw unlock' fails instantly with 'You are not logged in.' and never
+    # prompts for a password at all - which the retry loop below then
+    # misreports as 'password rejected'. Log in first, interactively and
+    # uncaptured, so the email / password / 2FA prompts behave exactly
+    # like a manual 'bw login'. Then lock again so the normal unlock
+    # flow below can mint the session key boot.ps1 persists.
+    Write-Host 'bitwarden CLI is not logged in on this machine - completing the one-time login:'
+    & bw login
+    if ($LASTEXITCODE -ne 0) { Die 'bitwarden login failed - re-run boot.ps1 and complete the login prompts.' }
+    & bw lock 2>$null | Out-Null
+    $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
+}
 if ($bwStatus.status -ne 'unlocked') {
     $session = $null
 
@@ -141,8 +155,18 @@ if ($bwStatus.status -ne 'unlocked') {
     $attempt = 0
     while (-not $session -and $attempt -lt 3) {
         $attempt++
-        Write-Host "type your bitwarden MASTER PASSWORD (attempt $attempt of 3):"
-        $session = & $invokeBwUnlock
+        # Prompt here instead of relying on 'bw unlock' prompting: when the
+        # unlock output is captured (as $invokeBwUnlock does), bw's own
+        # interactive prompt never reaches the user. A secure prompt plus
+        # --passwordenv keeps the password env-scoped, in memory only, and
+        # never written to disk.
+        $securePw = Read-Host "type your bitwarden MASTER PASSWORD (attempt $attempt of 3)" -AsSecureString
+        $env:BW_PASSWORD = [Net.NetworkCredential]::new('', $securePw).Password
+        try {
+            $session = & $invokeBwUnlock -UsePasswordEnv
+        } finally {
+            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+        }
         if (-not $session -and $attempt -lt 3) {
             Write-Warning 'Bitwarden rejected that password. Please try again.'
         }
