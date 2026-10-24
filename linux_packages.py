@@ -34,6 +34,7 @@ import pwsh_linux as pwsh_tools
 import tor_browser_linux as tor_browser_tools
 import windscribe_linux as windscribe_tools
 import wakatime_desktop_linux as wakatime_desktop_tools
+import vscode_linux as vscode_tools
 import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
@@ -92,7 +93,7 @@ NATIVE_REVIEW_REASONS = {
     "pwsh": "Official Linux PowerShell exists, but supported distro/runtime dependencies and pinned package/checksum installation are not validated; Windows modules are not ported.",
     "steam": "The allowlist has no Steam version pin; Valve's Linux steam_latest.deb URL is an unversioned bootstrapper with a self-updating client and udev rules, and no top-level checksum is published there, so no same-version bounded install route is validated.",
     "tor-browser": "The opt-in metadata-only plan can compare same-version Scoop and Tor release/checksum metadata; OpenPGP signature/key trust, archive layout/safe extraction, and isolated activation remain unvalidated, and no profile state is imported.",
-    "vscode": "Official Microsoft Linux VS Code exists with checksums, but download/use requires separately scoped vendor terms acceptance and a validated native adapter; consent is not inferred.",
+    "vscode": "Only an explicit --vscode-metadata-plan compares same-version Windows/Linux x64 metadata; archive/runtime/state are unvalidated and license/privacy-term acceptance is not inferred.",
 }
 WINGET_REVIEW_REASONS = {
     "GPSoftware.DirectoryOpus": "Windows-only Directory Opus; no same-product native Linux build or Windows-state adapter.",
@@ -242,6 +243,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                tor_browser_metadata_plan: bool = False,
                windscribe_metadata_plan: bool = False,
                wakatime_desktop_metadata_plan: bool = False,
+               vscode_metadata_plan: bool = False,
                gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -362,6 +364,23 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                           "No package archive or manifest script was downloaded or executed; Windows profiles/modules are not imported.")
                 blockers.append(reason)
                 actions.append(Action("pwsh-metadata", name, version=version, status="blocked",
+                                      reason=reason, source="scoop", dry_plan=detail))
+        elif name == "vscode" and vscode_metadata_plan:
+            try:
+                detail = vscode_tools.build_dry_plan(architecture)
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"vscode: official metadata-only review failed: {detail}"
+                blockers.append(reason)
+                actions.append(_blocked("vscode-metadata", name, reason, "scoop"))
+            else:
+                version = detail["package"]["version"]
+                reason = (f"VS Code current Scoop version observation {version} matches Microsoft's Windows x64 SHA-256 and same-commit Linux x64 tar.gz metadata; "
+                          "this is not a restore pin. Download/use license and privacy terms, archive contents, safe extraction, runtime dependencies, desktop integration, "
+                          "and settings/extensions/activation remain unvalidated; no archives were downloaded or terms accepted.")
+                blockers.append(reason)
+                actions.append(Action("vscode-metadata", name, version=version, status="blocked",
                                       reason=reason, source="scoop", dry_plan=detail))
         elif name in NATIVE_REVIEW_REASONS:
             reason = f"{name}: {NATIVE_REVIEW_REASONS[name]}"
@@ -735,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="explicitly compare public WinGet and Windscribe release metadata only; never downloads packages/signatures or enables installation")
     ap.add_argument("--wakatime-desktop-metadata-plan", action="store_true",
                     help="explicitly compare public WinGet and WakaTime Desktop release metadata only; never downloads installers/AppImages or enables installation")
+    ap.add_argument("--vscode-metadata-plan", action="store_true",
+                    help="explicitly compare public Scoop and Microsoft VS Code version metadata only; never downloads archives, accepts terms, or enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     if args.pnpm_plan_config and args.execute:
@@ -749,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--windscribe-metadata-plan is dry-only and cannot be combined with --execute")
     if args.wakatime_desktop_metadata_plan and args.execute:
         ap.error("--wakatime-desktop-metadata-plan is dry-only and cannot be combined with --execute")
+    if args.vscode_metadata_plan and args.execute:
+        ap.error("--vscode-metadata-plan is dry-only and cannot be combined with --execute")
     if args.ngrok_metadata_plan and args.pnpm_plan_config:
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.pwsh_metadata_plan and (args.ngrok_metadata_plan or args.pnpm_plan_config):
@@ -758,6 +781,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.windscribe_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.tor_browser_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.wakatime_desktop_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.tor_browser_metadata_plan or args.windscribe_metadata_plan or args.pnpm_plan_config):
+        ap.error("Choose only one explicit metadata review per package-planning run")
+    if args.vscode_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.tor_browser_metadata_plan or args.windscribe_metadata_plan or args.wakatime_desktop_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     native_roots = {}
     for entry in args.native_root:
@@ -778,6 +803,7 @@ def main(argv: list[str] | None = None) -> int:
     options["tor_browser_metadata_plan"] = args.tor_browser_metadata_plan
     options["windscribe_metadata_plan"] = args.windscribe_metadata_plan
     options["wakatime_desktop_metadata_plan"] = args.wakatime_desktop_metadata_plan
+    options["vscode_metadata_plan"] = args.vscode_metadata_plan
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:
