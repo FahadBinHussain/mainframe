@@ -19,7 +19,8 @@ from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 
 from linux_migrations import (MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config,
-                              convert_mpv_config, convert_yt_dlp_config)
+                              convert_flameshot_config, convert_mpv_config,
+                              convert_yt_dlp_config)
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 VERSION = 3
@@ -140,8 +141,10 @@ def classify(path, archive=''):
                 if tail == 'yt-dlp.conf':
                     return 'native-staging', 'Raw yt-dlp config candidate only; conversion is separately allowlisted.', '.config/yt-dlp/yt-dlp.conf'
                 return 'blocked', 'Unreviewed yt-dlp persist item is retained raw; no native staging rule exists.', None
-            if app == 'flameshot' and len(pieces) == 3:
-                return 'native-staging', 'Flameshot config export; review desktop shortcuts, paths, and INI version.', '.config/flameshot/' + pieces[2]
+            if app == 'flameshot':
+                if path == 'quick-persist/flameshot/flameshot.ini':
+                    return 'native-staging', 'Exact Flameshot config candidate; only the separately allowlisted subset is converted.', '.config/flameshot/flameshot.ini'
+                return 'blocked', 'Unreviewed Flameshot persist item remains raw; only the exact quick-persist config is recognized.', None
             if app in PERSIST_TARGETS and len(pieces) == 3:
                 return 'native-staging', 'Native-path export candidate; layout/path/plugin compatibility remains unverified.', PERSIST_TARGETS[app] + '/' + pieces[2]
             return 'unknown', 'Persist application/path lacks an implemented native adapter; raw data is retained.', None
@@ -392,6 +395,8 @@ def stage_conversions(report, destination):
                 output, audit = convert_mpv_config(payload)
             elif mapping['adapter'] == 'yt-dlp-portable-options-v1':
                 output, audit = convert_yt_dlp_config(payload)
+            elif mapping['adapter'] == 'flameshot-portable-preferences-v1':
+                output, audit = convert_flameshot_config(payload)
             else:
                 audit['reason'] = 'unsupported-adapter'
                 continue
@@ -497,7 +502,10 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                         if size != e['size'] or file_hash(target) != digest:
                             raise ValueError('Materialized member verification failed.')
                         e.update(sha256=digest, status='bytes-preserved')
-                        if apply_portable and e.get('native_target'):
+                        same_target_converter_source = (
+                            convert_portable
+                            and e.get('normalized_path') == 'quick-persist/flameshot/flameshot.ini')
+                        if apply_portable and e.get('native_target') and not same_target_converter_source:
                             out = stage / e['native_target']
                             staging_created = False
                             try:
