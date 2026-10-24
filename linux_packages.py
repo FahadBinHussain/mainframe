@@ -30,6 +30,7 @@ import opencode2_linux as opencode2_tools
 import pnpm_global_plan as pnpm_global_tools
 import google_workspace_cli_linux as gws_tools
 import ngrok_linux as ngrok_tools
+import pwsh_linux as pwsh_tools
 import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
@@ -234,6 +235,7 @@ def _anydesk_action(architecture: str, blockers: list[str], source: str) -> Acti
 def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None = None, architecture: str | None = None,
                *, pnpm_plan_config: dict[str, Any] | None = None,
                ngrok_metadata_plan: bool = False,
+               pwsh_metadata_plan: bool = False,
                gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -320,6 +322,23 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                           "No archive was downloaded and no token/configuration, service or PATH state was read or changed.")
                 blockers.append(reason)
                 actions.append(Action("ngrok-metadata", name, version=version, status="blocked",
+                                      reason=reason, source="scoop", dry_plan=detail))
+        elif name == "pwsh" and pwsh_metadata_plan:
+            try:
+                detail = pwsh_tools.build_dry_plan(architecture)
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"pwsh: official metadata-only review failed: {detail}"
+                blockers.append(reason)
+                actions.append(_blocked("pwsh-metadata", name, reason, "scoop"))
+            else:
+                version = detail["package"]["version"]
+                reason = (f"pwsh current Scoop version observation {version} matches the official Linux x64 asset/checksum metadata; "
+                          "this is not a user-selected restore pin, and archive layout, safe extraction, runtime and activation remain unvalidated. "
+                          "No package archive or manifest script was downloaded or executed; Windows profiles/modules are not imported.")
+                blockers.append(reason)
+                actions.append(Action("pwsh-metadata", name, version=version, status="blocked",
                                       reason=reason, source="scoop", dry_plan=detail))
         elif name in NATIVE_REVIEW_REASONS:
             reason = f"{name}: {NATIVE_REVIEW_REASONS[name]}"
@@ -650,13 +669,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="JSON containing explicit isolated roots for Vercel metadata-only planning; never enables installation")
     ap.add_argument("--ngrok-metadata-plan", action="store_true",
                     help="explicitly compare public Scoop and ngrok archive-index metadata only; never downloads a binary or enables installation")
+    ap.add_argument("--pwsh-metadata-plan", action="store_true",
+                    help="explicitly compare public Scoop and PowerShell release metadata only; never downloads an archive or enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     if args.pnpm_plan_config and args.execute:
         ap.error("--pnpm-plan-config is dry-only and cannot be combined with --execute")
     if args.ngrok_metadata_plan and args.execute:
         ap.error("--ngrok-metadata-plan is dry-only and cannot be combined with --execute")
+    if args.pwsh_metadata_plan and args.execute:
+        ap.error("--pwsh-metadata-plan is dry-only and cannot be combined with --execute")
     if args.ngrok_metadata_plan and args.pnpm_plan_config:
+        ap.error("Choose only one explicit metadata review per package-planning run")
+    if args.pwsh_metadata_plan and (args.ngrok_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     native_roots = {}
     for entry in args.native_root:
@@ -673,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(options["pnpm_plan_config"], dict):
             ap.error("pnpm dry-plan config must be a JSON object")
     options["ngrok_metadata_plan"] = args.ngrok_metadata_plan
+    options["pwsh_metadata_plan"] = args.pwsh_metadata_plan
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:
