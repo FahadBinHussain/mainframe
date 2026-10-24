@@ -109,16 +109,29 @@ bash ./restore.sh /path/to/backup-directory --recover \
   --destination /path/to/new-converted-export --convert-portable
 ```
 
-The first explicit adapter generates an offline `.gitconfig` subset from the
-root Windows export using installed Git as a parser (includes disabled). Only
-`core.autocrlf`, `core.eol`, `core.safecrlf`, `diff.algorithm`,
-`merge.conflictstyle`, and `color.ui` have supported enum mappings. Windows
-`autocrlf=true` becomes `input`; `eol=crlf/native` becomes `lf`. Unsupported
-values, duplicate keys, and all identity/helper/include/path/credential settings
-are blocked with value-free decisions in the private manifest. Original bytes
-remain intact. No supported settings means no generated file; competing source
-configs mean no winner. A missing Git parser or malformed input is a conversion
-blocker, not loss of the original archive. No other app is converted yet.
+The Git adapter generates an offline `.gitconfig` subset from the root Windows
+export using installed Git as a parser (includes disabled). Only `core.autocrlf`,
+`core.eol`, `core.safecrlf`, `diff.algorithm`, `merge.conflictstyle`, and
+`color.ui` have supported enum mappings. Windows `autocrlf=true` becomes `input`;
+`eol=crlf/native` becomes `lf`. Identity, helper, include, path, and credential
+settings remain excluded.
+
+The mpv adapter reads only the exact Scoop persist member
+`persist/mpv/portable_config/mpv.conf` and writes an offline
+`home-staging/.config/mpv/mpv.conf` subset. It accepts five documented global
+booleans (`fullscreen`, `force-window`, `input-default-bindings`, `osc`, and
+`save-position-on-quit`) as `yes`/`no` or the documented valueless-flag form.
+Profiles, path/device/script options, unknown settings, `input.conf`, scripts,
+script options, shaders, fonts, cache, and watch-later data are not converted.
+The source file and original ZIP remain unchanged; the archive does not establish
+that the Linux package version or runtime behavior matches. `mpv-git` remains a
+version/fork candidate, not a supported package substitution.
+
+For both adapters, unsupported values, duplicate keys, malformed inputs, and
+competing source/target paths are reported without echoing private values; no
+supported settings means no generated file. Conversion remains opt-in, offline,
+review-required, and separate from activation or package installation. See the
+[coverage map](docs/linux-restore-coverage.md) for evidence and remaining gaps.
 
 `--convert-portable` requires `--recover`; it can be combined with
 `--apply-portable` but neither implies the other. `conversion_counts` records
