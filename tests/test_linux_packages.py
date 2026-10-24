@@ -210,6 +210,68 @@ class LinuxPackagesTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 2)
             build.assert_not_called()
 
+    def test_windscribe_default_plan_never_resolves_metadata(self):
+        with patch.object(lp.windscribe_tools, "build_dry_plan") as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+        action = next(item for item in plan.actions if item.name == "Windscribe.Windscribe")
+        self.assertEqual(action.status, "blocked")
+        self.assertIsNone(action.dry_plan)
+        self.assertIn("no validated install/activation adapter", action.reason)
+        dry_plan.assert_not_called()
+
+    def test_windscribe_explicit_metadata_plan_is_still_blocked_from_execution(self):
+        detail = {
+            "package": {"name": "Windscribe.Windscribe", "version": "2.24.13", "version_is_restore_pin": False},
+            "official_release": {"windows_digest_matches_winget": True,
+                                 "linux_desktop_deb_candidate": {"url": "https://github.com/Windscribe/Desktop-App/synthetic.deb"}},
+            "execution_blockers": ["GPG signature/key trust and VPN side effects remain unvalidated"],
+            "executable": False,
+        }
+        with patch.object(lp.windscribe_tools, "build_dry_plan", return_value=detail) as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", windscribe_metadata_plan=True)
+        dry_plan.assert_called_once_with("x86_64")
+        action = next(item for item in plan.actions if item.name == "Windscribe.Windscribe")
+        self.assertEqual(action.kind, "windscribe-metadata")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(action.version, "2.24.13")
+        self.assertIsNone(action.command)
+        self.assertIsNone(action.archive)
+        self.assertIs(action.dry_plan, detail)
+        self.assertIn("not a restore pin", action.reason)
+        self.assertIn("GPG signature/key trust", action.reason)
+        self.assertIn("firewall", action.reason)
+        runner = Mock(side_effect=AssertionError("blocked Windscribe metadata plan must not execute"))
+        with self.assertRaisesRegex(RuntimeError, "blockers"):
+            lp.execute(plan, ["Windscribe.Windscribe"], runner=runner)
+        runner.assert_not_called()
+
+    def test_windscribe_http_protocol_failure_becomes_sanitized_blocker(self):
+        marker = "synthetic-partial-http-payload"
+        failure = http.client.IncompleteRead(marker.encode(), 100)
+        with patch.object(lp.windscribe_tools, "build_dry_plan", side_effect=failure):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", windscribe_metadata_plan=True)
+        action = next(item for item in plan.actions if item.name == "Windscribe.Windscribe")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(
+            action.reason,
+            "Windscribe.Windscribe: official metadata-only review failed: malformed or incomplete HTTP response",
+        )
+        self.assertNotIn(marker, action.reason)
+
+    def test_windscribe_metadata_option_is_dry_only_and_exclusive(self):
+        for args in (
+            ["--repo", str(ROOT), "--windscribe-metadata-plan", "--execute"],
+            ["--repo", str(ROOT), "--windscribe-metadata-plan", "--pnpm-plan-config", "/unused/config.json"],
+            ["--repo", str(ROOT), "--windscribe-metadata-plan", "--ngrok-metadata-plan"],
+            ["--repo", str(ROOT), "--windscribe-metadata-plan", "--pwsh-metadata-plan"],
+            ["--repo", str(ROOT), "--windscribe-metadata-plan", "--tor-browser-metadata-plan"],
+        ):
+            with self.subTest(args=args), patch.object(lp, "build_plan") as build, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    lp.main(args)
+            self.assertEqual(caught.exception.code, 2)
+            build.assert_not_called()
+
     def test_tor_browser_default_plan_never_resolves_metadata(self):
         with patch.object(lp.tor_browser_tools, "build_dry_plan") as dry_plan:
             plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
