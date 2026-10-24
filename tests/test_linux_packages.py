@@ -542,6 +542,24 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertIn('portapps/discord-portable', blocked['discord'])
         self.assertIn('no exact matching Linux package version/checksum', blocked['discord'])
         self.assertIn('No Snap/Flatpak substitution.', blocked['discord'])
+        self.assertIn('steam_latest.deb', blocked['steam'])
+        self.assertIn('self-updating client', blocked['steam'])
+        self.assertIn('no top-level checksum', blocked['steam'])
+
+    def test_steam_action_is_blocked_and_never_reaches_runner(self):
+        plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+        steam = next(action for action in plan.actions if action.name == "steam")
+        self.assertEqual(steam.status, "blocked")
+        self.assertEqual(steam.kind, "apt")
+        self.assertEqual(steam.source, "scoop")
+        self.assertIsNone(steam.command)
+        self.assertIsNone(steam.version)
+        self.assertIsNone(steam.archive)
+        self.assertIn(steam.reason, plan.blockers)
+        runner = Mock(side_effect=AssertionError("must not run"))
+        with self.assertRaisesRegex(RuntimeError, "Unresolved blockers prevent full restore"):
+            lp.execute(plan, ["steam"], runner=runner)
+        runner.assert_not_called()
 
     def test_pip_freeze_optional_and_ignored_for_backup_root(self):
         from tempfile import TemporaryDirectory

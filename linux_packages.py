@@ -87,7 +87,7 @@ NATIVE_REVIEW_REASONS = {
     "nuget": "Requested nuget.exe has no equivalent native Linux command surface; Mono and dotnet nuget are not silent substitutes.",
     "parsec": "Official Linux app is client-only, without hosting; Windows role/state and a pinned checksum/install adapter are unresolved.",
     "pwsh": "Official Linux PowerShell exists, but supported distro/runtime dependencies and pinned package/checksum installation are not validated; Windows modules are not ported.",
-    "steam": "Official Linux client exists, but pinned vendor package integrity, bootstrap dependencies, and installer side effects are not validated.",
+    "steam": "The allowlist has no Steam version pin; Valve's Linux steam_latest.deb URL is an unversioned bootstrapper with a self-updating client and udev rules, and no top-level checksum is published there, so no same-version bounded install route is validated.",
     "tor-browser": "Official Linux Tor Browser exists, but release signature/trust verification and safe version-pinned installation are not implemented.",
     "vscode": "Official Microsoft Linux VS Code exists with checksums, but download/use requires separately scoped vendor terms acceptance and a validated native adapter; consent is not inferred.",
 }
