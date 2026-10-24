@@ -55,6 +55,13 @@ MIGRATION_MAP = {
         'preservation': 'original bytes retained separately',
         'activation': 'never; offline subset only',
     },
+    'user-env.reg': {
+        'adapter': 'user-environment-less-options-v1',
+        'target': '.config/environment.d/90-mainframe-restore.conf',
+        'source_layout': 'mainframe-quick-user-environment-reg-v1',
+        'preservation': 'original bytes retained separately',
+        'activation': 'never; offline subset only',
+    },
 }
 # Only literal enum values can reach generated configuration. Unknown keys and
 # values are not echoed: even a Git subsection name can contain private data.
@@ -110,6 +117,9 @@ FLAMESHOT_BOOLEAN_OPTIONS = frozenset({'showHelp'})
 FLAMESHOT_INTEGER_RANGES = {'contrastOpacity': (0, 255)}
 FLAMESHOT_ALLOWED_OPTIONS = (FLAMESHOT_COLOR_OPTIONS | FLAMESHOT_BOOLEAN_OPTIONS
                              | frozenset(FLAMESHOT_INTEGER_RANGES))
+LESS_ALLOWED_OPTION_SETS = frozenset({
+    '-F', '-R', '-X', '-FR', '-FX', '-RX', '-FRX',
+})
 
 
 def convert_git_config(payload, runner=subprocess.run):
@@ -590,6 +600,189 @@ def convert_flameshot_config(payload):
     lines.extend(f'{key}={accepted[key]}' for key in sorted(accepted))
     result['status'] = 'converted-subset'
     return ('\n'.join(lines) + '\n').encode('ascii'), result
+
+
+def _read_reg_quoted(text, start=0):
+    if start >= len(text) or text[start] != '"':
+        raise ValueError('Expected a quoted registry token')
+    value = []
+    index = start + 1
+    while index < len(text):
+        char = text[index]
+        if char == '"':
+            return ''.join(value), index + 1
+        if char == '\\':
+            index += 1
+            if index >= len(text) or text[index] not in ('\\', '"'):
+                raise ValueError('Unsupported registry string escape')
+            char = text[index]
+        if ord(char) < 32 and char != '\t':
+            raise ValueError('Control character in registry string')
+        value.append(char)
+        index += 1
+    raise ValueError('Unterminated registry string')
+
+
+def _consume_reg_hex(token, lines, line_index):
+    match = re.match(r'^hex(?:\(([0-9a-f]+)\))?:(.*)$', token, re.IGNORECASE)
+    if not match:
+        raise ValueError('Malformed registry hex value')
+    segments = []
+    segment = match.group(2)
+    while True:
+        segment = segment.strip(' \t')
+        continuation = segment.endswith('\\')
+        if continuation:
+            segment = segment[:-1].rstrip(' \t')
+        segments.append(segment)
+        if not continuation:
+            break
+        line_index += 1
+        if line_index >= len(lines):
+            raise ValueError('Truncated registry hex value')
+        segment = lines[line_index].strip(' \t')
+        if not segment:
+            raise ValueError('Empty registry hex continuation')
+    data = ''.join(segments)
+    if data and re.fullmatch(r'[0-9a-f]{2}(?:,[0-9a-f]{2})*', data,
+                             re.IGNORECASE) is None:
+        raise ValueError('Malformed registry hex bytes')
+    return line_index
+
+
+def _parse_reg_assignment(line, lines, line_index):
+    line = line.strip(' \t')
+    if line.startswith('@='):
+        name = None
+        token = line[2:].strip(' \t')
+    else:
+        name, end = _read_reg_quoted(line)
+        if end >= len(line) or line[end] != '=':
+            raise ValueError('Malformed registry assignment')
+        token = line[end + 1:].strip(' \t')
+    if token.startswith('"'):
+        value, end = _read_reg_quoted(token)
+        if end != len(token):
+            raise ValueError('Trailing data after registry string')
+        return name, 'string', value, line_index
+    if token == '-':
+        return name, 'delete', None, line_index
+    if re.fullmatch(r'dword:[0-9a-f]{8}', token, re.IGNORECASE):
+        return name, 'typed', None, line_index
+    if token.lower().startswith('hex'):
+        return name, 'typed', None, _consume_reg_hex(token, lines, line_index)
+    if re.fullmatch(r'qword:[0-9a-f]{16}', token, re.IGNORECASE):
+        return name, 'typed', None, line_index
+    raise ValueError('Unsupported registry assignment syntax')
+
+
+def _parse_user_environment_reg(payload):
+    # Microsoft documents reg export's selected key/value behavior, but not its
+    # text encoding. Accept only an explicit UTF-16LE BOM and V5 header; never
+    # guess ANSI/UTF-8 or execute/import any part of the file.
+    if not payload.startswith(b'\xff\xfe') or payload.startswith(b'\xff\xfe\x00\x00'):
+        raise ValueError('Unsupported registry export encoding')
+    text = payload[2:].decode('utf-16-le')
+    if ('\ufeff' in text or '\x00' in text
+            or any(char in text for char in ('\u0085', '\u2028', '\u2029'))
+            or any(ord(char) < 32 and char not in '\r\n\t' for char in text)):
+        raise ValueError('Invalid registry export text')
+    text = text.replace('\r\n', '\n')
+    if '\r' in text:
+        raise ValueError('Unsupported registry line ending')
+    lines = text.split('\n')
+    if not lines or lines[0] != 'Windows Registry Editor Version 5.00':
+        raise ValueError('Unsupported registry header')
+
+    expected_section = r'[HKEY_CURRENT_USER\Environment]'.casefold()
+    section_count = 0
+    in_section = False
+    entries = []
+    line_index = 1
+    while line_index < len(lines):
+        line = lines[line_index].strip(' \t')
+        if not line:
+            line_index += 1
+            continue
+        if line.startswith('['):
+            if section_count or line.casefold() != expected_section:
+                raise ValueError('Unexpected registry section')
+            section_count = 1
+            in_section = True
+            line_index += 1
+            continue
+        if not in_section:
+            raise ValueError('Registry value precedes expected section')
+        name, value_type, value, line_index = _parse_reg_assignment(
+            line, lines, line_index)
+        entries.append((name, value_type, value))
+        line_index += 1
+    if section_count != 1:
+        raise ValueError('Missing registry section')
+    return entries
+
+
+def convert_user_environment(payload):
+    """Convert only a literal LESS option subset from the exact user-env export.
+
+    Other environment values are counted as blocked and remain in the raw
+    source. PATH, expanded values, commands, and registry data are never applied.
+    """
+    source_key = 'user-env.reg'
+    result = {'adapter': MIGRATION_MAP[source_key]['adapter'],
+              'version': ADAPTER_VERSION, 'status': 'blocked',
+              'decisions': [], 'activation': 'not-performed',
+              'accepted_settings': 0, 'blocked_settings': 0}
+    if len(payload) > MAX_CONFIG_BYTES:
+        return None, dict(result, reason='config-size-limit', blocked_settings=1)
+    try:
+        entries = _parse_user_environment_reg(payload)
+    except (UnicodeDecodeError, ValueError):
+        return None, dict(result, reason='invalid-registry-export',
+                          blocked_settings=1)
+
+    less_entries = []
+    unmapped_count = 0
+    for name, value_type, value in entries:
+        if name is not None and name.casefold() == 'less':
+            less_entries.append((value_type, value))
+        else:
+            unmapped_count += 1
+    blocked_count = unmapped_count
+    accepted = None
+    if unmapped_count:
+        result['decisions'].append({
+            'status': 'blocked',
+            'reason': 'unmapped-or-sensitive-environment-variable',
+            'count': unmapped_count,
+        })
+    if less_entries:
+        decision = {'key': 'LESS'}
+        if len(less_entries) != 1:
+            decision.update(status='blocked', reason='duplicate-setting',
+                            count=len(less_entries))
+            blocked_count += len(less_entries)
+        else:
+            value_type, value = less_entries[0]
+            if value_type != 'string':
+                decision.update(status='blocked',
+                                reason='unsupported-registry-type')
+                blocked_count += 1
+            elif value not in LESS_ALLOWED_OPTION_SETS:
+                decision.update(status='blocked', reason='unsupported-option-set')
+                blocked_count += 1
+            else:
+                accepted = value
+                decision.update(status='retained',
+                                reason='documented-less-pager-options')
+        result['decisions'].append(decision)
+
+    result['accepted_settings'] = int(accepted is not None)
+    result['blocked_settings'] = blocked_count
+    if accepted is None:
+        return None, dict(result, reason='no-supported-settings')
+    result['status'] = 'converted-subset'
+    return f'LESS={accepted}\n'.encode('ascii'), result
 
 
 def convert_mpv_config(payload):
