@@ -1,5 +1,6 @@
 import json
 import contextlib
+import http.client
 import io
 import os
 import subprocess
@@ -129,6 +130,19 @@ class LinuxPackagesTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "blockers"):
             lp.execute(plan, ["ngrok"], runner=runner)
         runner.assert_not_called()
+
+    def test_ngrok_http_protocol_failure_becomes_sanitized_blocker(self):
+        marker = "synthetic-partial-http-payload"
+        failure = http.client.IncompleteRead(marker.encode(), 100)
+        with patch.object(lp.ngrok_tools, "build_dry_plan", side_effect=failure):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", ngrok_metadata_plan=True)
+        action = next(item for item in plan.actions if item.name == "ngrok")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(
+            action.reason,
+            "ngrok: official metadata-only review failed: malformed or incomplete HTTP response",
+        )
+        self.assertNotIn(marker, action.reason)
 
     def test_ngrok_metadata_option_is_dry_only_and_exclusive(self):
         for args in (
