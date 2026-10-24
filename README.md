@@ -52,8 +52,13 @@ none of those has it, it asks once and saves the answer for next time.
 — that is their exposure decision to make.)
 
 Separately, `publish-backup.ps1` detects the vault account email from
-`bw status` at publish time and stamps it into the (private) release notes
-as `bw-email:` — it is never written anywhere public.
+`bw status` at publish time, stamps it into the (private) release notes as
+`bw-email:`, and seals it into `bw-email.enc.json` in this repo — encrypted
+with a key derived from the master password (PBKDF2-HMAC-SHA256, 600k
+iterations, AES-256-CBC + HMAC-SHA256), ciphertext only, nothing plaintext.
+`boot.ps1` unseals it with the master password setup asks for anyway, so a
+fresh machine never has to type the email. Seal once via publish, or any
+time with `seal-bw-email.ps1`; delete the blob and re-run to re-seal.
 
 ### Linux: Bash (no PowerShell dependency)
 
