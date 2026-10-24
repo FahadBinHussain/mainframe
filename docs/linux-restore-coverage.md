@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: offline fixture-tested recovery plus Git, mpv, and yt-dlp subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: offline fixture-tested recovery plus Git, mpv, yt-dlp, and Flameshot subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -8,7 +8,7 @@ The Linux path is deliberately **offline and non-destructive**:
 
 - `linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
 - `--apply-portable` may additionally copy explicitly classified files into a **new** `home-staging/` tree. It never writes the live home directory, activates services, changes global agent instructions, imports credentials, or executes Windows files.
-- `--convert-portable` separately opts into the exact Git and mpv settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
+- `--convert-portable` separately opts into the exact Git, mpv, yt-dlp, and Flameshot settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
 - Every native target below is a **staging candidate layout, not confirmed operational**. A staged byte is not proof that its application, plugins, identity, paths, permissions, or behavior work on Linux.
 - This is **not the user's requested 100% Linux runtime**. It is a lossless-byte-preservation and selective-native-staging tool with explicit blockers.
 
@@ -40,6 +40,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `ditto` | Blocked | Ditto is Windows-only; retained starred SQLite data is not imported into another clipboard application. |
 | `ffmpeg` | Native staging candidate | `.config/ffmpeg/`; target layout is unverified and binaries are not copied as a Linux runtime. |
 | `firefox` | Native staging candidate | `.mozilla/firefox/`; profile encryption, version migration, extensions, and paths remain unverified. |
+| `flameshot` (quick-persist only) | Exact config candidate plus bounded converter | Only `quick-persist/flameshot/flameshot.ini` maps to `.config/flameshot/flameshot.ini`; conversion is limited to five documented shared `[General]` preferences. All other settings remain raw with sanitized blocker counts. |
 | `ghidra` | Native staging candidate | `.ghidra/`; target layout is unverified; Java/runtime and extensions need review. |
 | `git` | Blocked | Scoop Git settings can contain Windows paths/helpers; use separately reviewed `.gitconfig` and native Git setup. |
 | `gradle` | Native staging candidate | `.gradle/`; caches and metadata may be staged, but Java/toolchain paths and executability are unverified. |
@@ -64,7 +65,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `x64dbg` | Blocked | Windows debugger state/plugins have no native Linux runtime. |
 | `yt-dlp` | Exact config candidate plus bounded config converter | Only `yt-dlp.conf` may be copied under `.config/yt-dlp/` as an unconverted candidate; `--convert-portable` can emit one documented error-policy option to `.config/yt-dlp/config`. Scoop plugin directories and all other unreviewed persist paths remain raw-only; executable/package, JavaScript runtime, plugin, and runtime behavior are unverified. |
 
-Additional persist data has explicit handling: `flameshot` settings are candidates under `.config/flameshot/`; OBS exports are candidates under `.config/obs-studio/`; qBittorrent exports are candidates under `.config/qBittorrent/` and torrent metadata under `.local/share/qBittorrent/`. These are also staging candidates, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
+Additional quick-persist data has explicit handling: the exact Flameshot config above is the only Flameshot path eligible for candidate staging or conversion; OBS exports remain candidates under `.config/obs-studio/`; qBittorrent exports remain candidates under `.config/qBittorrent/` and torrent metadata under `.local/share/qBittorrent/`. These are staging candidates, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
 
 ## Implemented conversion map: Git portable settings v1
 
@@ -202,6 +203,58 @@ mapping is still only a package-planning route; installed version, executable
 behavior, JavaScript runtime, plugins, output behavior, and operational
 equivalence remain unverified.
 
+## Implemented conversion map: Flameshot portable preferences v1
+
+The tracked Windows [backup script](../backup.ps1#L501-L512) copies only
+`%APPDATA%\Flameshot\flameshot.ini` to the exact archive member
+`quick-persist/flameshot/flameshot.ini`; the tracked [restore script](../restore.ps1#L934-L952)
+uses that same source only on a fresh Windows box. The current [Scoop Extras
+Flameshot manifest](https://raw.githubusercontent.com/ScoopInstaller/Extras/master/bucket/flameshot.json)
+has no `persist` declaration, so this adapter is deliberately tied to Mainframe's
+quick-persist export rather than a guessed Scoop directory.
+
+Upstream's [configuration guide](https://flameshot.org/docs/advanced/configuration/)
+documents Linux's `~/.config/flameshot/flameshot.ini` target. The upstream
+[README](https://github.com/flameshot-org/flameshot/blob/master/README.md)
+specifically says `savePath` must be corrected when copying config across
+operating systems. The current shared
+[ConfigHandler option table](https://raw.githubusercontent.com/flameshot-org/flameshot/master/src/utils/confighandler.cpp)
+declares the following selected `[General]` keys outside platform-specific
+guards; the [CLI documentation](https://flameshot.org/docs/advanced/commandline-options/)
+also describes the help and UI-color settings. This evidence supports a small
+common subset, not automatic equivalence for the whole Windows configuration.
+
+| Exact `[General]` key | Accepted value | Evidence-backed behavior |
+|---|---|---|
+| `showHelp` | `true` or `false` | Upstream documents the initial help message in capture mode and its CLI boolean. |
+| `uiColor`, `contrastUiColor` | Six-digit `#RRGGBB` only | Shared color settings; the CLI docs identify main and contrast UI colors. |
+| `drawColor` | Six-digit `#RRGGBB` only | Shared last-used drawing color in the upstream config definitions. |
+| `contrastOpacity` | ASCII decimal integer `0`–`255` | Shared overlay opacity; upstream defines the bounded range. |
+
+The adapter writes only these unique, strictly validated settings to
+`home-staging/.config/flameshot/flameshot.ini`. Although upstream accepts other
+color encodings, this converter deliberately accepts only `#RRGGBB`; booleans
+must be literal `true`/`false`. It handles only simple UTF-8 INI lines in the
+exact `[General]` group; it is not a general Qt `QSettings` parser. Unknown or
+unsupported settings and sections, invalid values, and duplicate allowlisted
+keys remain in the byte-preserved original and produce reason/count-only audit
+decisions. Duplicate settings are not resolved by picking a value. The audit
+never echoes values, unknown key names, comments, Windows paths, or identifiers.
+
+`savePath`, filename patterns, startup behavior, notification preferences,
+upload/auth data, drawing sizes, shortcuts, plugins, desktop/display backends,
+OS-conditional options, and all other settings remain unsupported. Upstream
+documents Linux global shortcuts as desktop-environment managed, and the source
+has OS-specific settings/side effects; no shortcut or startup translation is
+attempted. `--apply-portable` alone may stage the exact original as an
+**unconverted candidate**. If `--convert-portable` is also requested, that raw
+candidate copy is skipped because the candidate and generated config share the
+same target; the original bytes still remain under `recovered/`. Existing target
+collisions block publication rather than overwrite. Nothing is installed,
+launched, or activated, and the upstream `flameshot config --check` command is
+not run. Package/runtime version, display-stack behavior, and operational
+equivalence therefore remain unverified.
+
 ## Source action coverage
 
 This table records the actual source actions, not hypothetical Linux work. Windows actions remain reference evidence; Linux actions are limited to the checked-in planner/recovery behavior.
@@ -214,6 +267,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Explicit native staging | Only classifier-approved targets are copied to a new offline `home-staging/` tree. A collision becomes `staging-conflict`; no overwrite or live-home merge occurs. |
 | Git preference conversion | Opt-in six-setting `.gitconfig` adapter above; original preserved, Windows line-ending defaults translated, unknown/identity/command/credential state excluded with explicit decisions. No native activation. |
 | yt-dlp configuration | Opt-in exact-source adapter above; one documented platform-neutral error-policy option at most. Unknown/auth/path/proxy/plugin/command settings block conversion with sanitized counts; plugin directories stay raw-only. No package install or activation. |
+| Flameshot configuration | Opt-in exact quick-persist adapter above; only `showHelp`, three color settings, and bounded `contrastOpacity` can be emitted. Unsupported fields remain only in the preserved original with sanitized counts; no installation, app validation, or activation occurs. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Only `AnyDesk.AnyDesk` package intent is covered by native `anydesk`; other WinGet IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
