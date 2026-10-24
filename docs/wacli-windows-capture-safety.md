@@ -1,6 +1,6 @@
 # Windows WACLI capture: why the safety block stays
 
-**Application-consistent WACLI capture is still blocked.** The normal Windows backup scripts now use a dedicated writerless VSS path to preserve raw WACLI roots, including SQLite sidecars, as a crash-consistent payload. It does not coordinate writers, prove 100% usability or activate restore. The ordinary live-copy source guards remain strict; only the exact profile root is excluded from a later generic copy after the held-VSS export succeeds. No WACLI process is stopped or killed.
+**WACLI backup is currently blocked when WACLI state exists.** The integrated scripts cannot prove that supported metadata-derived roots include media paths referenced only inside SQLite, and they do not inspect database contents. They now fail before native VSS export rather than silently omitting possible external media. The native helper remains a writerless, crash-consistent copy implementation, not application consistency or restore activation. The ordinary live-copy source guards remain strict; no profile root is excluded unless a held-VSS export succeeds. No WACLI process is stopped or killed.
 
 This is source-capture work only. Normal Linux installation, offline staging, Windows archive layout, profile selection, migration and media-path mapping are unchanged. No real account, private archive, credentials or live HOME is inspected or modified.
 
@@ -47,13 +47,13 @@ The following remains a **proposed v1 contract** for stronger application-consis
 
 ## Exact outcome and next gate
 
-**Raw-byte backup coverage added by the follow-on VSS integration; application-consistent coverage added: none.** The normal Windows backup now preserves profile, metadata-selected store, legacy `.wacli`, and explicitly referenced config/media roots in the separate crash-consistent VSS payload. This does not inspect SQLite or discover external media paths stored only in a database, prove producer versions, or activate restore. The VSS-only source-guard exception does not permit ordinary live copies.
+**The integrated WACLI backup now fails closed; application-consistent coverage added: none.** Metadata-only discovery can enumerate the profile tree, metadata-selected store, legacy `.wacli`, and explicitly referenced config/media roots, but cannot prove that it covers paths stored only in database rows. The PowerShell export guard therefore refuses before native build/VSS or WACLI destination creation; no incomplete payload or generic live-copy fallback is produced. The low-level VSS implementation still labels any exported data `crash-consistent`; it does not inspect SQLite, prove producer versions, or activate restore.
 
 The next implementation needs a synthetic Windows test environment with the required existing SQLite and AES archive dependencies, plus an agreed verifiable capture boundary/provenance policy. Until that exists, this is a safe blocked result, not the first successful full source backup.
 
 Even after that gate passes, [the remaining migration gaps](linux-wacli-windows-parity.md) remain: complete schema compatibility, Windows account/config selection, external media preservation and path mapping, non-overwriting activation, and functional local/search/media/linked-device validation. None is performed or claimed here.
 
-The subsequent [snapshot preparation milestone](wacli-snapshot-preparation.md) adds a private staged SQLite engine and candidate AES integration, with a no-I/O blocked public preflight. It does not authorize an application-level capture or accept a trusted capture receipt. The normal Windows backup's native VSS copy is a separate raw preservation path; Windows runtime validation and the stronger proposed contract above remain incomplete.
+The subsequent [snapshot preparation milestone](wacli-snapshot-preparation.md) adds a private staged SQLite engine and candidate AES integration, with a no-I/O blocked public preflight. It does not authorize an application-level capture or accept a trusted capture receipt. The native Windows VSS helper remains a separate raw-preservation implementation, but the integrated backup is blocked until complete external-media membership can be proven without private-content inspection; Windows runtime validation and the stronger proposed contract above remain incomplete.
 
 ## Stop/copy/restart assessment: attestation bypass removed
 

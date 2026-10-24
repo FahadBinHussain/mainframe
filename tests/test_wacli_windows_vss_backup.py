@@ -1,12 +1,14 @@
 """Synthetic-only tests for Windows WACLI VSS backup wiring.
 
-These tests create temporary directories and metadata fixtures only. They never
-run backup.ps1, the native VSS helper, WACLI, or inspect a real account store.
+These tests create temporary directories, JSON metadata, and a synthetic SQLite
+media-reference fixture only. They never run backup.ps1, the native VSS helper,
+WACLI, or inspect a real account store.
 """
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -68,6 +70,7 @@ $inputs | ConvertTo-Json -Depth 8 -Compress
         self.assertIn(self.root / "external-media", roots)
         self.assertIn(self.root / "UserProfile/.wacli", roots)
         self.assertEqual(len(payload["MetadataFiles"]), 1)
+        self.assertEqual(payload["MediaReferenceCoverage"], "unproven")
 
     def test_missing_metadata_store_fails_loudly(self):
         script = r'''
@@ -86,28 +89,49 @@ catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }
         self.assertEqual(result.returncode, 2)
         self.assertIn("Required WACLI metadata-store root is missing or unavailable", result.stderr)
 
-    def test_native_helper_build_failure_leaves_no_output_directory(self):
+    def test_unproven_media_reference_coverage_blocks_before_native_build_and_output(self):
+        profile = self.root / "AppData/mainframe/accounts/whatsapp/synthetic-profile"
+        profile_store = profile / "store"
+        external_store = self.root / "external-store"
+        metadata_media = self.root / "metadata-media"
+        sqlite_only_media = self.root / "sqlite-only-media"
+        for path in (profile_store, external_store, metadata_media, sqlite_only_media):
+            path.mkdir(parents=True, exist_ok=True)
+        media_file = sqlite_only_media / "synthetic-blob.bin"
+        media_file.write_bytes(b"synthetic only")
+        connection = sqlite3.connect(profile_store / "wacli.db")
+        try:
+            connection.execute("CREATE TABLE synthetic_media_refs(path TEXT NOT NULL)")
+            connection.execute("INSERT INTO synthetic_media_refs(path) VALUES (?)", (str(media_file),))
+            connection.commit()
+        finally:
+            connection.close()
+
         script = r'''
 $root = $env:SYNTHETIC_ROOT
-$env:TEMP = Join-Path $root 'synthetic-temp'
-New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
-$inputs = [pscustomobject]@{
-    HasState = $true
-    Roots = @([pscustomobject]@{ Id = 'root0'; Path = (Join-Path $root 'synthetic-root'); Roles = @('profile') })
-    MetadataFiles = @()
-}
+$app = Join-Path $root 'AppData'
+$user = Join-Path $root 'UserProfile'
+$profile = Join-Path (Join-Path (Join-Path (Join-Path $app 'mainframe') 'accounts') 'whatsapp') 'synthetic-profile'
+$metadata = @{ kind = 'wacli'; storePath = (Join-Path $root 'external-store'); mediaRoots = @((Join-Path $root 'metadata-media')) }
+$metadata | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $profile 'mainframe-whatsapp.json')
+$inputs = Get-WacliVssInputs -AppDataRoot $app -UserProfileRoot $user
+if ($inputs.MediaReferenceCoverage -ne 'unproven') { [Console]::Error.WriteLine('coverage unexpectedly proven'); exit 6 }
 $destination = Join-Path $root 'WacliWindowsVss'
 try {
     Invoke-WacliVssCopy -Inputs $inputs -DestinationRoot $destination -RepositoryRoot (Join-Path $root 'missing-repository') | Out-Null
     exit 9
 } catch {
     if (Test-Path -LiteralPath $destination) { [Console]::Error.WriteLine('stale output remains'); exit 8 }
-    'CLEAN'
+    if ($_.Exception.Message -notmatch 'external-media completeness is unproven') {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        exit 7
+    }
+    'BLOCKED'
 }
 '''
         result = self.run_powershell(script)
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-        self.assertIn("CLEAN", result.stdout)
+        self.assertIn("BLOCKED", result.stdout)
 
     def test_no_state_is_distinct_from_missing_required_root(self):
         script = r'''
