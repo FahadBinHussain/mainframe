@@ -66,6 +66,37 @@ foreach ($toolDir in $knownToolDirs) {
         $env:Path = "$toolDir;$env:Path"
     }
 }
+# 7-Zip can still be missed when it lives somewhere non-standard (scoop,
+# an x86 install the x64 installer upgraded in place, a per-user install).
+# Ask the registry where it is, then try the remaining well-known spots.
+if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+    $sevenZipDirs = @()
+    foreach ($regRoot in @('HKLM:\SOFTWARE\7-Zip', 'HKCU:\SOFTWARE\7-Zip')) {
+        $reg = Get-ItemProperty -LiteralPath $regRoot -ErrorAction SilentlyContinue
+        if ($reg -and $reg.Path) { $sevenZipDirs += $reg.Path }
+    }
+    $sevenZipFiles = @()
+    if ($env:ProgramFiles) { $sevenZipFiles += Join-Path $env:ProgramFiles '7-Zip\7z.exe' }
+    if (${env:ProgramFiles(x86)}) { $sevenZipFiles += Join-Path ${env:ProgramFiles(x86)} '7-Zip\7z.exe' }
+    if ($env:ProgramW6432) { $sevenZipFiles += Join-Path $env:ProgramW6432 '7-Zip\7z.exe' }
+    if ($HOME) { $sevenZipFiles += Join-Path $HOME 'scoop\apps\7zip\current\7z.exe' }
+    if ($env:ProgramData) { $sevenZipFiles += Join-Path $env:ProgramData 'scoop\apps\7zip\current\7z.exe' }
+    if ($env:LOCALAPPDATA) { $sevenZipFiles += Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\7z.exe' }
+    foreach ($sevenZipFile in $sevenZipFiles) {
+        if (Test-Path -LiteralPath $sevenZipFile) { $sevenZipDirs += Split-Path $sevenZipFile }
+    }
+    foreach ($sevenZipDir in $sevenZipDirs) {
+        if ((Test-Path -LiteralPath (Join-Path $sevenZipDir '7z.exe')) -and ($env:Path -split ';' -notcontains $sevenZipDir)) {
+            $env:Path = "$sevenZipDir;$env:Path"
+            Write-Host "7z found at $sevenZipDir - added to PATH for this session"
+            break
+        }
+    }
+}
+if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+    Write-Host "diagnostic: 7z still not found. ProgramFiles=$env:ProgramFiles ProgramFiles(x86)=${env:ProgramFiles(x86)}" -ForegroundColor Yellow
+    Write-Host "diagnostic: PATH=$env:Path" -ForegroundColor Yellow
+}
 foreach ($cmd in @('pwsh', 'git', 'bw', 'gh', '7z')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { Die "$cmd missing after winget step - install it manually and re-run" }
 }
