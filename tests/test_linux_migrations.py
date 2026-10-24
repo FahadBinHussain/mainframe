@@ -338,6 +338,85 @@ class YtDlpAdapterTests(unittest.TestCase):
                 self.assertNotIn('SYNTHETIC_PATH', json.dumps(result))
 
 
+class FlameshotAdapterTests(unittest.TestCase):
+    HEADER = b'; Portable Flameshot subset generated offline; original config is preserved separately.\n[General]\n'
+
+    def convert(self, text):
+        return lm.convert_flameshot_config(text.encode())
+
+    def test_documented_shared_preferences_are_deterministic(self):
+        config = ('[General]\r\nshowHelp=true\r\nuiColor=#740096\r\n'
+                  'contrastUiColor=#270032\r\ndrawColor=#FF00AA\r\n'
+                  'contrastOpacity=0255\r\n')
+        first = self.convert(config)
+        self.assertEqual(first, self.convert(config))
+        output, result = first
+        self.assertEqual(output, self.HEADER +
+                         b'contrastOpacity=255\ncontrastUiColor=#270032\n'
+                         b'drawColor=#ff00aa\nshowHelp=true\nuiColor=#740096\n')
+        self.assertNotIn(b'\r', output)
+        self.assertEqual(result['adapter'], 'flameshot-portable-preferences-v1')
+        self.assertEqual(result['status'], 'converted-subset')
+        self.assertEqual(result['accepted_settings'], 5)
+        self.assertEqual(result['blocked_settings'], 0)
+        self.assertEqual(result['activation'], 'not-performed')
+
+    def test_paths_credentials_scripts_shortcuts_and_unknowns_are_blocked_without_echo(self):
+        markers = ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_CREDENTIAL_MARKER',
+                   'SYNTHETIC_COMMAND_MARKER', 'SYNTHETIC_PERSON_MARKER',
+                   'SYNTHETIC_SHORTCUT_MARKER')
+        config = '''[General]
+uiColor=#abcdef
+savePath=C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH
+startupLaunch=true
+uploadClientSecret=SYNTHETIC_CREDENTIAL_MARKER
+postCaptureCommand=SYNTHETIC_COMMAND_MARKER
+fontFamily=SYNTHETIC_PERSON_MARKER
+[Shortcuts]
+TAKE_SCREENSHOT=SYNTHETIC_SHORTCUT_MARKER
+'''
+        output, result = self.convert(config)
+        self.assertEqual(output, self.HEADER + b'uiColor=#abcdef\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 6)
+        serialized = json.dumps(result)
+        for marker in markers:
+            self.assertNotIn(marker, serialized)
+        self.assertNotIn('C:\\\\Users', serialized)
+        self.assertIn('unmapped-or-sensitive-setting', serialized)
+
+    def test_duplicate_and_invalid_allowlisted_values_are_counted_not_echoed(self):
+        config = ('[General]\nshowHelp=true\nshowHelp=false\n'
+                  'uiColor=#abcdef\ncontrastOpacity=256\n')
+        output, result = self.convert(config)
+        self.assertEqual(output, self.HEADER + b'uiColor=#abcdef\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 3)
+        serialized = json.dumps(result)
+        self.assertIn('duplicate-setting', serialized)
+        self.assertIn('unsupported-value', serialized)
+        self.assertNotIn('256', serialized)
+
+    def test_malformed_encoding_sections_and_ini_lines_are_sanitized(self):
+        for payload, reason in (
+                (b'\xff', 'invalid-config'),
+                (b'\xef\xbb\xbf[General]\nshowHelp=true\n', 'invalid-config'),
+                (b'[General]\x00showHelp=true\n', 'invalid-config'),
+                (b'[General\nshowHelp=true\n', 'invalid-config'),
+                (b'C:\\Users\\SYNTHETIC_PATH\n', 'invalid-config'),
+                (b'[General]\nshowHelp=yes\ndrawColor=red\ncontrastOpacity=999\n',
+                 'no-supported-settings'),
+                (b'[General]\ncontrastOpacity=' + b'9' * 10000,
+                 'no-supported-settings'),
+                (b'x' * (lm.MAX_CONFIG_BYTES + 1), 'config-size-limit')):
+            with self.subTest(reason=reason):
+                output, result = lm.convert_flameshot_config(payload)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], reason)
+                self.assertGreaterEqual(result['blocked_settings'], 1)
+                self.assertNotIn('SYNTHETIC_PATH', json.dumps(result))
+
+
 class MigrationRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -815,6 +894,134 @@ class MpvMigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(report['entries'][0]['migration']['reason'], 'conversion-write-or-read-failed')
         self.assertNotIn('SYNTHETIC_PRIVATE_ERROR', json.dumps(report))
         self.assertEqual(sum('migration' in entry for entry in report['entries']), 1)
+
+
+class FlameshotMigrationRecoveryTests(unittest.TestCase):
+    SOURCE = 'quick-persist/flameshot/flameshot.ini'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.backup = self.root / 'backup'
+        self.backup.mkdir()
+        self.dest = self.root / 'offline'
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text('{"items": []}')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def archive(self, name, members):
+        with ZipFile(self.backup / name, 'w') as archive:
+            for key, payload in members:
+                archive.writestr(key, payload)
+
+    def recover(self, **kwargs):
+        return lr.copy_recovery(self.backup, self.dest, manifest_path=self.manifest,
+                                mode=kwargs.pop('mode', 'full'), **kwargs)
+
+    def test_exact_quick_export_converts_subset_preserves_raw_and_skips_live_home(self):
+        config = (b'[General]\r\nshowHelp=true\r\nuiColor=#ABCDEF\r\n'
+                  b'savePath=C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH\r\n'
+                  b'uploadClientSecret=SYNTHETIC_CREDENTIAL_MARKER\r\n'
+                  b'postCaptureCommand=SYNTHETIC_SCRIPT_MARKER\r\n'
+                  b'[Shortcuts]\r\nTAKE_SCREENSHOT=SYNTHETIC_SHORTCUT_MARKER\r\n')
+        self.archive('mainframe-quick.zip', [(self.SOURCE, config)])
+        self.archive('mainframe-persist.zip', [])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}):
+            report = self.recover(apply_portable=True, convert_portable=True)
+
+        output = self.dest / 'home-staging/.config/flameshot/flameshot.ini'
+        recovered = self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE
+        self.assertEqual(output.read_bytes(), FlameshotAdapterTests.HEADER +
+                         b'showHelp=true\nuiColor=#abcdef\n')
+        self.assertEqual(recovered.read_bytes(), config)
+        self.assertEqual(lr.file_hash(self.dest / 'raw-archives/mainframe-quick.zip'),
+                         lr.file_hash(self.backup / 'mainframe-quick.zip'))
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['accepted_settings'], 2)
+        self.assertEqual(entry['migration']['blocked_settings'], 4)
+        self.assertEqual(report['conversion_counts'], {'converted-subset': 1})
+        self.assertEqual(report['activation_status'], 'not-performed')
+        self.assertEqual(report['operational_status'], 'incomplete')
+        serialized = json.dumps(report)
+        for marker in ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_CREDENTIAL_MARKER',
+                       'SYNTHETIC_SCRIPT_MARKER', 'SYNTHETIC_SHORTCUT_MARKER',
+                       'C:\\\\Users'):
+            self.assertNotIn(marker, serialized)
+
+    def test_apply_portable_stages_only_exact_unconverted_candidate(self):
+        config = b'[General]\nshowHelp=false\nsavePath=C:\\Users\\Fixture\\SYNTHETIC_RAW_PATH\n'
+        self.archive('mainframe-quick.zip', [
+            (self.SOURCE, config),
+            ('quick-persist/flameshot/other.ini', b'[General]\nuiColor=#123456\n'),
+        ])
+        with patch.object(lr, 'convert_flameshot_config',
+                          side_effect=AssertionError('candidate copy must not convert')):
+            report = self.recover(mode='quick', apply_portable=True)
+        candidate = self.dest / 'home-staging/.config/flameshot/flameshot.ini'
+        self.assertEqual(candidate.read_bytes(), config)
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
+                         config)
+        self.assertFalse((self.dest / 'home-staging/.config/flameshot/other.ini').exists())
+        self.assertEqual(report['conversion_status'], 'not-requested')
+
+    def test_nonexact_persist_and_quick_paths_never_reach_adapter_or_staging(self):
+        self.archive('mainframe-quick.zip', [
+            ('quick-persist/flameshot/other.ini', b'[General]\nshowHelp=true\n'),
+            ('quick-persist/Flameshot/flameshot.ini', b'[General]\nuiColor=#123456\n'),
+        ])
+        self.archive('mainframe-persist.zip', [
+            ('persist/flameshot/flameshot.ini', b'[General]\nshowHelp=true\n'),
+        ])
+        with patch.object(lr, 'convert_flameshot_config',
+                          side_effect=AssertionError('nonexact path must not parse')):
+            report = self.recover(apply_portable=True, convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/flameshot').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all(e['category'] == 'blocked' for e in report['entries']))
+
+    def test_quick_full_duplicate_source_has_no_winner(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'[General]\nshowHelp=true\n')])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, b'[General]\nshowHelp=false\n')])
+        with patch.object(lr, 'convert_flameshot_config',
+                          side_effect=AssertionError('duplicate source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/flameshot/flameshot.ini').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 2})
+        self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
+                            for e in report['entries']))
+
+    def test_casefold_alias_blocks_exact_source_without_parsing_alias(self):
+        alias = 'quick-persist/Flameshot/flameshot.ini'
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'[General]\nshowHelp=true\n')])
+        self.archive('mainframe-persist.zip', [(alias, b'[General]\nshowHelp=false\n')])
+        with patch.object(lr, 'convert_flameshot_config',
+                          side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/flameshot/flameshot.ini').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
+
+    def test_existing_converted_target_is_never_overwritten(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'[General]\nuiColor=#abcdef\n')])
+        report = self.recover(mode='quick')
+        target = self.dest / 'home-staging/.config/flameshot/flameshot.ini'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'candidate fixture bytes\n')
+        lr.stage_conversions(report, self.dest)
+        self.assertEqual(target.read_bytes(), b'candidate fixture bytes\n')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
+                         b'[General]\nuiColor=#abcdef\n')
 
 
 if __name__ == '__main__':

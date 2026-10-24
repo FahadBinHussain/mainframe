@@ -34,6 +34,13 @@ MIGRATION_MAP = {
         'preservation': 'original bytes retained separately',
         'activation': 'never; offline subset only',
     },
+    'quick-persist/flameshot/flameshot.ini': {
+        'adapter': 'flameshot-portable-preferences-v1',
+        'target': '.config/flameshot/flameshot.ini',
+        'source_layout': 'mainframe-quick-persist-flameshot-ini-v1',
+        'preservation': 'original bytes retained separately',
+        'activation': 'never; offline subset only',
+    },
 }
 # Only literal enum values can reach generated configuration. Unknown keys and
 # values are not echoed: even a Git subsection name can contain private data.
@@ -56,6 +63,11 @@ YT_DLP_OPTION_ALIASES = {
     '--no-ignore-errors': '--abort-on-error',
     '--no-abort-on-error': '--no-abort-on-error',
 }
+FLAMESHOT_COLOR_OPTIONS = frozenset({'drawColor', 'uiColor', 'contrastUiColor'})
+FLAMESHOT_BOOLEAN_OPTIONS = frozenset({'showHelp'})
+FLAMESHOT_INTEGER_RANGES = {'contrastOpacity': (0, 255)}
+FLAMESHOT_ALLOWED_OPTIONS = (FLAMESHOT_COLOR_OPTIONS | FLAMESHOT_BOOLEAN_OPTIONS
+                             | frozenset(FLAMESHOT_INTEGER_RANGES))
 
 
 def convert_git_config(payload, runner=subprocess.run):
@@ -211,6 +223,108 @@ def convert_yt_dlp_config(payload):
     result['status'] = 'converted-subset'
     lines = ['# Portable yt-dlp subset generated offline; original config is preserved separately.',
              option]
+    return ('\n'.join(lines) + '\n').encode('ascii'), result
+
+
+def convert_flameshot_config(payload):
+    """Convert only the documented shared Flameshot UI subset offline.
+
+    This is not a general QSettings/INI migrator. Paths, shortcuts, startup,
+    notifications, upload data, other settings/sections, and unknown values
+    remain only in the preserved source and are represented by blocker counts.
+    """
+    source_key = 'quick-persist/flameshot/flameshot.ini'
+    result = {'adapter': MIGRATION_MAP[source_key]['adapter'],
+              'version': ADAPTER_VERSION, 'status': 'blocked',
+              'decisions': [], 'activation': 'not-performed',
+              'accepted_settings': 0, 'blocked_settings': 0}
+    if len(payload) > MAX_CONFIG_BYTES:
+        return None, dict(result, reason='config-size-limit', blocked_settings=1)
+    if b'\x00' in payload:
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+    try:
+        text = payload.decode('utf-8')
+    except UnicodeDecodeError:
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+    if ('\ufeff' in text
+            or any(ord(char) < 32 and char not in '\r\n\t' for char in text)):
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+
+    records = []
+    section = None
+    key_pattern = re.compile(r'^[A-Za-z][A-Za-z0-9_-]*$')
+    section_pattern = re.compile(r'^\[([A-Za-z][A-Za-z0-9_-]*)\]$')
+    color_pattern = re.compile(r'^#[0-9A-Fa-f]{6}$')
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(('#', ';')):
+            continue
+        if stripped.startswith('['):
+            match = section_pattern.fullmatch(stripped)
+            if not match:
+                return None, dict(result, reason='invalid-config', blocked_settings=1)
+            section = match.group(1)
+            continue
+        if '=' not in stripped:
+            return None, dict(result, reason='invalid-config', blocked_settings=1)
+        key, value = (part.strip() for part in stripped.split('=', 1))
+        if not key_pattern.fullmatch(key):
+            return None, dict(result, reason='invalid-config', blocked_settings=1)
+        records.append((section, key, value))
+
+    unknown_count = 0
+    occurrences = {}
+    for current_section, key, value in records:
+        if current_section != 'General' or key not in FLAMESHOT_ALLOWED_OPTIONS:
+            unknown_count += 1
+            continue
+        occurrences.setdefault(key, []).append(value)
+    if unknown_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'unmapped-or-sensitive-setting',
+                                    'count': unknown_count})
+
+    accepted = {}
+    blocked_count = unknown_count
+    for key in sorted(occurrences):
+        values = occurrences[key]
+        decision = {'key': key}
+        if len(values) != 1:
+            decision.update(status='blocked', reason='duplicate-setting',
+                            count=len(values))
+            blocked_count += len(values)
+        else:
+            value = values[0]
+            if key in FLAMESHOT_COLOR_OPTIONS:
+                valid = color_pattern.fullmatch(value) is not None
+                canonical = value.lower() if valid else ''
+            elif key in FLAMESHOT_BOOLEAN_OPTIONS:
+                valid = value.lower() in ('true', 'false')
+                canonical = value.lower() if valid else ''
+            else:
+                low, high = FLAMESHOT_INTEGER_RANGES[key]
+                decimal_value = value.lstrip('0') or '0'
+                valid = (value.isascii() and value.isdecimal()
+                         and len(decimal_value) <= 3
+                         and low <= int(decimal_value) <= high)
+                canonical = str(int(decimal_value)) if valid else ''
+            if valid:
+                accepted[key] = canonical
+                decision.update(status='retained',
+                                reason='documented-shared-ui-preference')
+            else:
+                decision.update(status='blocked', reason='unsupported-value')
+                blocked_count += 1
+        result['decisions'].append(decision)
+
+    result['accepted_settings'] = len(accepted)
+    result['blocked_settings'] = blocked_count
+    if not accepted:
+        return None, dict(result, reason='no-supported-settings')
+    lines = ['; Portable Flameshot subset generated offline; original config is preserved separately.',
+             '[General]']
+    lines.extend(f'{key}={accepted[key]}' for key in sorted(accepted))
+    result['status'] = 'converted-subset'
     return ('\n'.join(lines) + '\n').encode('ascii'), result
 
 
