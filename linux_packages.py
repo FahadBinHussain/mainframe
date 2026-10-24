@@ -79,7 +79,7 @@ UNVALIDATED_NATIVE = {
     "tor-browser", "discord", "nuget",
 }
 NATIVE_REVIEW_REASONS = {
-    "discord": "Official Linux desktop exists, but no validated version-pinned vendor checksum/install adapter; no Snap/Flatpak substitution.",
+    "discord": "Scoop Extras currently points to the portapps/discord-portable Windows build; Discord's public Linux page exposes no exact matching Linux package version/checksum, so no validated version-pinned adapter. No Snap/Flatpak substitution.",
     "gcloud": "Official Linux CLI exists, but matching bundled-runtime archive/checksum and non-mutating installer are not validated; no initialization or credential migration.",
     "herdr": "Repo-local Windows manifest selects a preview fork/channel; upstream stable Linux is not a verified same-variant replacement.",
     "mpv-git": "Requested git variant is not distro stable mpv; no validated matching commit/build/checksum adapter.",
