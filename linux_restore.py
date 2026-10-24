@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 
 from linux_migrations import (MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config,
-                              convert_mpv_config)
+                              convert_mpv_config, convert_yt_dlp_config)
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 VERSION = 3
@@ -132,6 +132,14 @@ def classify(path, archive=''):
             app = pieces[1].lower()
             if app in PERSIST_BLOCKERS:
                 return 'blocked', PERSIST_BLOCKERS[app], None
+            if app == 'yt-dlp' and len(pieces) == 3:
+                tail = pieces[2]
+                root = tail.split('/', 1)[0].casefold()
+                if root in {'ytdlp_plugins', 'yt-dlp-plugins'}:
+                    return 'blocked', 'yt-dlp plugin directories are retained raw; code and Linux compatibility are unverified.', None
+                if tail == 'yt-dlp.conf':
+                    return 'native-staging', 'Raw yt-dlp config candidate only; conversion is separately allowlisted.', '.config/yt-dlp/yt-dlp.conf'
+                return 'blocked', 'Unreviewed yt-dlp persist item is retained raw; no native staging rule exists.', None
             if app == 'flameshot' and len(pieces) == 3:
                 return 'native-staging', 'Flameshot config export; review desktop shortcuts, paths, and INI version.', '.config/flameshot/' + pieces[2]
             if app in PERSIST_TARGETS and len(pieces) == 3:
@@ -364,7 +372,7 @@ def stage_conversions(report, destination):
         if targets[mapping['target']] != 1 or out.exists() or out.is_symlink():
             audit['reason'] = 'conversion-target-conflict'
             continue
-        if entry['is_dir'] or entry['status'] != 'bytes-preserved':
+        if entry['is_dir'] or entry['status'] not in ('bytes-preserved', 'native-staged-unverified'):
             audit['reason'] = 'source-not-verified-regular-file'
             continue
         if entry['size'] > MAX_CONFIG_BYTES:
@@ -382,6 +390,8 @@ def stage_conversions(report, destination):
                 output, audit = convert_git_config(payload)
             elif mapping['adapter'] == 'mpv-portable-options-v1':
                 output, audit = convert_mpv_config(payload)
+            elif mapping['adapter'] == 'yt-dlp-portable-options-v1':
+                output, audit = convert_yt_dlp_config(payload)
             else:
                 audit['reason'] = 'unsupported-adapter'
                 continue

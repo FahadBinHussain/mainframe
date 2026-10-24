@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: offline fixture-tested recovery plus Git and mpv subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: offline fixture-tested recovery plus Git, mpv, and yt-dlp subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -62,7 +62,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `windhawk` | Blocked | Windows injection/modification framework has no Linux equivalent. |
 | `windows-terminal` | Blocked | Windows Terminal has no Linux runtime; preferences need a deliberate terminal port. |
 | `x64dbg` | Blocked | Windows debugger state/plugins have no native Linux runtime. |
-| `yt-dlp` | Native staging candidate | `.config/yt-dlp/`; config is staged as a candidate; executable/package and plugin behavior are unverified. |
+| `yt-dlp` | Exact config candidate plus bounded config converter | Only `yt-dlp.conf` may be copied under `.config/yt-dlp/` as an unconverted candidate; `--convert-portable` can emit one documented error-policy option to `.config/yt-dlp/config`. Scoop plugin directories and all other unreviewed persist paths remain raw-only; executable/package, JavaScript runtime, plugin, and runtime behavior are unverified. |
 
 Additional persist data has explicit handling: `flameshot` settings are candidates under `.config/flameshot/`; OBS exports are candidates under `.config/obs-studio/`; qBittorrent exports are candidates under `.config/qBittorrent/` and torrent metadata under `.local/share/qBittorrent/`. These are also staging candidates, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
 
@@ -157,7 +157,50 @@ operational-equivalence claim. `mpv-git` keeps its separate version/fork blocker
 
 The converter never invokes mpv, installs a package, reads a live profile, or
 changes the user's home. Generated output is private, deterministic, hash-verified,
-and review-required; installation and activation remain separate future work.
+review-required; installation and activation remain separate future work.
+
+## Implemented conversion map: yt-dlp config options v1
+
+The official [ScoopInstaller/Main yt-dlp manifest](https://github.com/ScoopInstaller/Main/blob/master/bucket/yt-dlp.json)
+persists `yt-dlp.conf`, `ytdlp_plugins`, and `yt-dlp-plugins`. The tracked Windows
+backup copies the Scoop persist tree under `persist/`, so the only config file
+passed to this adapter is the exact member `persist/yt-dlp/yt-dlp.conf`. The
+plugin directories and all other unreviewed yt-dlp persist paths are never
+converted or copied into `home-staging/`; their contents, dependencies, and
+compatibility remain raw-only blockers.
+
+The current [upstream yt-dlp configuration documentation](https://github.com/yt-dlp/yt-dlp#configuration)
+lists `${XDG_CONFIG_HOME}/yt-dlp/config` as a recommended Linux/macOS user-config
+location and says a config file uses command-line switches. The adapter therefore
+targets the relative offline path `.config/yt-dlp/config`, but it deliberately
+does not implement yt-dlp's general option parser. It emits at most one exact,
+no-argument option per source file:
+
+| Accepted source option | Output option | Documented behavior |
+|---|---|---|
+| `--ignore-errors` or `-i` | `--ignore-errors` | Ignore download and post-processing errors and treat the download as successful. |
+| `--abort-on-error` or `--no-ignore-errors` | `--abort-on-error` | Abort on error. |
+| `--no-abort-on-error` | `--no-abort-on-error` | Continue with the next video after download errors. |
+
+These are general error-handling switches with no filesystem, host, browser,
+network, or plugin path value. Only one supported switch may appear in a file;
+duplicates, aliases repeated together, mixed policies, any argument-bearing form,
+or any other non-comment setting block the entire generated file. Blockers report
+reason/count only; arbitrary option names, comments, and values are never copied
+to the audit report or generated config. Strict UTF-8 without a BOM is required.
+The original config remains byte-preserved under `recovered/`; with the separate
+`--apply-portable` option the exact source may also be copied as an unconverted
+candidate named `yt-dlp.conf`, distinct from the converted `config` file. No cookie/browser paths,
+authentication, proxies, plugin paths, output paths/templates, executable
+commands, JavaScript-runtime paths, unknown flags, or personal identifiers are
+converted. A target collision or competing quick/full/case-fold source blocks
+publication without choosing a winner.
+
+`--convert-portable` is offline-only: no yt-dlp executable is run or installed,
+no package is activated, and no home directory is modified. The existing APT
+mapping is still only a package-planning route; installed version, executable
+behavior, JavaScript runtime, plugins, output behavior, and operational
+equivalence remain unverified.
 
 ## Source action coverage
 
@@ -170,6 +213,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Safe materialization | Safe ordinary members are copied to `recovered/<archive>/<member>` with verification; unsafe/encrypted/special members remain raw-only. Existing destinations, symlinks, and unsafe parent paths are rejected. |
 | Explicit native staging | Only classifier-approved targets are copied to a new offline `home-staging/` tree. A collision becomes `staging-conflict`; no overwrite or live-home merge occurs. |
 | Git preference conversion | Opt-in six-setting `.gitconfig` adapter above; original preserved, Windows line-ending defaults translated, unknown/identity/command/credential state excluded with explicit decisions. No native activation. |
+| yt-dlp configuration | Opt-in exact-source adapter above; one documented platform-neutral error-policy option at most. Unknown/auth/path/proxy/plugin/command settings block conversion with sanitized counts; plugin directories stay raw-only. No package install or activation. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Only `AnyDesk.AnyDesk` package intent is covered by native `anydesk`; other WinGet IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
