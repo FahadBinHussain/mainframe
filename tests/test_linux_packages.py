@@ -1,5 +1,6 @@
 import json
 import contextlib
+import http.client
 import io
 import os
 import subprocess
@@ -100,6 +101,59 @@ class LinuxPackagesTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "blockers"):
                     lp.execute(plan, ["vercel"], runner=runner)
             runner.assert_not_called()
+
+    def test_ngrok_default_plan_never_resolves_metadata(self):
+        with patch.object(lp.ngrok_tools, "build_dry_plan") as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+            action = next(item for item in plan.actions if item.name == "ngrok")
+            self.assertEqual(action.status, "blocked")
+            self.assertIsNone(action.dry_plan)
+            dry_plan.assert_not_called()
+
+    def test_ngrok_explicit_metadata_plan_is_still_blocked_from_execution(self):
+        detail = {
+            "package": {"version": "3.4.5"},
+            "linux_archive_candidate": {"url": "https://bin.ngrok.com/synthetic.tar.gz"},
+            "execution_blockers": ["archive not inspected"],
+            "executable": False,
+        }
+        with patch.object(lp.ngrok_tools, "build_dry_plan", return_value=detail) as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", ngrok_metadata_plan=True)
+        dry_plan.assert_called_once_with("x86_64")
+        action = next(item for item in plan.actions if item.name == "ngrok")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(action.version, "3.4.5")
+        self.assertIs(action.dry_plan, detail)
+        self.assertIn("not a user-selected restore pin", action.reason)
+        self.assertIn("archive layout", action.reason)
+        runner = Mock(side_effect=AssertionError("blocked ngrok metadata plan must not execute"))
+        with self.assertRaisesRegex(RuntimeError, "blockers"):
+            lp.execute(plan, ["ngrok"], runner=runner)
+        runner.assert_not_called()
+
+    def test_ngrok_http_protocol_failure_becomes_sanitized_blocker(self):
+        marker = "synthetic-partial-http-payload"
+        failure = http.client.IncompleteRead(marker.encode(), 100)
+        with patch.object(lp.ngrok_tools, "build_dry_plan", side_effect=failure):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", ngrok_metadata_plan=True)
+        action = next(item for item in plan.actions if item.name == "ngrok")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(
+            action.reason,
+            "ngrok: official metadata-only review failed: malformed or incomplete HTTP response",
+        )
+        self.assertNotIn(marker, action.reason)
+
+    def test_ngrok_metadata_option_is_dry_only_and_exclusive(self):
+        for args in (
+            ["--repo", str(ROOT), "--ngrok-metadata-plan", "--execute"],
+            ["--repo", str(ROOT), "--ngrok-metadata-plan", "--pnpm-plan-config", "/unused/config.json"],
+        ):
+            with self.subTest(args=args), patch.object(lp, "build_plan") as build, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    lp.main(args)
+            self.assertEqual(caught.exception.code, 2)
+            build.assert_not_called()
 
     def test_autohotkey_removed_from_both_allowlists_and_dry_plan(self):
         scoop = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
