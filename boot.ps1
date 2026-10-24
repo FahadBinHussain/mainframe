@@ -119,9 +119,36 @@ if ($bwStatus.status -eq 'unauthenticated') {
     # uncaptured, so the email / password / 2FA prompts behave exactly
     # like a manual 'bw login'. Then lock again so the normal unlock
     # flow below can mint the session key boot.ps1 persists.
-    Write-Host 'bitwarden CLI is not logged in on this machine - completing the one-time login:'
-    & bw login
-    if ($LASTEXITCODE -ne 0) { Die 'bitwarden login failed - re-run boot.ps1 and complete the login prompts.' }
+    # Resolve the account email without typing it: machine env var, the
+    # address saved by a previous boot on this machine, or git config.
+    # It deliberately does NOT live in this public repo. If none of those
+    # has it, ask once and save it under %APPDATA%\mainframe for next time.
+    $bwEmail = $null
+    if (-not [string]::IsNullOrWhiteSpace($env:MAINFRAME_BW_EMAIL)) { $bwEmail = $env:MAINFRAME_BW_EMAIL.Trim() }
+    $bwEmailFile = Join-Path $env:APPDATA 'mainframe\bw-email.txt'
+    if (-not $bwEmail -and (Test-Path -LiteralPath $bwEmailFile)) {
+        $savedEmail = Get-Content -LiteralPath $bwEmailFile -Raw -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($savedEmail)) { $bwEmail = $savedEmail.Trim() }
+    }
+    if (-not $bwEmail) {
+        $gitEmail = & git config --global user.email 2>$null
+        if ($gitEmail -and ($gitEmail -match '^[^@\s]+@[^@\s]+\.[^@\s]+$')) { $bwEmail = ([string]$gitEmail).Trim() }
+    }
+    if (-not $bwEmail) {
+        Write-Host 'bitwarden CLI is not logged in on this machine - one-time login:'
+        $bwEmail = Read-Host 'bitwarden EMAIL (asked once per machine; saved for next time)'
+    } else {
+        Write-Host "bitwarden CLI is not logged in on this machine - logging in as $bwEmail (one-time):"
+    }
+    & bw login $bwEmail
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "login as $bwEmail failed."
+        $bwEmail = Read-Host 'bitwarden EMAIL'
+        & bw login $bwEmail
+        if ($LASTEXITCODE -ne 0) { Die 'bitwarden login failed - re-run boot.ps1 and complete the login prompts.' }
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path $bwEmailFile) | Out-Null
+    Set-Content -LiteralPath $bwEmailFile -Value $bwEmail -Encoding UTF8
     & bw lock 2>$null | Out-Null
     $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
 }
