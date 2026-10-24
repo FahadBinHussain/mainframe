@@ -168,6 +168,62 @@ def pinned_manifest(name: str) -> dict[str, Any]:
     return selected
 
 
+VERCEL_CLI_DOCS = "https://vercel.com/docs/cli"
+VERCEL_NATIVE_PREFIX = "@vercel/vc-native-linux-"
+
+
+def _vercel_cli_review(package: Mapping[str, Any], direct: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize Vercel's standard package/native opt-in without selecting or activating it."""
+    if package.get("name") != "vercel":
+        return {}
+    reviewed = {item["name"]: item for item in direct}
+    native_packages = []
+    for dep_name, spec in sorted(package["optional_dependencies"].items()):
+        if not dep_name.startswith(VERCEL_NATIVE_PREFIX):
+            continue
+        meta = reviewed.get(dep_name)
+        exact_spec = isinstance(spec, str) and VERSION.fullmatch(spec) is not None
+        if not exact_spec:
+            metadata_status = "non-exact-range"
+        elif meta is None:
+            metadata_status = "exact-metadata-missing"
+        elif meta.get("version") != spec:
+            metadata_status = "version-mismatch"
+        else:
+            metadata_status = "exact-registry-metadata"
+        exact = metadata_status == "exact-registry-metadata"
+        platform = meta.get("platform", {}) if exact else {}
+        native_packages.append({
+            "name": dep_name,
+            "declared_spec": spec,
+            "metadata_status": metadata_status,
+            "version": meta["version"] if exact else None,
+            "integrity": meta["integrity"] if exact else None,
+            "platform": platform,
+            "platform_linux_confirmed": "linux" in platform.get("os", []),
+            "lifecycle_hooks": meta["install_scripts"] if exact else {},
+        })
+    return {
+        "version_selection": "live latest-registry observation; exact endpoint matched; not pinned in pnpm-allowed.json",
+        "package_version": package["version"],
+        "package_source": package["source"],
+        "package_integrity": package["integrity"],
+        "node_engine_requirement": package["engines"].get("node"),
+        "root_lifecycle_hooks": package["install_scripts"],
+        "root_has_install_script": package["has_install_script"],
+        "optional_linux_native_packages": native_packages,
+        "native_execution": {
+            "enabled": False,
+            "activation_in_plan": False,
+            "explicit_activation": "vercel upgrade --enable-binary",
+            "standard_launcher_requires_node": True,
+            "source": VERCEL_CLI_DOCS,
+        },
+        "artifact_review": "Registry metadata only; no tarball downloaded or inspected; SRI is not artifact verification.",
+        "platform_selection": "Not inferred or probed; candidate records do not select an install or activate native execution.",
+    }
+
+
 def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
                    *, architecture: str, protected: tuple[Path, ...] = ()) -> dict[str, Any]:
     """Validate proposed future roots/runtime metadata; never inspect credentials.
@@ -246,6 +302,7 @@ def build_dry_plan(name: str, config: Any, node_release: Any, pnpm_release: Any,
             "runtime_status": "proposed pinned runtimes; binaries not installed, probed or executed",
             "engine_checks": checks, "direct_dependencies_reviewed": direct,
             "unresolved_direct_ranges": pending, "install_scripts": scripts,
+            "vercel_cli_review": _vercel_cli_review(package, direct),
             "script_policy": {"allow_builds_proposal": {},
                               "required_version_scoped_policy": {r["matcher"]: "review-required" for r in requirements},
                               "approval_requirements": requirements,
