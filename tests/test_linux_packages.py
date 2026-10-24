@@ -336,6 +336,91 @@ class LinuxPackagesTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 2)
             build.assert_not_called()
 
+    def test_vscode_default_plan_never_resolves_metadata(self):
+        with patch.object(lp.vscode_tools, "build_dry_plan") as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+        action = next(item for item in plan.actions if item.name == "vscode")
+        self.assertEqual(action.status, "blocked")
+        self.assertIsNone(action.dry_plan)
+        dry_plan.assert_not_called()
+
+    def test_vscode_explicit_metadata_plan_is_still_blocked_from_execution(self):
+        detail = {
+            "package": {"name": "vscode", "version": "1.2.3", "version_is_restore_pin": False},
+            "official_build": {"commit": "a" * 40},
+            "linux_archive_candidate": {
+                "url": "https://vscode.download.prss.microsoft.com/synthetic.tar.gz",
+                "sha256": "c" * 64,
+            },
+            "terms": {"accepted_for_this_review": False},
+            "executable": False,
+        }
+        with patch.object(lp.vscode_tools, "build_dry_plan", return_value=detail) as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", vscode_metadata_plan=True)
+        dry_plan.assert_called_once_with("x86_64")
+        action = next(item for item in plan.actions if item.name == "vscode")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(action.version, "1.2.3")
+        self.assertIsNone(action.command)
+        self.assertIsNone(action.archive)
+        self.assertIs(action.dry_plan, detail)
+        self.assertIn("same-commit Linux x64 tar.gz metadata", action.reason)
+        self.assertIn("not a restore pin", action.reason)
+        self.assertIn("no archives were downloaded or terms accepted", action.reason)
+        runner = Mock(side_effect=AssertionError("blocked VS Code metadata plan must not execute"))
+        with self.assertRaisesRegex(RuntimeError, "blockers"):
+            lp.execute(plan, ["vscode"], runner=runner)
+        runner.assert_not_called()
+
+    def test_vscode_http_protocol_failure_becomes_sanitized_blocker(self):
+        marker = "synthetic-private-vscode-response-marker"
+        failure = http.client.IncompleteRead(marker.encode(), 100)
+        with patch.object(lp.vscode_tools, "build_dry_plan", side_effect=failure):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", vscode_metadata_plan=True)
+        action = next(item for item in plan.actions if item.name == "vscode")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(
+            action.reason,
+            "vscode: official metadata-only review failed: malformed or incomplete HTTP response",
+        )
+        self.assertNotIn(marker, action.reason)
+
+    def test_vscode_metadata_option_is_dry_only_and_exclusive(self):
+        for args in (
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--execute"],
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--pnpm-plan-config", "/unused/config.json"],
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--ngrok-metadata-plan"],
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--pwsh-metadata-plan"],
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--tor-browser-metadata-plan"],
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--windscribe-metadata-plan"],
+            ["--repo", str(ROOT), "--vscode-metadata-plan", "--wakatime-desktop-metadata-plan"],
+        ):
+            with self.subTest(args=args), patch.object(lp, "build_plan") as build, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    lp.main(args)
+            self.assertEqual(caught.exception.code, 2)
+            build.assert_not_called()
+
+    def test_vscode_metadata_cli_forwards_option_as_blocked_dry_plan(self):
+        detail = {
+            "package": {"name": "vscode", "version": "1.2.3", "version_is_restore_pin": False},
+            "linux_archive_candidate": {"url": "https://vscode.download.prss.microsoft.com/synthetic.tar.gz"},
+            "executable": False,
+        }
+        output = io.StringIO()
+        with patch.object(lp.vscode_tools, "build_dry_plan", return_value=detail) as dry_plan, \
+             patch.object(lp, "execute") as execute, contextlib.redirect_stdout(output):
+            status = lp.main([
+                "--repo", str(ROOT), "--vscode-metadata-plan", "--distro", "ubuntu", "--arch", "x86_64",
+            ])
+        dry_plan.assert_called_once_with("x86_64")
+        execute.assert_not_called()
+        self.assertIn(status, (0, 3))
+        action = next(item for item in json.loads(output.getvalue())["actions"] if item["name"] == "vscode")
+        self.assertEqual(action["kind"], "vscode-metadata")
+        self.assertEqual(action["status"], "blocked")
+        self.assertIsNone(action["command"])
+
     def test_tor_browser_default_plan_never_resolves_metadata(self):
         with patch.object(lp.tor_browser_tools, "build_dry_plan") as dry_plan:
             plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
