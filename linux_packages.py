@@ -33,6 +33,7 @@ import ngrok_linux as ngrok_tools
 import pwsh_linux as pwsh_tools
 import tor_browser_linux as tor_browser_tools
 import windscribe_linux as windscribe_tools
+import wakatime_desktop_linux as wakatime_desktop_tools
 import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
@@ -98,7 +99,7 @@ WINGET_REVIEW_REASONS = {
     "Windscribe.Windscribe": "Official Linux desktop builds exist, but no validated install/activation adapter is available. GPG signature/key trust, package contents, privileged VPN service/routing/firewall effects, account activation, and Windows-state handling remain unvalidated.",
     "StartIsBack.StartAllBack": "Windows shell/Explorer customization; no same-product native Linux equivalent.",
     "Tonec.InternetDownloadManager": "Vendor explicitly does not support Linux; no same-product native Linux build.",
-    "Wakatime.DesktopWakatime": "Official Linux desktop exists, but exact product release/checksum installation and Windows-state handling are not validated; CLI is not a substitute.",
+    "Wakatime.DesktopWakatime": "The exact publisher tag named by the WinGet installer URL can be checked for Linux AppImage metadata, but AppImage/runtime/desktop integration and account activation are unvalidated; WakaTime Desktop state is excluded from backup and CLI is not a substitute.",
 }
 VARIANT_DRIFT = {"mpv-git"}
 WINDOWS_WINGET = {
@@ -240,6 +241,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                pwsh_metadata_plan: bool = False,
                tor_browser_metadata_plan: bool = False,
                windscribe_metadata_plan: bool = False,
+               wakatime_desktop_metadata_plan: bool = False,
                gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -412,6 +414,24 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                           "No installer, package, or signature content was downloaded or executed.")
                 blockers.append(reason)
                 actions.append(Action("windscribe-metadata", ident, version=version, status="blocked",
+                                      reason=reason, source="winget", dry_plan=detail))
+        elif ident == "Wakatime.DesktopWakatime" and wakatime_desktop_metadata_plan:
+            try:
+                detail = wakatime_desktop_tools.build_dry_plan(architecture)
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"Wakatime.DesktopWakatime: official metadata-only review failed: {detail}"
+                blockers.append(reason)
+                actions.append(_blocked("wakatime-desktop-metadata", ident, reason, "winget"))
+            else:
+                version = detail["package"]["version"]
+                release_tag = detail["official_release"]["tag_name"]
+                reason = (f"WakaTime Desktop WinGet version {version} explicitly references publisher release tag {release_tag}; the same-tag Windows installer digest matches and Linux AppImage metadata is recorded. "
+                          "This is a live metadata observation, not a restore pin or independent signature check. AppImage contents, runtime compatibility, and desktop integration remain unvalidated; WakaTime Desktop config/API-key/account state is excluded from the backup and is not imported or activated. The CLI is not a substitute. "
+                          "No installer, AppImage, or checksum-file content was downloaded or executed.")
+                blockers.append(reason)
+                actions.append(Action("wakatime-desktop-metadata", ident, version=version, status="blocked",
                                       reason=reason, source="winget", dry_plan=detail))
         else:
             reason = (f"{ident}: {WINGET_REVIEW_REASONS[ident]}" if ident in WINGET_REVIEW_REASONS else
@@ -713,6 +733,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="explicitly compare public Tor Browser release/checksum metadata only; never downloads packages/signature contents or enables installation")
     ap.add_argument("--windscribe-metadata-plan", action="store_true",
                     help="explicitly compare public WinGet and Windscribe release metadata only; never downloads packages/signatures or enables installation")
+    ap.add_argument("--wakatime-desktop-metadata-plan", action="store_true",
+                    help="explicitly compare public WinGet and WakaTime Desktop release metadata only; never downloads installers/AppImages or enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     if args.pnpm_plan_config and args.execute:
@@ -725,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--tor-browser-metadata-plan is dry-only and cannot be combined with --execute")
     if args.windscribe_metadata_plan and args.execute:
         ap.error("--windscribe-metadata-plan is dry-only and cannot be combined with --execute")
+    if args.wakatime_desktop_metadata_plan and args.execute:
+        ap.error("--wakatime-desktop-metadata-plan is dry-only and cannot be combined with --execute")
     if args.ngrok_metadata_plan and args.pnpm_plan_config:
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.pwsh_metadata_plan and (args.ngrok_metadata_plan or args.pnpm_plan_config):
@@ -732,6 +756,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.tor_browser_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.windscribe_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.tor_browser_metadata_plan or args.pnpm_plan_config):
+        ap.error("Choose only one explicit metadata review per package-planning run")
+    if args.wakatime_desktop_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.tor_browser_metadata_plan or args.windscribe_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     native_roots = {}
     for entry in args.native_root:
@@ -751,6 +777,7 @@ def main(argv: list[str] | None = None) -> int:
     options["pwsh_metadata_plan"] = args.pwsh_metadata_plan
     options["tor_browser_metadata_plan"] = args.tor_browser_metadata_plan
     options["windscribe_metadata_plan"] = args.windscribe_metadata_plan
+    options["wakatime_desktop_metadata_plan"] = args.wakatime_desktop_metadata_plan
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:

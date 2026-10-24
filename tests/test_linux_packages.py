@@ -272,6 +272,70 @@ class LinuxPackagesTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 2)
             build.assert_not_called()
 
+    def test_wakatime_default_plan_never_resolves_metadata(self):
+        with patch.object(lp.wakatime_desktop_tools, "build_dry_plan") as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+        action = next(item for item in plan.actions if item.name == "Wakatime.DesktopWakatime")
+        self.assertEqual(action.status, "blocked")
+        self.assertIsNone(action.dry_plan)
+        self.assertIn("WakaTime Desktop state is excluded", action.reason)
+        dry_plan.assert_not_called()
+
+    def test_wakatime_explicit_metadata_plan_is_still_blocked_from_execution(self):
+        detail = {
+            "package": {"name": "Wakatime.DesktopWakatime", "version": "3.0.0.1", "version_is_restore_pin": False},
+            "official_release": {"tag_name": "v3.0.0+1", "windows_digest_matches_winget": True,
+                                 "linux_desktop_appimage_candidate": {"url": "https://github.com/wakatime/desktop-wakatime/synthetic.AppImage"}},
+            "execution_blockers": ["AppImage and API-key/account state are not validated"],
+            "executable": False,
+        }
+        with patch.object(lp.wakatime_desktop_tools, "build_dry_plan", return_value=detail) as dry_plan:
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", wakatime_desktop_metadata_plan=True)
+        dry_plan.assert_called_once_with("x86_64")
+        action = next(item for item in plan.actions if item.name == "Wakatime.DesktopWakatime")
+        self.assertEqual(action.kind, "wakatime-desktop-metadata")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(action.version, "3.0.0.1")
+        self.assertIsNone(action.command)
+        self.assertIsNone(action.archive)
+        self.assertIs(action.dry_plan, detail)
+        self.assertIn("not a restore pin", action.reason)
+        self.assertIn("publisher release tag v3.0.0+1", action.reason)
+        self.assertIn("API-key/account state is excluded", action.reason)
+        self.assertIn("CLI is not a substitute", action.reason)
+        runner = Mock(side_effect=AssertionError("blocked WakaTime metadata plan must not execute"))
+        with self.assertRaisesRegex(RuntimeError, "blockers"):
+            lp.execute(plan, ["Wakatime.DesktopWakatime"], runner=runner)
+        runner.assert_not_called()
+
+    def test_wakatime_http_protocol_failure_becomes_sanitized_blocker(self):
+        marker = "synthetic-private-response-marker"
+        failure = http.client.IncompleteRead(marker.encode(), 100)
+        with patch.object(lp.wakatime_desktop_tools, "build_dry_plan", side_effect=failure):
+            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", wakatime_desktop_metadata_plan=True)
+        action = next(item for item in plan.actions if item.name == "Wakatime.DesktopWakatime")
+        self.assertEqual(action.status, "blocked")
+        self.assertEqual(
+            action.reason,
+            "Wakatime.DesktopWakatime: official metadata-only review failed: malformed or incomplete HTTP response",
+        )
+        self.assertNotIn(marker, action.reason)
+
+    def test_wakatime_metadata_option_is_dry_only_and_exclusive(self):
+        for args in (
+            ["--repo", str(ROOT), "--wakatime-desktop-metadata-plan", "--execute"],
+            ["--repo", str(ROOT), "--wakatime-desktop-metadata-plan", "--pnpm-plan-config", "/unused/config.json"],
+            ["--repo", str(ROOT), "--wakatime-desktop-metadata-plan", "--ngrok-metadata-plan"],
+            ["--repo", str(ROOT), "--wakatime-desktop-metadata-plan", "--pwsh-metadata-plan"],
+            ["--repo", str(ROOT), "--wakatime-desktop-metadata-plan", "--tor-browser-metadata-plan"],
+            ["--repo", str(ROOT), "--wakatime-desktop-metadata-plan", "--windscribe-metadata-plan"],
+        ):
+            with self.subTest(args=args), patch.object(lp, "build_plan") as build, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    lp.main(args)
+            self.assertEqual(caught.exception.code, 2)
+            build.assert_not_called()
+
     def test_tor_browser_default_plan_never_resolves_metadata(self):
         with patch.object(lp.tor_browser_tools, "build_dry_plan") as dry_plan:
             plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
