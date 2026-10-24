@@ -27,6 +27,13 @@ MIGRATION_MAP = {
         'preservation': 'original bytes retained separately',
         'activation': 'never; offline subset only',
     },
+    'persist/yt-dlp/yt-dlp.conf': {
+        'adapter': 'yt-dlp-portable-options-v1',
+        'target': '.config/yt-dlp/config',
+        'source_layout': 'scoop-yt-dlp-config-v1',
+        'preservation': 'original bytes retained separately',
+        'activation': 'never; offline subset only',
+    },
 }
 # Only literal enum values can reach generated configuration. Unknown keys and
 # values are not echoed: even a Git subsection name can contain private data.
@@ -43,6 +50,12 @@ MPV_BOOLEAN_OPTIONS = frozenset({
     'save-position-on-quit',
 })
 MPV_FLAG_ALIASES = {'fs': 'fullscreen'}
+YT_DLP_OPTION_ALIASES = {
+    '-i': '--ignore-errors', '--ignore-errors': '--ignore-errors',
+    '--abort-on-error': '--abort-on-error',
+    '--no-ignore-errors': '--abort-on-error',
+    '--no-abort-on-error': '--no-abort-on-error',
+}
 
 
 def convert_git_config(payload, runner=subprocess.run):
@@ -115,6 +128,89 @@ def convert_git_config(payload, runner=subprocess.run):
             section = group
         lines.append(f'\t{option} = {value}')
     result['status'] = 'converted-subset'
+    return ('\n'.join(lines) + '\n').encode('ascii'), result
+
+
+def convert_yt_dlp_config(payload):
+    """Convert one exact, documented yt-dlp error-policy switch offline.
+
+    This intentionally is not a general yt-dlp config parser. Only a single
+    exact flag token per file is accepted. Any other non-comment line, option
+    argument, duplicate, or mixed error-policy blocks the whole output so an
+    unreviewed option or ordering effect cannot be mistaken for a conversion.
+    """
+    result = {'adapter': MIGRATION_MAP['persist/yt-dlp/yt-dlp.conf']['adapter'],
+              'version': ADAPTER_VERSION, 'status': 'blocked',
+              'decisions': [], 'activation': 'not-performed',
+              'accepted_settings': 0, 'blocked_settings': 0}
+    if len(payload) > MAX_CONFIG_BYTES:
+        return None, dict(result, reason='config-size-limit', blocked_settings=1)
+    if b'\x00' in payload:
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+    try:
+        text = payload.decode('utf-8')
+    except UnicodeDecodeError:
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+    if ('\ufeff' in text
+            or any(ord(char) < 32 and char not in '\r\n\t' for char in text)):
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+
+    options = []
+    unsupported_count = 0
+    unsupported_form_count = 0
+    non_comment_lines = 0
+    token_pattern = re.compile(r'^(?P<option>-i|--[A-Za-z][A-Za-z0-9-]*)(?P<suffix>.*)$')
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        non_comment_lines += 1
+        match = token_pattern.fullmatch(stripped)
+        if not match:
+            unsupported_count += 1
+            continue
+        option = match.group('option')
+        canonical = YT_DLP_OPTION_ALIASES.get(option)
+        if canonical is None:
+            unsupported_count += 1
+        elif match.group('suffix'):
+            unsupported_form_count += 1
+        else:
+            options.append(canonical)
+
+    counts = Counter(options)
+    duplicate_count = sum(count for count in counts.values() if count > 1)
+    mixed_policy = len(counts) > 1
+    if unsupported_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'unmapped-or-sensitive-setting',
+                                    'count': unsupported_count})
+    if unsupported_form_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'unsupported-option-form',
+                                    'count': unsupported_form_count})
+    if duplicate_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'duplicate-setting',
+                                    'count': duplicate_count})
+    if mixed_policy:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'mixed-error-policy',
+                                    'count': len(options)})
+
+    if unsupported_count or unsupported_form_count or duplicate_count or mixed_policy:
+        result['blocked_settings'] = non_comment_lines
+        return None, dict(result, reason='unsupported-or-conflicting-settings')
+    if not options:
+        return None, dict(result, reason='no-supported-settings')
+
+    option = options[0]
+    result['decisions'].append({'option': option, 'status': 'retained',
+                                'reason': 'documented-platform-neutral-option'})
+    result['accepted_settings'] = 1
+    result['status'] = 'converted-subset'
+    lines = ['# Portable yt-dlp subset generated offline; original config is preserved separately.',
+             option]
     return ('\n'.join(lines) + '\n').encode('ascii'), result
 
 

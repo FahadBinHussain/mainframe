@@ -249,6 +249,95 @@ class MpvAdapterTests(unittest.TestCase):
         self.assertEqual(result['reason'], 'config-size-limit')
 
 
+class YtDlpAdapterTests(unittest.TestCase):
+    HEADER = b'# Portable yt-dlp subset generated offline; original config is preserved separately.\n'
+
+    def convert(self, text):
+        return lm.convert_yt_dlp_config(text.encode())
+
+    def test_documented_platform_neutral_flags_and_aliases(self):
+        for source, target in (
+                ('--ignore-errors', '--ignore-errors'),
+                ('-i', '--ignore-errors'),
+                ('--abort-on-error', '--abort-on-error'),
+                ('--no-ignore-errors', '--abort-on-error'),
+                ('--no-abort-on-error', '--no-abort-on-error')):
+            with self.subTest(source=source):
+                first = self.convert(f'# synthetic comment\r\n{source}\r\n')
+                self.assertEqual(first, self.convert(f'# synthetic comment\r\n{source}\r\n'))
+                output, result = first
+                self.assertEqual(output, self.HEADER + target.encode('ascii') + b'\n')
+                self.assertNotIn(b'\r', output)
+                self.assertEqual(result['adapter'], 'yt-dlp-portable-options-v1')
+                self.assertEqual(result['status'], 'converted-subset')
+                self.assertEqual(result['accepted_settings'], 1)
+                self.assertEqual(result['blocked_settings'], 0)
+                self.assertEqual(result['activation'], 'not-performed')
+
+    def test_unknown_sensitive_paths_credentials_plugins_and_commands_block_whole_file(self):
+        markers = ('SYNTHETIC_COOKIE_PATH', 'SYNTHETIC_BROWSER_PROFILE',
+                   'SYNTHETIC_USERNAME', 'SYNTHETIC_PASSWORD',
+                   'SYNTHETIC_PROXY_HOST', 'SYNTHETIC_PLUGIN_PATH',
+                   'SYNTHETIC_EXEC_COMMAND', 'SYNTHETIC_OUTPUT_PATH')
+        config = '''--ignore-errors
+--cookies C:\\Users\\Fixture\\SYNTHETIC_COOKIE_PATH
+--cookies-from-browser SYNTHETIC_BROWSER_PROFILE
+--username SYNTHETIC_USERNAME
+--password SYNTHETIC_PASSWORD
+--proxy https://SYNTHETIC_PROXY_HOST:8443
+--plugin-dirs C:\\Users\\Fixture\\SYNTHETIC_PLUGIN_PATH
+--exec "echo SYNTHETIC_EXEC_COMMAND"
+-o C:\\Users\\Fixture\\SYNTHETIC_OUTPUT_PATH
+'''
+        output, result = self.convert(config)
+        self.assertIsNone(output)
+        self.assertEqual(result['accepted_settings'], 0)
+        self.assertEqual(result['blocked_settings'], 9)
+        serialized = json.dumps(result)
+        for marker in markers:
+            self.assertNotIn(marker, serialized)
+        self.assertNotIn('C:\\Users', serialized)
+        self.assertNotIn('SYNTHETIC_PROXY_HOST', serialized)
+        self.assertIn('unmapped-or-sensitive-setting', serialized)
+
+    def test_arguments_duplicates_and_mixed_policies_are_blocked(self):
+        cases = (
+            ('--ignore-errors yes\n', 'unsupported-option-form', 1),
+            ('--ignore-errors=yes\n', 'unsupported-option-form', 1),
+            ('--ignore-errors\n-i\n', 'duplicate-setting', 2),
+            ('--ignore-errors\n--abort-on-error\n', 'mixed-error-policy', 2),
+            ('--no-abort-on-error\n--ignore-errors\n', 'mixed-error-policy', 2),
+        )
+        for config, reason, count in cases:
+            with self.subTest(config=config):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                self.assertEqual(result['blocked_settings'], count)
+                self.assertIn(reason, json.dumps(result))
+                self.assertEqual(result['accepted_settings'], 0)
+
+    def test_malformed_encoding_controls_size_and_empty_inputs_are_sanitized(self):
+        for payload, reason in (
+                (b'\xff', 'invalid-config'),
+                (b'\xef\xbb\xbf--ignore-errors\n', 'invalid-config'),
+                (b'--ignore-errors\x00\n', 'invalid-config'),
+                (b'--ignore-errors\n\x01', 'invalid-config'),
+                (b'x' * (lm.MAX_CONFIG_BYTES + 1), 'config-size-limit')):
+            with self.subTest(reason=reason):
+                output, result = lm.convert_yt_dlp_config(payload)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], reason)
+                self.assertGreaterEqual(result['blocked_settings'], 1)
+        for config, reason in (('', 'no-supported-settings'),
+                               ('# only a synthetic comment\n\n', 'no-supported-settings'),
+                               ('C:\\Users\\SYNTHETIC_PATH\n', 'unsupported-or-conflicting-settings')):
+            with self.subTest(reason=reason):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], reason)
+                self.assertNotIn('SYNTHETIC_PATH', json.dumps(result))
+
+
 class MigrationRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -435,6 +524,164 @@ class MigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)  # explicitly incomplete operational restore
         self.assertEqual(json.loads(result.stdout)['conversion_status'], 'review-required')
         self.assertNotIn('SYNTHETIC_PRIVATE_MARKER', result.stdout + result.stderr)
+
+
+class YtDlpMigrationRecoveryTests(unittest.TestCase):
+    SOURCE = 'persist/yt-dlp/yt-dlp.conf'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.backup = self.root / 'backup'
+        self.backup.mkdir()
+        self.dest = self.root / 'offline'
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text('{"items": []}')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def archive(self, name, members):
+        with ZipFile(self.backup / name, 'w') as archive:
+            for key, payload in members:
+                archive.writestr(key, payload)
+
+    def recover(self, **kwargs):
+        return lr.copy_recovery(self.backup, self.dest, manifest_path=self.manifest,
+                                mode=kwargs.pop('mode', 'full'), **kwargs)
+
+    def test_exact_scoop_source_converts_only_flag_and_preserves_plugins_raw(self):
+        config = b'# SYNTHETIC_PRIVATE_COMMENT\r\n-i\r\n'
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            (self.SOURCE, config),
+            ('persist/yt-dlp/ytdlp_plugins/private.py', b'SYNTHETIC_PLUGIN_CODE'),
+            ('persist/yt-dlp/yt-dlp-plugins/other.py', b'SYNTHETIC_OTHER_PLUGIN'),
+        ])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}):
+            report = self.recover(apply_portable=True, convert_portable=True)
+
+        converted = self.dest / 'home-staging/.config/yt-dlp/config'
+        candidate = self.dest / 'home-staging/.config/yt-dlp/yt-dlp.conf'
+        recovered = self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE
+        self.assertEqual(converted.read_bytes(), YtDlpAdapterTests.HEADER + b'--ignore-errors\n')
+        self.assertEqual(candidate.read_bytes(), config)
+        self.assertEqual(recovered.read_bytes(), config)
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        for rel in ('ytdlp_plugins/private.py', 'yt-dlp-plugins/other.py'):
+            self.assertFalse((self.dest / 'home-staging/.config/yt-dlp' / rel).exists())
+            self.assertTrue((self.dest / 'recovered/mainframe-persist.zip/persist/yt-dlp' / rel).exists())
+        entries = {entry['normalized_path']: entry for entry in report['entries']}
+        for plugin in ('persist/yt-dlp/ytdlp_plugins/private.py',
+                       'persist/yt-dlp/yt-dlp-plugins/other.py'):
+            self.assertEqual(entries[plugin]['category'], 'blocked')
+        self.assertEqual(report['conversion_counts'], {'converted-subset': 1})
+        self.assertEqual(report['activation_status'], 'not-performed')
+        self.assertEqual(report['operational_status'], 'incomplete')
+        self.assertNotIn('SYNTHETIC_PRIVATE_COMMENT', json.dumps(report))
+
+    def test_apply_portable_keeps_config_as_candidate_but_blocks_plugin_directories(self):
+        config = b'--ignore-errors\n# raw candidate only\n'
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            (self.SOURCE, config),
+            ('persist/yt-dlp/ytdlp_plugins/private.py', b'SYNTHETIC_PLUGIN_CODE'),
+        ])
+        with patch.object(lr, 'convert_yt_dlp_config', side_effect=AssertionError('candidate copy must not convert')):
+            report = self.recover(apply_portable=True)
+        candidate = self.dest / 'home-staging/.config/yt-dlp/yt-dlp.conf'
+        self.assertEqual(candidate.read_bytes(), config)
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp/config').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp/ytdlp_plugins/private.py').exists())
+        self.assertEqual((self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE).read_bytes(), config)
+        plugin = next(e for e in report['entries']
+                      if e['normalized_path'] == 'persist/yt-dlp/ytdlp_plugins/private.py')
+        self.assertEqual(plugin['category'], 'blocked')
+
+    def test_unknown_paths_credentials_proxy_and_plugins_remain_raw_without_output(self):
+        config = (b'--ignore-errors\n'
+                  b'--cookies C:\\Users\\Fixture\\SYNTHETIC_COOKIE\n'
+                  b'--username SYNTHETIC_USER\n'
+                  b'--password SYNTHETIC_PASSWORD\n'
+                  b'--proxy https://SYNTHETIC_PROXY_HOST:8443\n'
+                  b'--plugin-dirs C:\\Users\\Fixture\\SYNTHETIC_PLUGIN_PATH\n'
+                  b'--exec "echo SYNTHETIC_SCRIPT"\n')
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, config)])
+        report = self.recover(convert_portable=True)
+        source_entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(source_entry['migration']['status'], 'blocked')
+        self.assertEqual(source_entry['migration']['blocked_settings'], 7)
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp/config').exists())
+        self.assertEqual((self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE).read_bytes(), config)
+        serialized = json.dumps(report)
+        for marker in ('SYNTHETIC_COOKIE', 'SYNTHETIC_USER', 'SYNTHETIC_PASSWORD',
+                       'SYNTHETIC_PROXY_HOST', 'SYNTHETIC_PLUGIN_PATH',
+                       'SYNTHETIC_SCRIPT', 'C:\\Users'):
+            self.assertNotIn(marker, serialized)
+
+    def test_nonexact_config_layout_is_never_passed_to_adapter(self):
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            ('persist/yt-dlp/config', b'--ignore-errors\n'),
+            ('persist/yt-dlp/yt-dlp.conf.backup', b'--abort-on-error\n'),
+        ])
+        with patch.object(lr, 'convert_yt_dlp_config', side_effect=AssertionError('nonexact path must not parse')):
+            report = self.recover(apply_portable=True, convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp/config').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all(entry['category'] == 'blocked'
+                            for entry in report['entries']
+                            if entry.get('normalized_path', '').startswith('persist/yt-dlp/')))
+
+    def test_quick_full_duplicate_source_has_no_winner(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'--ignore-errors\n')])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, b'--abort-on-error\n')])
+        with patch.object(lr, 'convert_yt_dlp_config', side_effect=AssertionError('duplicate must preclude parsing')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp/config').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 2})
+        self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
+                            for e in report['entries']))
+        self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
+
+    def test_casefold_alias_conflict_blocks_exact_source(self):
+        alias = 'persist/yt-dlp/YT-DLP.conf'
+        unicode_alias = 'perſist/yt-dlp/yt-dlp.conf'
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'--ignore-errors\n')])
+        self.archive('mainframe-persist.zip', [
+            (alias, b'--abort-on-error\n'),
+            (unicode_alias, b'--no-abort-on-error\n'),
+        ])
+        with patch.object(lr, 'convert_yt_dlp_config', side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(convert_portable=True)
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        unicode_variant = next(e for e in report['entries'] if e['normalized_path'] == unicode_alias)
+        self.assertFalse((self.dest / 'home-staging/.config/yt-dlp/config').exists())
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
+        self.assertNotIn('migration', unicode_variant)
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+
+    def test_existing_converted_target_is_not_overwritten(self):
+        self.archive('mainframe-quick.zip', [])
+        candidate = b'candidate fixture bytes\n'
+        self.archive('mainframe-persist.zip', [(self.SOURCE, b'--no-abort-on-error\n')])
+        report = self.recover()
+        target = self.dest / 'home-staging/.config/yt-dlp/config'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(candidate)
+        lr.stage_conversions(report, self.dest)
+        self.assertEqual(target.read_bytes(), candidate)
+        source_entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(source_entry['migration']['reason'], 'conversion-target-conflict')
+        self.assertEqual((self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE).read_bytes(),
+                         b'--no-abort-on-error\n')
 
 
 class MpvMigrationRecoveryTests(unittest.TestCase):
