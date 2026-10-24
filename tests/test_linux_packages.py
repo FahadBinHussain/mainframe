@@ -539,6 +539,9 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertTrue({'qbittorrent', 'rclone', 'yt-dlp', 'syncplay', 'cloudflared', 'nodejs-lts'} <= mapped)
         for item in ('pwsh', 'discord'):
             self.assertIn('not validated' if item == 'pwsh' else 'no validated', blocked[item])
+        self.assertIn('portapps/discord-portable', blocked['discord'])
+        self.assertIn('no exact matching Linux package version/checksum', blocked['discord'])
+        self.assertIn('No Snap/Flatpak substitution.', blocked['discord'])
 
     def test_pip_freeze_optional_and_ignored_for_backup_root(self):
         from tempfile import TemporaryDirectory
