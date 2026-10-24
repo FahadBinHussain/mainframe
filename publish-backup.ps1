@@ -35,8 +35,7 @@ if (-not $status -or $status.status -ne 'unlocked') {
     throw "vault still locked after session.key (status=$($status.status)) - refresh it via automata-private\bitwarden.com\unlock.ps1"
 }
 # Detect the vault account email while we are unlocked: it is stamped into
-# the release notes and into the last-backup.json pointer (below), so a
-# restore on a fresh machine can log bw in without asking for the address.
+# the (private) release notes as 'bw-email:' - nowhere public.
 $bwEmail = ([string]$status.userEmail).Trim()
 if ($bwEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
     Write-Warning "bw status reported no usable account email (got '$bwEmail') - release will carry no bw-email stamp"
@@ -163,39 +162,3 @@ if (-not ($after | Where-Object { $_.tagName -eq $tag })) {
 }
 Write-Host "verified: $tag survived prune"
 Write-Host "done: $Repo now holds $([Math]::Min($mine.Count, $Keep)) releases for $hostname"
-
-# --- pointer: last-backup.json in THIS (public) repo ---
-# boot.ps1 clones this repo before it can unlock the vault, so this small
-# committed file is the one place a fresh machine can learn the bw account
-# email from without asking. It carries the email in the clear: in a public
-# repo that address is public. Set MAINFRAME_NO_BW_EMAIL_POINTER=1 on the
-# publishing machine to skip. Best-effort: the release is already published,
-# so a failed pointer push warns instead of failing the backup.
-if ($bwEmail -and -not $env:MAINFRAME_NO_BW_EMAIL_POINTER) {
-    try {
-        $pointerPath = Join-Path $PSScriptRoot 'last-backup.json'
-        $pointer = [ordered]@{
-            bitwardenEmail = $bwEmail
-            machine        = $hostname
-            releaseTag     = $tag
-            releaseRepo    = $Repo
-            publishedAt    = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-        }
-        Set-Content -LiteralPath $pointerPath -Value ($pointer | ConvertTo-Json) -Encoding UTF8
-        $dirty = & git -C $PSScriptRoot status --porcelain -- last-backup.json 2>$null
-        if ($dirty) {
-            & git -C $PSScriptRoot add -- last-backup.json 2>$null | Out-Null
-            & git -C $PSScriptRoot commit -m "chore: last-backup pointer $tag" -- last-backup.json 2>$null | Out-Null
-            & git -C $PSScriptRoot push 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "pointer: last-backup.json updated (bw email for fresh-machine restores)"
-            } else {
-                Write-Warning 'pointer: git push of last-backup.json failed - fresh machines will ask for the bw email once'
-            }
-        } else {
-            Write-Host 'pointer: last-backup.json unchanged'
-        }
-    } catch {
-        Write-Warning "pointer: could not update last-backup.json ($($_.Exception.Message)) - fresh machines will ask for the bw email once"
-    }
-}
