@@ -52,13 +52,8 @@ none of those has it, it asks once and saves the answer for next time.
 — that is their exposure decision to make.)
 
 Separately, `publish-backup.ps1` detects the vault account email from
-`bw status` at publish time, stamps it into the (private) release notes as
-`bw-email:`, and maintains a committed `last-backup.json` pointer in this
-repo — `bitwardenEmail`, machine, latest release tag — which `boot.ps1`
-reads from the fresh clone before the vault step. That makes restores on
-new machines ask only for the master password. The pointer carries the
-email in the clear, so in a public repo the address is public; set
-`MAINFRAME_NO_BW_EMAIL_POINTER=1` on the publishing machine to opt out.
+`bw status` at publish time and stamps it into the (private) release notes
+as `bw-email:` — it is never written anywhere public.
 
 ### Linux: Bash (no PowerShell dependency)
 
