@@ -376,7 +376,13 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                 blockers.append(reason)
                 actions.append(_blocked("pnpm", name, reason, "pnpm"))
             else:
-                reason = f"{name}: supported Linux Node CLI; metadata inventoried, not install-ready: " + "; ".join(detail["execution_blockers"])
+                review = detail.get("vercel_cli_review", {})
+                version = review.get("package_version", detail["package"]["version"])
+                engine = review.get("node_engine_requirement") or "unknown"
+                native_count = len(review.get("optional_linux_native_packages", []))
+                reason = (f"{name}: latest registry metadata observation {version} is not a selected package pin; "
+                          f"Node engine requirement {engine}; {native_count} optional Linux native package record(s) are metadata only and native execution is disabled. "
+                          + "; ".join(detail["execution_blockers"]))
                 blockers.append(reason)
                 actions.append(Action("pnpm", name, version=detail["package"]["version"],
                                       status="blocked", reason=reason, source="pnpm", dry_plan=detail))

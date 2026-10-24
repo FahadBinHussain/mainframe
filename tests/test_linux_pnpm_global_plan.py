@@ -37,8 +37,8 @@ class PnpmGlobalPlanTests(unittest.TestCase):
 
     def build(self, base, *, pkg=None, pnpm_meta=None, deps=None, optional=None,
               scripts=None, engines=None, dependency_scripts=None,
-              optional_scripts=None, node="20.1.0", pnpm="12.0.0",
-              peers=None, platform=None):
+              optional_scripts=None, optional_platforms=None,
+              node="20.1.0", pnpm="12.0.0", peers=None, platform=None):
         pkg = pkg or "vercel"
         nr, pr = self.runtime_fixture(node, pnpm)
         meta = self.package_meta(pkg, scripts=scripts, deps=deps, optional=optional,
@@ -49,7 +49,8 @@ class PnpmGlobalPlanTests(unittest.TestCase):
             if plan.VERSION.fullmatch(v):
                 responses[n] = self.package_meta(
                     n, v, scripts=(dependency_scripts or {}).get(n) or
-                    (optional_scripts or {}).get(n))
+                    (optional_scripts or {}).get(n),
+                    platform=(optional_platforms or {}).get(n))
 
         def fake_manifest(name, selector="latest"):
             item = dict(responses[name])
@@ -61,6 +62,7 @@ class PnpmGlobalPlanTests(unittest.TestCase):
             item["integrity"] = item["dist"]["integrity"]
             item["engines"] = item.get("engines", {})
             item["install_scripts"] = {k: v for k, v in item.get("scripts", {}).items() if k in plan.HOOKS}
+            item["has_install_script"] = item.get("hasInstallScript")
             item["dependencies"] = item.get("dependencies", {})
             item["optional_dependencies"] = item.get("optionalDependencies", {})
             item["peer_dependencies"] = item.get("peerDependencies", {})
@@ -250,14 +252,82 @@ class PnpmGlobalPlanTests(unittest.TestCase):
             self.assertEqual(result["unresolved_direct_ranges"], {"foo": "^1.2.0"})
             self.assertIn("transitive", " ".join(result["future_executor_gates"]))
 
+    def test_registry_manifest_fetches_metadata_only_not_tarball(self):
+        meta = self.package_meta("vercel", version="1.2.3", engines={"node": ">=20"})
+        with patch.object(plan.registry, "_json", return_value=meta) as request, \
+             patch.object(plan.registry, "_integrity", return_value=self.INTEGRITY):
+            result = plan.manifest("vercel")
+        requested_url = request.call_args.args[0]
+        self.assertEqual(requested_url, "https://registry.npmjs.org/vercel/latest")
+        self.assertNotIn(".tgz", requested_url)
+        self.assertTrue(result["tarball"].endswith("vercel-1.2.3.tgz"))
+
+    def test_vercel_native_linux_metadata_is_recorded_but_not_selected_or_activated(self):
+        optional = {
+            "@vercel/vc-native-linux-x64": "1.2.3",
+            "@vercel/vc-native-linux-x64-musl": "1.2.3",
+            "@vercel/vc-native-linux-arm64": "1.2.3",
+            "@vercel/vc-native-darwin-x64": "1.2.3",
+        }
+        platforms = {
+            "@vercel/vc-native-linux-x64": {"os": ["linux"], "cpu": ["x64"], "libc": ["glibc"]},
+            "@vercel/vc-native-linux-x64-musl": {"os": ["linux"], "cpu": ["x64"], "libc": ["musl"]},
+            "@vercel/vc-native-linux-arm64": {"os": ["linux"], "cpu": ["arm64"], "libc": ["glibc"]},
+            "@vercel/vc-native-darwin-x64": {"os": ["darwin"], "cpu": ["x64"]},
+        }
+        with tempfile.TemporaryDirectory() as d:
+            result = self.build(Path(d), optional=optional, optional_platforms=platforms,
+                                engines={"node": ">=20"},
+                                scripts={"postinstall": "node synthetic-postinstall.js"})
+        review = result["vercel_cli_review"]
+        self.assertEqual(review["package_version"], "1.2.3")
+        self.assertIn("not pinned in pnpm-allowed.json", review["version_selection"])
+        self.assertEqual(review["node_engine_requirement"], ">=20")
+        self.assertEqual(review["root_lifecycle_hooks"], {"postinstall": "node synthetic-postinstall.js"})
+        self.assertIsNone(review["root_has_install_script"])
+        candidates = {item["name"]: item for item in review["optional_linux_native_packages"]}
+        self.assertEqual(set(candidates), set(optional) - {"@vercel/vc-native-darwin-x64"})
+        self.assertEqual(candidates["@vercel/vc-native-linux-x64"]["platform"], platforms["@vercel/vc-native-linux-x64"])
+        self.assertTrue(candidates["@vercel/vc-native-linux-x64"]["integrity"].startswith("sha512-"))
+        self.assertTrue(candidates["@vercel/vc-native-linux-x64"]["platform_linux_confirmed"])
+        self.assertFalse(review["native_execution"]["enabled"])
+        self.assertFalse(review["native_execution"]["activation_in_plan"])
+        self.assertTrue(review["native_execution"]["standard_launcher_requires_node"])
+        self.assertIn("no tarball downloaded", review["artifact_review"])
+        self.assertNotIn("--enable-binary", result["proposed_command"])
+        self.assertEqual(result["status"], "dry-only")
+        self.assertFalse(result["executable"])
+        self.assertTrue(result["execution_blockers"])
+
+    def test_non_exact_native_optional_range_stays_unresolved(self):
+        with tempfile.TemporaryDirectory() as d:
+            result = self.build(Path(d), optional={"@vercel/vc-native-linux-x64": "^1.2.3"},
+                                engines={"node": ">=20"})
+        candidate = result["vercel_cli_review"]["optional_linux_native_packages"][0]
+        self.assertEqual(candidate["metadata_status"], "non-exact-range")
+        self.assertIsNone(candidate["integrity"])
+        self.assertEqual(result["unresolved_direct_ranges"], {"@vercel/vc-native-linux-x64": "^1.2.3"})
+
     def test_linux_integration_passes_config_and_blocks_metadata_plan(self):
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d); manifests = {"scoop-allowed.json": {"apps": []}, "winget-allowed.json": {"packages": []}, "pnpm-allowed.json": {"packages": ["vercel"]}, "uv-allowed.json": {"packages": ["x"]}, "go-allowed.json": {"packages": ["example.com/x"]}}
             for name, value in manifests.items(): (repo / name).write_text(json.dumps(value))
-            with patch.object(lp.pnpm_global_tools, "build_dry_plan", return_value={"package": {"version": "1.0.0"}, "execution_blockers": ["pending"], "proposed_command": []}) as build:
+            metadata_plan = {"package": {"version": "1.0.0"},
+                             "vercel_cli_review": {"package_version": "1.0.0", "node_engine_requirement": ">=20",
+                                                   "optional_linux_native_packages": [{}, {}]},
+                             "execution_blockers": ["pending"], "proposed_command": []}
+            with patch.object(lp.pnpm_global_tools, "build_dry_plan", return_value=metadata_plan) as build:
                 built = lp.build_plan(repo, distro="ubuntu", architecture="x86_64", pnpm_plan_config={"roots": self.roots(repo / "isolated")})
             build.assert_called_once(); action = next(a for a in built.actions if a.name == "vercel")
             self.assertEqual(action.status, "blocked"); self.assertIn("pending", action.reason); self.assertTrue(built.blockers)
+            self.assertIn("not a selected package pin", action.reason)
+            self.assertIn("Node engine requirement >=20", action.reason)
+            self.assertIn("2 optional Linux native package record(s)", action.reason)
+            runner = Mock(side_effect=AssertionError("Vercel plan must not execute"))
+            with patch.object(lp, "host_info", return_value=("ubuntu", "x86_64")), \
+                 self.assertRaisesRegex(RuntimeError, "blockers"):
+                lp.execute(built, ["vercel"], runner=runner)
+            runner.assert_not_called()
 
     def test_main_rejects_execute_with_dry_only_pnpm_config(self):
         with tempfile.TemporaryDirectory() as d:
