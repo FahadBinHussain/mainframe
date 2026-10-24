@@ -134,6 +134,45 @@ static void success_and_shadow_only() {
   ok(c->discard(e), "discard");
   ok(!fs.count(s), "private stage removed");
 }
+static void verified_export_includes_every_wacli_member() {
+  setup();
+  std::string e;
+  auto c = make();
+  ok(stage(c, e), e.c_str());
+  ok(c->export_verified("C:\\PARENT\\archive", e), e.c_str());
+  const std::wstring prefix = L"C:\\PARENT\\archive\\root0\\";
+  const std::vector<std::pair<std::wstring, std::string>> expected = {
+      {L"store\\session.db", std::string("\0\xff\r\n", 4)},
+      {L"store\\session.db-wal", "session-wal"},
+      {L"store\\session.db-shm", "session-shm"},
+      {L"store\\session.db-journal", "session-journal"},
+      {L"store\\wacli.db", "wacli-db"},
+      {L"store\\wacli.db-wal", "wacli-wal"},
+      {L"store\\wacli.db-shm", "wacli-shm"},
+      {L"store\\wacli.db-journal", "wacli-journal"},
+      {L"profile\\config.json", "synthetic-profile-config"},
+      {L"media\\blob", std::string("\0\x80\xff", 3)},
+  };
+  for (const auto &entry : expected) {
+    const auto copied = fs.find(prefix + entry.first);
+    ok(copied != fs.end() && copied->second.bytes == entry.second,
+       "verified archive export preserved every WACLI byte");
+  }
+  ok(c->discard(e), "export stage discard");
+}
+static void verified_export_failure_is_loud_and_removed() {
+  setup();
+  std::string e;
+  auto c = make();
+  ok(stage(c, e), e.c_str());
+  fail_read = true;
+  ok(!c->export_verified("C:\\PARENT\\failed-export", e),
+     "export read failure rejected");
+  ok(!fs.count(L"C:\\PARENT\\failed-export"),
+     "partial export removed on failure");
+  fail_read = false;
+  ok(c->discard(e), "failed export stage discard");
+}
 static void reject_cases() {
   setup();
   fs[L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\bad"]
@@ -269,6 +308,8 @@ static void verify_corruption_and_cleanup() {
 int main() {
   try {
     success_and_shadow_only();
+    verified_export_includes_every_wacli_member();
+    verified_export_failure_is_loud_and_removed();
     fake_cleanup_contract();
     reject_cases();
     directory_ads_and_acl();

@@ -119,6 +119,29 @@ if (-not $definition) { throw "function not found: $FunctionName" }
             self.assertFalse(passed, output)
             self.assertIn("live SQLite state", output)
 
+    def test_only_exact_verified_vss_root_bypasses_the_live_sqlite_guard(self):
+        for script in (ROOT / "backup.ps1", ROOT / "backup-secrets.ps1"):
+            with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-verified-vss-") as td:
+                root = Path(td)
+                accounts = root / "accounts"
+                whatsapp = accounts / "whatsapp"
+                whatsapp.mkdir(parents=True)
+                (whatsapp / "state.db-wal").write_bytes(b"synthetic sidecar")
+                verified = f"-VerifiedVssRoot {self.ps_quote(str(whatsapp))}"
+                allowed = self.run_function(
+                    script,
+                    "Assert-WindowsWhatsappCaptureSafe",
+                    f"Assert-WindowsWhatsappCaptureSafe -Source {self.ps_quote(str(accounts))} {verified}; 'PASS'",
+                )
+                self.assertIn("PASS", allowed)
+                wrong = root / "different"
+                blocked = self.run_function(
+                    script,
+                    "Assert-WindowsWhatsappCaptureSafe",
+                    f"try {{ Assert-WindowsWhatsappCaptureSafe -Source {self.ps_quote(str(accounts))} -VerifiedVssRoot {self.ps_quote(str(wrong))}; 'PASS' }} catch {{ 'BLOCK' }}",
+                )
+                self.assertIn("BLOCK", blocked)
+
     def test_restore_reserved_native_tree_is_blocked_for_custom_manifest_sources(self):
         for script in (ROOT / "restore.ps1", ROOT / "restore-secrets.ps1"):
             with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-reserved-") as td:

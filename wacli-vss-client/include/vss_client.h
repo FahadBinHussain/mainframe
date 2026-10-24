@@ -49,6 +49,11 @@ public:
     virtual bool verify(std::string&) = 0;
     virtual bool discard(std::string&) noexcept = 0;
     virtual std::string staging_directory() const { return {}; }
+    // Export only a successful verified stage; implementations must fail on
+    // any omitted member and must never reopen the live source roots.
+    virtual bool export_verified(const std::string&, std::string& error) {
+        error = "verified export unavailable"; return false;
+    }
 };
 struct Result {
     bool ok = false;
@@ -70,7 +75,8 @@ bool canonical_volume(const std::string&);
 // Development probe only: snapshots are deleted before return; no copy callback,
 // archive, capture receipt, application-consistency guarantee or public CLI.
 Result probe_volumes(const std::vector<std::string>&, VolumeResolver&, Backend&);
-// No public CLI, archive, receipt, publishability or WACLI consistency claim.
+// Internal Windows backup helper may export these bytes; this is not a WACLI
+// application-consistency claim or restore-activation authorization.
 Result stage_snapshot_roots(const std::vector<std::string>&, VolumeResolver&, Backend&, SnapshotCopy&);
 #ifdef _WIN32
 std::unique_ptr<VolumeResolver> make_native_resolver();

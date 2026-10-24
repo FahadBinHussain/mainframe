@@ -674,6 +674,62 @@ class NativeSnapshotCopy final : public SnapshotCopy {
         source_pins_.clear();
         return true;
     }
+    bool export_verified(const std::string &value, std::string &e) override {
+        if (!complete_ || staging_.empty() || roots_.empty()) {
+            e = "verified staging unavailable";
+            return false;
+        }
+        const auto target = to_wide(value);
+        const auto separator = target.find_last_of(L'\\');
+        if (target.empty() || target.size() > 240 || separator == std::wstring::npos ||
+            separator == 0 || target.substr(0, separator) != parent_ ||
+            !component_ok(target.substr(separator + 1))) {
+            e = "verified export destination invalid";
+            return false;
+        }
+        if (!CreateDirectoryW(target.c_str(), nullptr)) {
+            e = "verified export destination already exists or is unavailable";
+            return false;
+        }
+        std::vector<std::unique_ptr<Handle>> output_pins;
+        auto fail_export = [&]() {
+            output_pins.clear();
+            if (!remove_tree(target)) e = "verified export cleanup failed";
+            return false;
+        };
+        if (!pin(target, output_pins, e)) return fail_export();
+        for (size_t i = 0; i < roots_.size(); ++i) {
+            const auto output_root = join(target, L"root" + std::to_wstring(i));
+            if (!CreateDirectoryW(output_root.c_str(), nullptr) || !pin(output_root, output_pins, e)) {
+                if (e.empty()) e = "verified export root create failed";
+                return fail_export();
+            }
+            const auto &root = roots_[i];
+            for (const auto &entry : root.entries) {
+                if (!entry.directory) continue;
+                const auto directory = join(output_root, entry.relative);
+                if (!CreateDirectoryW(directory.c_str(), nullptr) || !pin(directory, output_pins, e)) {
+                    if (e.empty()) e = "verified export directory create failed";
+                    return fail_export();
+                }
+            }
+            for (const auto &entry : root.entries) {
+                if (entry.directory) continue;
+                const auto staged_file = join(root.destination, entry.relative);
+                const auto output_file = join(output_root, entry.relative);
+                if (!copy_bytes(staged_file, output_file, entry.size, e) ||
+                    !compare_bytes(staged_file, output_file, entry.size, e))
+                    return fail_export();
+            }
+            std::vector<Entry> exported;
+            if (!inventory(output_root, exported, e) || !same(root.entries, exported)) {
+                e = "verified export inventory mismatch";
+                return fail_export();
+            }
+        }
+        output_pins.clear();
+        return true;
+    }
     bool discard(std::string &e) noexcept override {
         try {
             // No-delete-share pins protect the copy/verification phase, but must
