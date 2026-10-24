@@ -417,6 +417,108 @@ TAKE_SCREENSHOT=SYNTHETIC_SHORTCUT_MARKER
                 self.assertNotIn('SYNTHETIC_PATH', json.dumps(result))
 
 
+class QBittorrentAdapterTests(unittest.TestCase):
+    HEADER = (b'; Bounded qBittorrent preferences generated offline; '
+              b'original profile is preserved separately.\n')
+
+    def convert(self, text):
+        payload = text if isinstance(text, bytes) else text.encode('utf-8')
+        return lm.convert_qbittorrent_config(payload)
+
+    def test_shared_boolean_preferences_emit_deterministic_linux_conf(self):
+        config = ('[Preferences]\r\nGeneral\\ToolbarDisplayed=false\r\n'
+                  'General\\ExitConfirm=false\r\n'
+                  'General\\AlternatingRowColors=false\r\n'
+                  'General\\StatusbarDisplayed=true\r\n'
+                  'General\\NoSplashScreen=true\r\n'
+                  '[GUI]\r\nTransferList\\UseTorrentStatesColors=false\r\n')
+        first = self.convert(config)
+        self.assertEqual(first, self.convert(config))
+        output, result = first
+        self.assertEqual(
+            output,
+            self.HEADER + b'[GUI]\nTransferList\\UseTorrentStatesColors=false\n\n'
+            b'[Preferences]\nGeneral\\AlternatingRowColors=false\n'
+            b'General\\ExitConfirm=false\nGeneral\\NoSplashScreen=true\n'
+            b'General\\StatusbarDisplayed=true\nGeneral\\ToolbarDisplayed=false\n')
+        self.assertNotIn(b'\r', output)
+        self.assertEqual(result['adapter'], 'qbittorrent-portable-preferences-v1')
+        self.assertEqual(result['status'], 'converted-subset')
+        self.assertEqual(result['accepted_settings'], 6)
+        self.assertEqual(result['blocked_settings'], 0)
+        self.assertEqual(result['activation'], 'not-performed')
+
+    def test_paths_auth_proxy_script_and_unknown_settings_are_blocked_without_echo(self):
+        markers = ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_USER_MARKER',
+                   'SYNTHETIC_CREDENTIAL_MARKER', 'SYNTHETIC_PROXY_HOST',
+                   'SYNTHETIC_PROXY_PASSWORD', 'SYNTHETIC_COMMAND_MARKER',
+                   'SYNTHETIC_UNKNOWN_MARKER')
+        config = r'''[Preferences]
+General\ExitConfirm=false
+Downloads\SavePath=C:\Users\Fixture\SYNTHETIC_WINDOWS_PATH
+WebUI\Username=SYNTHETIC_USER_MARKER
+WebUI\Password_PBKDF2=SYNTHETIC_CREDENTIAL_MARKER
+Connection\ProxyHost=SYNTHETIC_PROXY_HOST
+Connection\ProxyPassword=SYNTHETIC_PROXY_PASSWORD
+Advanced\AutoRunOnTorrentFinishedProgram=SYNTHETIC_COMMAND_MARKER
+[Unreviewed]
+PrivateIdentifier=SYNTHETIC_UNKNOWN_MARKER
+'''
+        output, result = self.convert(config)
+        self.assertEqual(output, self.HEADER +
+                         b'[Preferences]\nGeneral\\ExitConfirm=false\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 7)
+        serialized = json.dumps(result)
+        for marker in markers:
+            self.assertNotIn(marker, serialized)
+            self.assertNotIn(marker.encode(), output)
+        self.assertNotIn('C:\\\\Users', serialized)
+
+    def test_duplicate_casefold_alias_and_invalid_booleans_are_counted(self):
+        config = (r'[Preferences]' + '\n'
+                  r'General\ExitConfirm=true' + '\n'
+                  r'General\ExitConfirm=false' + '\n'
+                  r'General\NoSplashScreen=true' + '\n'
+                  r'General\ToolbarDisplayed=yes' + '\n')
+        output, result = self.convert(config)
+        self.assertEqual(output, self.HEADER +
+                         b'[Preferences]\nGeneral\\NoSplashScreen=true\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 3)
+        serialized = json.dumps(result)
+        self.assertIn('duplicate-setting', serialized)
+        self.assertIn('unsupported-value', serialized)
+        self.assertNotIn('yes', serialized)
+
+        alias = (r'[Preferences]' + '\n'
+                 r'General\ExitConfirm=true' + '\n'
+                 r'general\exitconfirm=false' + '\n')
+        output, result = self.convert(alias)
+        self.assertIsNone(output)
+        self.assertEqual(result['reason'], 'no-supported-settings')
+        self.assertEqual(result['blocked_settings'], 2)
+        self.assertIn('duplicate-setting', json.dumps(result))
+
+    def test_malformed_encoding_sections_and_oversized_values_are_sanitized(self):
+        for payload, reason in (
+                (b'\xff', 'invalid-config'),
+                (b'\xef\xbb\xbf[Preferences]\nGeneral\\ExitConfirm=true\n', 'invalid-config'),
+                (b'[Preferences]\x00General\\ExitConfirm=true\n', 'invalid-config'),
+                (b'[Preferences\nGeneral\\ExitConfirm=true\n', 'invalid-config'),
+                (b'C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH\n', 'invalid-config'),
+                (b'[Preferences]\nGeneral\\ExitConfirm=yes\n', 'no-supported-settings'),
+                (b'[Preferences]\nGeneral\\ExitConfirm=' + b'9' * 10000,
+                 'no-supported-settings'),
+                (b'x' * (lm.MAX_CONFIG_BYTES + 1), 'config-size-limit')):
+            with self.subTest(reason=reason):
+                output, result = lm.convert_qbittorrent_config(payload)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], reason)
+                self.assertGreaterEqual(result['blocked_settings'], 1)
+                self.assertNotIn('SYNTHETIC_WINDOWS_PATH', json.dumps(result))
+
+
 class MigrationRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1022,6 +1124,166 @@ class FlameshotMigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
                          b'[General]\nuiColor=#abcdef\n')
+
+
+class QBittorrentMigrationRecoveryTests(unittest.TestCase):
+    SOURCE = 'qbittorrent/config/qBittorrent.ini'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.backup = self.root / 'backup'
+        self.backup.mkdir()
+        self.dest = self.root / 'offline'
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text('{"items": []}')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def archive(self, name, members):
+        with ZipFile(self.backup / name, 'w') as archive:
+            for key, payload in members:
+                archive.writestr(key, payload)
+
+    def recover(self, **kwargs):
+        return lr.copy_recovery(self.backup, self.dest, manifest_path=self.manifest,
+                                mode=kwargs.pop('mode', 'full'), **kwargs)
+
+    def test_exact_profile_source_converts_only_supported_subset_and_preserves_raw(self):
+        config = (b'[Preferences]\r\nGeneral\\ExitConfirm=false\r\n'
+                  b'Downloads\\SavePath=C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH\r\n'
+                  b'WebUI\\Password_PBKDF2=SYNTHETIC_CREDENTIAL_MARKER\r\n'
+                  b'Connection\\ProxyPassword=SYNTHETIC_PROXY_MARKER\r\n'
+                  b'Advanced\\AutoRunOnTorrentFinishedProgram=SYNTHETIC_COMMAND_MARKER\r\n')
+        self.archive('mainframe-quick.zip', [
+            (self.SOURCE, config),
+            ('qbittorrent/data/BT_backup/0123456789abcdef0123456789abcdef01234567.torrent',
+             b'SYNTHETIC_TORRENT_PAYLOAD'),
+            ('qbittorrent/data/BT_backup/0123456789abcdef0123456789abcdef01234567.fastresume',
+             b'SYNTHETIC_FASTRESUME_PAYLOAD'),
+        ])
+        self.archive('mainframe-persist.zip', [])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}):
+            report = self.recover(apply_portable=True, convert_portable=True)
+
+        converted = self.dest / 'home-staging/.config/qBittorrent/qBittorrent.conf'
+        raw_candidate = self.dest / 'home-staging/.config/qBittorrent/qBittorrent.ini'
+        recovered = self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE
+        self.assertEqual(converted.read_bytes(), QBittorrentAdapterTests.HEADER +
+                         b'[Preferences]\nGeneral\\ExitConfirm=false\n')
+        self.assertFalse(raw_candidate.exists())
+        self.assertEqual(recovered.read_bytes(), config)
+        self.assertEqual(lr.file_hash(self.dest / 'raw-archives/mainframe-quick.zip'),
+                         lr.file_hash(self.backup / 'mainframe-quick.zip'))
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        self.assertFalse((self.dest / 'home-staging/.local/share/qBittorrent').exists())
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['accepted_settings'], 1)
+        self.assertEqual(entry['migration']['blocked_settings'], 4)
+        self.assertEqual(report['conversion_counts'], {'converted-subset': 1})
+        self.assertEqual(report['activation_status'], 'not-performed')
+        self.assertEqual(report['operational_status'], 'incomplete')
+        serialized = json.dumps(report)
+        for marker in ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_CREDENTIAL_MARKER',
+                       'SYNTHETIC_PROXY_MARKER', 'SYNTHETIC_COMMAND_MARKER',
+                       'SYNTHETIC_TORRENT_PAYLOAD', 'SYNTHETIC_FASTRESUME_PAYLOAD',
+                       'C:\\\\Users'):
+            self.assertNotIn(marker, serialized)
+        for name in ('.torrent', '.fastresume'):
+            item = next(e for e in report['entries'] if e['normalized_path'].endswith(name))
+            self.assertEqual(item['category'], 'blocked')
+
+    def test_only_exact_config_is_an_unconverted_candidate_and_torrent_data_stays_raw(self):
+        config = (b'[Preferences]\nGeneral\\ExitConfirm=true\n'
+                  b'WebUI\\Password_PBKDF2=SYNTHETIC_CREDENTIAL_MARKER\n')
+        self.archive('mainframe-quick.zip', [
+            (self.SOURCE, config),
+            ('qbittorrent/config/qBittorrent_new.ini', b'SYNTHETIC_NEW_CONFIG'),
+            ('qbittorrent/data/BT_backup/0123456789abcdef0123456789abcdef01234567.torrent',
+             b'SYNTHETIC_TORRENT_PAYLOAD'),
+            ('qbittorrent/data/BT_backup/0123456789abcdef0123456789abcdef01234567.fastresume',
+             b'SYNTHETIC_FASTRESUME_PAYLOAD'),
+        ])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}), \
+                patch.object(lr, 'convert_qbittorrent_config',
+                             side_effect=AssertionError('candidate copy must not convert')):
+            report = self.recover(mode='quick', apply_portable=True)
+
+        candidate = self.dest / 'home-staging/.config/qBittorrent/qBittorrent.ini'
+        self.assertEqual(candidate.read_bytes(), config)
+        self.assertFalse((self.dest / 'home-staging/.config/qBittorrent/qBittorrent.conf').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/qBittorrent/qBittorrent_new.ini').exists())
+        self.assertFalse((self.dest / 'home-staging/.local/share/qBittorrent').exists())
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
+                         config)
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        self.assertEqual(report['conversion_status'], 'not-requested')
+        self.assertNotIn('SYNTHETIC_CREDENTIAL_MARKER', json.dumps(report))
+        for suffix in ('qBittorrent_new.ini', '.torrent', '.fastresume'):
+            item = next(e for e in report['entries'] if e['normalized_path'].endswith(suffix))
+            self.assertEqual(item['category'], 'blocked')
+
+    def test_nonexact_config_and_torrent_state_never_reach_adapter_or_staging(self):
+        alias = 'qbittorrent/config/qbittorrent.ini'
+        self.archive('mainframe-quick.zip', [
+            (alias, b'[Preferences]\nGeneral\\ExitConfirm=true\n'),
+            ('qbittorrent/data/BT_backup/0123456789abcdef0123456789abcdef01234567.fastresume',
+             b'SYNTHETIC_FASTRESUME_PAYLOAD'),
+        ])
+        with patch.object(lr, 'convert_qbittorrent_config',
+                          side_effect=AssertionError('nonexact paths must not parse')):
+            report = self.recover(mode='quick', apply_portable=True, convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/qBittorrent').exists())
+        self.assertFalse((self.dest / 'home-staging/.local/share/qBittorrent').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all(e['category'] == 'blocked' for e in report['entries']))
+
+    def test_duplicate_quick_and_full_sources_have_no_winner(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'[Preferences]\nGeneral\\ExitConfirm=true\n')])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, b'[Preferences]\nGeneral\\ExitConfirm=false\n')])
+        with patch.object(lr, 'convert_qbittorrent_config',
+                          side_effect=AssertionError('duplicate source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/qBittorrent/qBittorrent.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 2})
+        entries = [e for e in report['entries'] if e['normalized_path'] == self.SOURCE]
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
+                            for e in entries))
+
+    def test_casefold_source_alias_blocks_exact_source_without_parsing_alias(self):
+        alias = 'qbittorrent/config/qbittorrent.ini'
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'[Preferences]\nGeneral\\ExitConfirm=true\n')])
+        self.archive('mainframe-persist.zip', [(alias, b'[Preferences]\nGeneral\\ExitConfirm=false\n')])
+        with patch.object(lr, 'convert_qbittorrent_config',
+                          side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/qBittorrent/qBittorrent.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
+
+    def test_existing_converted_target_is_never_overwritten(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'[Preferences]\nGeneral\\ExitConfirm=true\n')])
+        report = self.recover(mode='quick')
+        target = self.dest / 'home-staging/.config/qBittorrent/qBittorrent.conf'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'existing synthetic target bytes\n')
+        lr.stage_conversions(report, self.dest)
+        self.assertEqual(target.read_bytes(), b'existing synthetic target bytes\n')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
+                         b'[Preferences]\nGeneral\\ExitConfirm=true\n')
 
 
 if __name__ == '__main__':

@@ -20,7 +20,7 @@ from zipfile import BadZipFile, ZipFile
 
 from linux_migrations import (MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config,
                               convert_flameshot_config, convert_mpv_config,
-                              convert_yt_dlp_config)
+                              convert_qbittorrent_config, convert_yt_dlp_config)
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 VERSION = 3
@@ -123,10 +123,9 @@ def classify(path, archive=''):
     if low.startswith('obs-studio/'):
         return 'native-staging', 'OBS export needs source paths, devices, encoders, and plugins relinked.', '.config/obs-studio/' + path.split('/', 1)[1]
     if low.startswith('qbittorrent/'):
-        tail = path.split('/', 1)[1]
-        if tail.startswith('BT_backup/'):
-            return 'native-staging', 'Torrent metadata only; download files absent and Windows save paths require relinking.', '.local/share/qBittorrent/' + tail
-        return 'native-staging', 'qBittorrent export needs path/client-version review before use.', '.config/qBittorrent/' + tail
+        if path == 'qbittorrent/config/qBittorrent.ini':
+            return 'native-staging', 'Exact raw qBittorrent profile config candidate; conversion is separately allowlisted.', '.config/qBittorrent/qBittorrent.ini'
+        return 'blocked', 'Unreviewed qBittorrent profile data, torrent state, paths, auth, and network settings remain raw-only.', None
     for prefix in ('persist/', 'quick-persist/'):
         if low.startswith(prefix):
             pieces = path.split('/', 2)
@@ -395,6 +394,8 @@ def stage_conversions(report, destination):
                 output, audit = convert_mpv_config(payload)
             elif mapping['adapter'] == 'yt-dlp-portable-options-v1':
                 output, audit = convert_yt_dlp_config(payload)
+            elif mapping['adapter'] == 'qbittorrent-portable-preferences-v1':
+                output, audit = convert_qbittorrent_config(payload)
             elif mapping['adapter'] == 'flameshot-portable-preferences-v1':
                 output, audit = convert_flameshot_config(payload)
             else:
@@ -502,10 +503,14 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                         if size != e['size'] or file_hash(target) != digest:
                             raise ValueError('Materialized member verification failed.')
                         e.update(sha256=digest, status='bytes-preserved')
-                        same_target_converter_source = (
+                        suppress_raw_converter_candidate = (
                             convert_portable
-                            and e.get('normalized_path') == 'quick-persist/flameshot/flameshot.ini')
-                        if apply_portable and e.get('native_target') and not same_target_converter_source:
+                            and e.get('normalized_path') in {
+                                'quick-persist/flameshot/flameshot.ini',
+                                'qbittorrent/config/qBittorrent.ini',
+                            })
+                        if (apply_portable and e.get('native_target')
+                                and not suppress_raw_converter_candidate):
                             out = stage / e['native_target']
                             staging_created = False
                             try:
