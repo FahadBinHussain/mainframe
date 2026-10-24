@@ -41,6 +41,13 @@ MIGRATION_MAP = {
         'preservation': 'original bytes retained separately',
         'activation': 'never; offline subset only',
     },
+    'obs-studio/user.ini': {
+        'adapter': 'obs-portable-user-preferences-v1',
+        'target': '.config/obs-studio/user.ini',
+        'source_layout': 'mainframe-obs-profile-user-ini-v1',
+        'preservation': 'original bytes retained separately',
+        'activation': 'never; offline subset only',
+    },
     'quick-persist/flameshot/flameshot.ini': {
         'adapter': 'flameshot-portable-preferences-v1',
         'target': '.config/flameshot/flameshot.ini',
@@ -87,6 +94,16 @@ QBITTORRENT_BOOLEAN_SETTINGS = {
 QBITTORRENT_FOLDED_KEYS = {
     (section.casefold(), key.casefold()): (section, key)
     for section, key in QBITTORRENT_BOOLEAN_SETTINGS
+}
+OBS_USER_BOOLEAN_SETTINGS = {
+    ('BasicWindow', 'PreviewEnabled'): 'BasicWindow/PreviewEnabled',
+    ('BasicWindow', 'ShowStatusBar'): 'BasicWindow/ShowStatusBar',
+    ('BasicWindow', 'SnappingEnabled'): 'BasicWindow/SnappingEnabled',
+    ('General', 'ConfirmOnExit'): 'General/ConfirmOnExit',
+}
+OBS_USER_FOLDED_KEYS = {
+    (section.casefold(), key.casefold()): (section, key)
+    for section, key in OBS_USER_BOOLEAN_SETTINGS
 }
 FLAMESHOT_COLOR_OPTIONS = frozenset({'drawColor', 'uiColor', 'contrastUiColor'})
 FLAMESHOT_BOOLEAN_OPTIONS = frozenset({'showHelp'})
@@ -348,6 +365,118 @@ def convert_qbittorrent_config(payload):
         return None, dict(result, reason='no-supported-settings')
 
     lines = ['; Bounded qBittorrent preferences generated offline; original profile is preserved separately.']
+    current_section = None
+    for section_key in sorted(accepted):
+        current, key = section_key
+        if current != current_section:
+            if current_section is not None:
+                lines.append('')
+            lines.append(f'[{current}]')
+            current_section = current
+        lines.append(f'{key}={accepted[section_key]}')
+    result['status'] = 'converted-subset'
+    return ('\n'.join(lines) + '\n').encode('ascii'), result
+
+
+def convert_obs_user_config(payload):
+    """Convert only four shared OBS UI/exit-confirmation booleans offline.
+
+    Read only the exact user.ini allowlist. Profiles, scene collections,
+    streaming/output, devices, paths, plugins, browser/auth, tray, and unknown
+    settings remain in the byte-preserved original only.
+    """
+    source_key = 'obs-studio/user.ini'
+    result = {'adapter': MIGRATION_MAP[source_key]['adapter'],
+              'version': ADAPTER_VERSION, 'status': 'blocked',
+              'decisions': [], 'activation': 'not-performed',
+              'accepted_settings': 0, 'blocked_settings': 0}
+    if len(payload) > MAX_CONFIG_BYTES:
+        return None, dict(result, reason='config-size-limit', blocked_settings=1)
+    if b'\x00' in payload:
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+    try:
+        text = payload.decode('utf-8')
+    except UnicodeDecodeError:
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+    if text.startswith('\ufeff'):
+        text = text[1:]
+    if ('\ufeff' in text
+            or any(ord(char) < 32 and char not in '\r\n\t' for char in text)
+            or any(0x7f <= ord(char) <= 0x9f
+                   or char in ('\u2028', '\u2029') for char in text)):
+        return None, dict(result, reason='invalid-config', blocked_settings=1)
+
+    section_pattern = re.compile(r'^\[([^\[\]\r\n]{1,256})\]$')
+    key_pattern = re.compile(r'^[^\[\]\r\n=]{1,256}$')
+    section = None
+    records = []
+    for line in text.splitlines():
+        # OBS skips leading lexer whitespace before sections, keys, and comments.
+        # Do not strip trailing whitespace: it can change the parsed key/value.
+        line = line.lstrip(' \t')
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('['):
+            match = section_pattern.fullmatch(line)
+            if not match or not match.group(1):
+                return None, dict(result, reason='invalid-config', blocked_settings=1)
+            section = match.group(1)
+            continue
+        if '=' not in line:
+            return None, dict(result, reason='invalid-config', blocked_settings=1)
+        key, value = line.split('=', 1)
+        if not key_pattern.fullmatch(key) or not key:
+            return None, dict(result, reason='invalid-config', blocked_settings=1)
+        records.append((section, key, value))
+
+    occurrences = {key: [] for key in OBS_USER_BOOLEAN_SETTINGS}
+    unknown_count = 0
+    for current_section, key, value in records:
+        folded = ((current_section or '').casefold(), key.casefold())
+        canonical = OBS_USER_FOLDED_KEYS.get(folded)
+        if canonical is None:
+            unknown_count += 1
+            continue
+        occurrences[canonical].append((current_section, key, value))
+    if unknown_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'unmapped-or-sensitive-setting',
+                                    'count': unknown_count})
+
+    accepted = {}
+    blocked_count = unknown_count
+    for (expected_section, expected_key), display_key in sorted(
+            OBS_USER_BOOLEAN_SETTINGS.items()):
+        values = occurrences[(expected_section, expected_key)]
+        if not values:
+            continue
+        decision = {'key': display_key}
+        if len(values) != 1:
+            decision.update(status='blocked', reason='duplicate-setting',
+                            count=len(values))
+            blocked_count += len(values)
+        else:
+            actual_section, actual_key, value = values[0]
+            if (actual_section, actual_key) != (expected_section, expected_key):
+                decision.update(status='blocked', reason='noncanonical-key-name',
+                                count=1)
+                blocked_count += 1
+            elif value not in ('true', 'false'):
+                decision.update(status='blocked', reason='unsupported-value',
+                                count=1)
+                blocked_count += 1
+            else:
+                accepted[(expected_section, expected_key)] = value
+                decision.update(status='retained',
+                                reason='documented-shared-ui-preference')
+        result['decisions'].append(decision)
+
+    result['accepted_settings'] = len(accepted)
+    result['blocked_settings'] = blocked_count
+    if not accepted:
+        return None, dict(result, reason='no-supported-settings')
+
+    lines = []
     current_section = None
     for section_key in sorted(accepted):
         current, key = section_key

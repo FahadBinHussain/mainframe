@@ -20,6 +20,7 @@ from zipfile import BadZipFile, ZipFile
 
 from linux_migrations import (MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config,
                               convert_flameshot_config, convert_mpv_config,
+                              convert_obs_user_config,
                               convert_qbittorrent_config, convert_yt_dlp_config)
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
@@ -121,7 +122,9 @@ def classify(path, archive=''):
     if low.startswith(('native/', 'winget-persist/')):
         return 'blocked', 'AnyDesk/Directory Opus or other native Windows state requires app-specific identity/config migration.', None
     if low.startswith('obs-studio/'):
-        return 'native-staging', 'OBS export needs source paths, devices, encoders, and plugins relinked.', '.config/obs-studio/' + path.split('/', 1)[1]
+        if path == 'obs-studio/user.ini':
+            return 'native-staging', 'Exact raw OBS user.ini candidate; conversion is separately allowlisted.', '.config/obs-studio/user.ini'
+        return 'blocked', 'Unreviewed OBS profile, scene, output, path, device, plugin, and account data remains raw-only.', None
     if low.startswith('qbittorrent/'):
         if path == 'qbittorrent/config/qBittorrent.ini':
             return 'native-staging', 'Exact raw qBittorrent profile config candidate; conversion is separately allowlisted.', '.config/qBittorrent/qBittorrent.ini'
@@ -396,6 +399,8 @@ def stage_conversions(report, destination):
                 output, audit = convert_yt_dlp_config(payload)
             elif mapping['adapter'] == 'qbittorrent-portable-preferences-v1':
                 output, audit = convert_qbittorrent_config(payload)
+            elif mapping['adapter'] == 'obs-portable-user-preferences-v1':
+                output, audit = convert_obs_user_config(payload)
             elif mapping['adapter'] == 'flameshot-portable-preferences-v1':
                 output, audit = convert_flameshot_config(payload)
             else:
@@ -508,6 +513,7 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                             and e.get('normalized_path') in {
                                 'quick-persist/flameshot/flameshot.ini',
                                 'qbittorrent/config/qBittorrent.ini',
+                                'obs-studio/user.ini',
                             })
                         if (apply_portable and e.get('native_target')
                                 and not suppress_raw_converter_candidate):

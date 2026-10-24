@@ -65,7 +65,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `x64dbg` | Blocked | Windows debugger state/plugins have no native Linux runtime. |
 | `yt-dlp` | Exact config candidate plus bounded config converter | Only `yt-dlp.conf` may be copied under `.config/yt-dlp/` as an unconverted candidate; `--convert-portable` can emit one documented error-policy option to `.config/yt-dlp/config`. Scoop plugin directories and all other unreviewed persist paths remain raw-only; executable/package, JavaScript runtime, plugin, and runtime behavior are unverified. |
 
-Additional quick-archive data has explicit handling: the exact Flameshot config above is the only Flameshot path eligible for candidate staging or conversion; OBS exports remain candidates under `.config/obs-studio/`. qBittorrent conversion reads only `qbittorrent/config/qBittorrent.ini` and emits the six-key subset described below to `.config/qBittorrent/qBittorrent.conf`. `--apply-portable` alone may stage that exact source as an unconverted `.ini` candidate; when conversion is also requested, the raw candidate is not staged. All other qBittorrent paths, including `data/BT_backup` torrent and fast-resume files, remain raw-only. These targets are not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
+Additional quick-archive data has explicit handling: Flameshot is limited to its exact config candidate/converter; qBittorrent reads only `qbittorrent/config/qBittorrent.ini` and emits the six-key subset below. OBS reads only exact `obs-studio/user.ini`: `--apply-portable` alone stages that file as an unconverted `.config/obs-studio/user.ini` candidate, while `--convert-portable` emits four shared UI/exit-confirmation booleans. All other OBS and qBittorrent paths, including OBS profiles/scenes and qBittorrent torrent/fast-resume data, remain raw-only. The candidate targets are default layouts, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
 
 ## Implemented conversion map: Git portable settings v1
 
@@ -314,6 +314,66 @@ pre-existing output targets block conversion without overwriting; no application
 is installed, launched, or activated. The source package version, target runtime,
 full profile behavior, and operational equivalence remain unverified.
 
+## Implemented conversion map: OBS Studio user preferences v1
+
+The tracked [backup script](../backup.ps1#L591-L601) copies the Scoop OBS config
+root to the quick-archive member tree `obs-studio/`; the [restore script](../restore.ps1#L1272-L1285)
+puts that tree back under the Windows Scoop persist config root. Only the exact
+member `obs-studio/user.ini` is eligible. The [OBS upstream application source](https://github.com/obsproject/obs-studio/blob/master/frontend/OBSApp.cpp#L638-L650)
+opens `obs-studio/user.ini` under its user-config location. The platform helpers
+use the Windows AppData config root and default Linux `$XDG_CONFIG_HOME` or
+`$HOME/.config` root ([Windows](https://github.com/obsproject/obs-studio/blob/master/libobs/util/platform-windows.c#L435-L443),
+[Linux](https://github.com/obsproject/obs-studio/blob/master/libobs/util/platform-nix.c#L226-L249)).
+The offline target is the default `home-staging/.config/obs-studio/user.ini`;
+custom XDG roots and `Locations` overrides from `global.ini` are not translated.
+
+Current upstream [`InitUserConfigDefaults`](https://github.com/obsproject/obs-studio/blob/master/frontend/OBSApp.cpp#L376-L413)
+defines the four allowlisted booleans in shared frontend code. The
+[main-window implementation](https://github.com/obsproject/obs-studio/blob/master/frontend/widgets/OBSBasic.cpp#L974-L1022)
+and [settings implementation](https://github.com/obsproject/obs-studio/blob/master/frontend/settings/OBSBasicSettings.cpp#L1330-L1334)
+read or write these UI preferences. The [profile guide](https://obsproject.com/kb/profiles)
+shows why OBS profiles are not generic UI settings: they include output-oriented
+configuration. The [portable-mode guide](https://obsproject.com/kb/portable-mode)
+warns that scene media paths are not portable and need manual relocation.
+
+| Exact `user.ini` key | Accepted value | Evidence-backed behavior |
+|---|---|---|
+| `[General] ConfirmOnExit` | Literal lowercase `true` or `false` | Shared prompt preference when closing with active output. |
+| `[BasicWindow] PreviewEnabled` | Literal lowercase `true` or `false` | Shared preview-pane visibility preference. |
+| `[BasicWindow] SnappingEnabled` | Literal lowercase `true` or `false` | Shared canvas-editing snapping preference. |
+| `[BasicWindow] ShowStatusBar` | Literal lowercase `true` or `false` | Shared status-bar visibility preference. |
+
+The converter follows the upstream parser's leading ASCII space/tab handling
+before section and key records, accepts one leading UTF-8 BOM (Windows OBS writes
+one), and emits only exact lowercase boolean literals. It deliberately rejects
+trailing/inline whitespace, escaped values, malformed records, and noncanonical
+values rather than normalizing them ([parser and escape handling](https://github.com/obsproject/obs-studio/blob/master/libobs/util/config-file.c#L90-L201),
+[serializer and Windows BOM writer](https://github.com/obsproject/obs-studio/blob/master/libobs/util/config-file.c#L331-L383),
+[boolean writer](https://github.com/obsproject/obs-studio/blob/master/libobs/util/config-file.c#L575-L579),
+[UTF-8 reader](https://github.com/obsproject/obs-studio/blob/master/libobs/util/platform.c#L168-L212)).
+It writes only these unique exact-case keys as a deterministic Linux `user.ini`.
+Duplicate and case-fold-equivalent keys are blocked, as are unknown keys/sections.
+Blocker decisions contain fixed reason/status codes and counts, plus canonical
+names only for supported keys; they never echo unknown config key names or values.
+Successful-conversion audit also records the fixed staged target and output hash/size.
+The local `restore-manifest.json` separately retains archive member paths for
+traceability; those source filenames are metadata, not converted settings.
+
+`global.ini` and its custom location overrides, profiles, scene collections,
+output/streaming/encoder state, device and OS-specific paths, plugins, browser or
+WebSocket/auth data, hotkeys, tray/startup behavior, auto-record flags, themes,
+and every other OBS member remain raw-only. The [themes guide](https://obsproject.com/kb/themes-guide)
+notes that the System theme follows the operating system and custom themes are
+separate files, so neither theme IDs nor theme assets are copied. The exact raw
+`user.ini` may be staged only as an **unconverted candidate** when
+`--apply-portable` is requested alone; that candidate can contain unsupported
+fields. With `--convert-portable`, the raw candidate is suppressed and only the
+four-setting output is staged; original archive bytes remain preserved under
+`recovered/`. Source/target collisions block without overwriting. Nothing is
+installed, launched, checked with an OBS executable, or activated. Custom config
+locations, version compatibility, full settings behavior, and operational
+equivalence remain unverified.
+
 ## Source action coverage
 
 This table records the actual source actions, not hypothetical Linux work. Windows actions remain reference evidence; Linux actions are limited to the checked-in planner/recovery behavior.
@@ -345,7 +405,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Shortcuts and running processes | Windows package-manager hooks may create shell integration. The restore explicitly launches Edge during extension recovery, stops AnyDesk/Directory Opus processes for persist copying, and restarts processes that were previously running. Linux recovery does not activate `.lnk`, launch browsers, stop/restart apps, or infer startup services. A separately authorized AnyDesk DEB installation may start its vendor service; no Windows service-state migration is implied. |
 | Scheduled tasks | Windows exports only explicitly selected task XML (the default selection is empty). Linux preserves selected XML as documentation; no trigger, credential, SID, timezone, or action is converted to systemd/cron. |
 | Registry and associations | Windows exports user environment/PATH, mpv context-menu, qBittorrent, VLC, and 7-Zip association `.reg` files. The number and contents of association exports are determined from each supplied archive, not a release-specific baseline. Linux retains them as text/reference only; it does not import registry keys or shell verbs. |
-| OBS | Windows copies scenes/profiles/config while excluding caches, logs, and crashes. Linux exposes only the `.config/obs-studio/` candidate; paths, devices, encoders, plugins, and client versions need review. |
+| OBS | Windows copies the OBS config root while excluding caches, logs, and crashes. Linux recognizes only exact `obs-studio/user.ini`: an unconverted candidate or a four-boolean offline subset. Profiles, scenes, `global.ini`, output/auth, paths, devices, plugins, and all other members remain raw-only; custom XDG/`Locations` paths, version behavior, and operational equivalence are unverified. |
 | qBittorrent | Windows exports a custom profile. Linux converts only the six shared booleans above; the raw config candidate is explicit and unconverted, while paths, WebUI/auth, proxy/SMTP, scripts, OS-specific settings, torrent files, and fast-resume data remain raw-only. Package/runtime version and operational equivalence are unverified. |
 | Browser and account state | Edge/profile and account material may be preserved as opaque bytes or metadata, but DPAPI/app-bound encryption, Secure Preferences, credentials, and Windows identity are not activated. SSH gets a candidate `.ssh` relative export with permission remediation; auth still requires review/re-authentication. |
 | Short-lived setup | `boot.sh --setup-tools` installs only the four prerequisites and clones the public source checkout. It does not run any restore action. |

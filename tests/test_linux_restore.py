@@ -69,11 +69,18 @@ class LinuxRestoreTests(unittest.TestCase):
             self.assertNotEqual(lr.classify('persist/' + app + '/settings.ini')[0], 'unknown')
 
     def test_native_targets_and_offline_only(self):
-        self.archive([('UserProfile/.ssh/id_fixture', b'key-fixture'), ('obs-studio/basic/scenes/a.json', b'{}'), ('quick-persist/flameshot/flameshot.ini', b'[General]')])
+        self.archive([('UserProfile/.ssh/id_fixture', b'key-fixture'),
+                      ('obs-studio/user.ini', b'[General]\nConfirmOnExit=false\n'),
+                      ('obs-studio/basic/scenes/a.json', b'{}'),
+                      ('quick-persist/flameshot/flameshot.ini', b'[General]')])
         report = self.recover(True)
         self.assertFalse(report['errors'])
         self.assertTrue((self.dest / 'home-staging/.ssh/id_fixture').exists())
-        self.assertTrue((self.dest / 'home-staging/.config/obs-studio/basic/scenes/a.json').exists())
+        self.assertTrue((self.dest / 'home-staging/.config/obs-studio/user.ini').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/basic/scenes/a.json').exists())
+        obs_scene = next(e for e in report['entries']
+                         if e['normalized_path'] == 'obs-studio/basic/scenes/a.json')
+        self.assertEqual(obs_scene['category'], 'blocked')
         self.assertTrue((self.dest / 'home-staging/.config/flameshot/flameshot.ini').exists())
         self.assertEqual(report['operational_status'], 'incomplete')
 

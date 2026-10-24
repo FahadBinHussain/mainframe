@@ -130,11 +130,13 @@ The source file and original ZIP remain unchanged; the archive does not establis
 that the Linux package version or runtime behavior matches. `mpv-git` remains a
 version/fork candidate, not a supported package substitution.
 
-For both adapters, unsupported values, duplicate keys, malformed inputs, and
-competing source/target paths are reported without echoing private values; no
-supported settings means no generated file. Conversion remains opt-in, offline,
-review-required, and separate from activation or package installation. See the
-[coverage map](docs/linux-restore-coverage.md) for evidence and remaining gaps.
+Adapter blocker/migration decisions represent unsupported values, duplicate keys,
+malformed inputs, and source/target conflicts with reason/count data, without
+echoing config values or unknown setting names. The local `restore-manifest.json`
+separately retains archive member paths for traceability. No supported settings
+means no converted file. Conversion remains opt-in, offline, review-required, and
+separate from activation or package installation. See the [coverage map](docs/linux-restore-coverage.md)
+for evidence and remaining gaps.
 
 `--convert-portable` requires `--recover`; it can be combined with
 `--apply-portable` but neither implies the other. `conversion_counts` records
