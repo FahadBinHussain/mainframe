@@ -126,7 +126,7 @@ function Get-WacliVssInputs {
     }
 
     if ($candidates.Count -eq 0) {
-        return [pscustomobject]@{ HasState = $false; ProfileRoot = $profileRoot; Roots = @(); MetadataFiles = @() }
+        return [pscustomobject]@{ HasState = $false; ProfileRoot = $profileRoot; Roots = @(); MetadataFiles = @(); MediaReferenceCoverage = 'not-applicable' }
     }
 
     # Collapse nested/duplicate roots only after all referenced roots have been
@@ -161,6 +161,9 @@ function Get-WacliVssInputs {
         ProfileRoot = $profileRoot
         Roots = $indexed
         MetadataFiles = @($metadataFiles)
+        # The supported metadata has no contract proving that SQLite-only media
+        # references are fully represented by the enumerated roots.
+        MediaReferenceCoverage = 'unproven'
     }
 }
 
@@ -197,6 +200,10 @@ function Invoke-WacliVssCopy {
 
     if (-not $Inputs.HasState -or @($Inputs.Roots).Count -eq 0) {
         throw 'WACLI VSS copy was requested without any enumerated source roots.'
+    }
+    $coverageProperty = $Inputs.PSObject.Properties['MediaReferenceCoverage']
+    if (-not $coverageProperty -or [string]$coverageProperty.Value -ne 'proven-complete') {
+        throw 'WACLI VSS backup is blocked: external-media completeness is unproven. Supported profile metadata cannot enumerate every media path referenced only inside SQLite, and database inspection is unsupported; no WACLI payload will be produced.'
     }
     if (Test-Path -LiteralPath $DestinationRoot) {
         throw 'WACLI VSS destination already exists; refusing to overwrite it.'
