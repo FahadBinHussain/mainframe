@@ -345,6 +345,31 @@ class LinuxRestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'limit'):
             lr.stream_copy(io.BytesIO(b'larger than declared'), self.root / 'bounded', limit=3)
 
+    def test_file_association_registry_exports_remain_raw_only(self):
+        members = [
+            ('qb-assoc-torrent.reg', b'synthetic-association-fixture'),
+            ('qb-assoc-magnet.reg', b'synthetic-association-fixture'),
+            ('vlc-assoc-mp4.reg', b'synthetic-association-fixture'),
+            ('7z-assoc-zip.reg', b'synthetic-association-fixture'),
+        ]
+        self.archive(members)
+        original = (self.backup / 'mainframe-quick.zip').read_bytes()
+        report = lr.copy_recovery(
+            self.backup, self.dest, apply_portable=True,
+            manifest_path=self.manifest, mode='quick', convert_portable=True)
+        self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
+        self.assertEqual(
+            (self.dest / 'raw-archives/mainframe-quick.zip').read_bytes(), original)
+        entries = {entry['normalized_path']: entry for entry in report['entries']}
+        self.assertEqual(set(entries), {name for name, _ in members})
+        self.assertTrue(all(entry['category'] == 'blocked' for entry in entries.values()))
+        self.assertTrue(all(entry['status'] == 'bytes-preserved' for entry in entries.values()))
+        for name, payload in members:
+            self.assertEqual(
+                (self.dest / 'recovered/mainframe-quick.zip' / name).read_bytes(), payload)
+        self.assertFalse((self.dest / 'home-staging/.config/mimeapps.list').exists())
+        self.assertFalse(any((self.dest / 'home-staging').iterdir()))
+
     def test_cli_status_and_option_guards(self):
         self.archive([('x', b'x')])
         command = [sys.executable, str(Path(lr.__file__)), str(self.backup), '--mode', 'quick', '--manifest', str(self.manifest)]

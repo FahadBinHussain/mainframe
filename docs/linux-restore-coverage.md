@@ -420,6 +420,50 @@ no supported value means no generated file. Exact export encoding, less/systemd
 versions, terminal behavior, session propagation, package installation, and
 operational equivalence remain unverified.
 
+## File-association exports: raw-only blocker
+
+The tracked [Windows backup code](../backup.ps1#L870-L960) writes the qBittorrent
+members `qb-assoc-torrent.reg`, `qb-assoc-torrentclass.reg`,
+`qb-assoc-magnet.reg`, and `qb-assoc-urlhandler.reg`; it also exports
+`vlc-assoc-<extension-with-leading-dot-replaced-by-hyphen>.reg` plus
+`vlc-assoc-media.reg`, and
+`7z-assoc-<extension-with-leading-dot-replaced-by-hyphen>.reg` plus
+`7z-assoc-archive.reg`. They are root members of
+`mainframe-quick.zip`, not portable app configs. Linux classifies `.reg` files as
+blocked: the original ZIP is retained byte-for-byte and safe member bytes are
+materialized verbatim under `recovered/`; they are never parsed, staged, or
+imported.
+
+These exports capture selected `HKCU\Software\Classes` keys, but the tracked
+backup does not export an explicit selected-default record such as `UserChoice`
+or default-association XML. Microsoft's [ProgID documentation](https://learn.microsoft.com/en-us/windows/win32/shell/fa-progids)
+describes registry entries associating file types with applications and
+controlling association behavior; that is not enough evidence to recover the
+user's selected default. In contrast, the
+freedesktop [MIME Apps specification](https://specifications.freedesktop.org/mime-apps/latest-single/)
+defines `[Default Applications]` in `mimeapps.list` as the Linux user's default
+handler preference, and requires a valid desktop file associated with the MIME
+type.
+
+The current [qBittorrent Windows installer](https://raw.githubusercontent.com/qbittorrent/qBittorrent/master/dist/windows/installer.nsh)
+registers `qBittorrent.File.Torrent` and `qBittorrent.Url.Magnet` under
+`HKLM\Software\Classes`; Mainframe exports different per-user class names
+(`qBittorrent.Torrent` and `qBittorrentURLHandler`). No authoritative alias
+between those identifiers and the current upstream registration was established.
+The upstream [Linux desktop entry](https://github.com/qbittorrent/qBittorrent/blob/master/dist/unix/org.qbittorrent.qBittorrent.desktop)
+does declare torrent and magnet MIME/scheme support, but that does not prove the
+Windows handler selected by the user. VLC's extension list has no verified
+one-to-one MIME map here; the [shared-mime-info specification](https://specifications.freedesktop.org/shared-mime-info/latest-single)
+allows conflicting filename-glob matches, so suffixes alone are not a safe
+converter input. A 7-Zip Linux desktop handler ID is likewise not established in
+this migration map.
+
+Therefore no association `mimeapps.list` is generated. qBittorrent, VLC, and
+7-Zip association exports remain raw-only with no commands, paths, registry verbs,
+or unknown identifiers applied. Revisit only when the backup records selected
+association intent and each target desktop ID/MIME contract is validated. This is
+a blocker, not an operational-equivalence claim.
+
 ## Source action coverage
 
 This table records the actual source actions, not hypothetical Linux work. Windows actions remain reference evidence; Linux actions are limited to the checked-in planner/recovery behavior.
@@ -435,6 +479,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Flameshot configuration | Opt-in exact quick-persist adapter above; only `showHelp`, three color settings, and bounded `contrastOpacity` can be emitted. Unsupported fields remain only in the preserved original with sanitized counts; no installation, app validation, or activation occurs. |
 | qBittorrent configuration and torrent metadata | Windows exports a custom profile including config and WebUI state but excludes downloads. Linux emits only six shared booleans from the exact config source; the optional raw `.ini` candidate is never labeled converted, and all other profile fields plus `data/BT_backup` remain raw-only. No installation or activation. |
 | User environment (`user-env.reg`) | Opt-in exact-source adapter emits only one literal `LESS` setting with canonical `-F`/`-R`/`-X` combinations to an offline systemd `environment.d` candidate. Encoding is not specified by Microsoft export docs; only strict UTF-16LE-BOM Registry Editor V5 is parsed. `PATH`, expanded values, credentials, commands, unknown variables/types, and unsupported encodings remain raw-only; no registry import, manager update, or activation occurs. |
+| Windows file-association exports | qBittorrent, VLC, and 7-Zip `*-assoc-*.reg` members are preserved byte-for-byte in the verified quick ZIP and materialized verbatim under `recovered/`. No selected-default source or complete target-handler map is established; no XDG `mimeapps.list` is generated and no registry value, command, path, or verb is imported. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Only `AnyDesk.AnyDesk` package intent is covered by native `anydesk`; other WinGet IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
