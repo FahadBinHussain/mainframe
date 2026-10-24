@@ -417,6 +417,133 @@ TAKE_SCREENSHOT=SYNTHETIC_SHORTCUT_MARKER
                 self.assertNotIn('SYNTHETIC_PATH', json.dumps(result))
 
 
+class OBSAdapterTests(unittest.TestCase):
+    def convert(self, text):
+        payload = text if isinstance(text, bytes) else text.encode('utf-8')
+        return lm.convert_obs_user_config(payload)
+
+    def test_shared_ui_preferences_emit_deterministic_bom_free_user_ini(self):
+        config = (b'\xef\xbb\xbf[General]\r\nConfirmOnExit=false\r\n'
+                  b'[BasicWindow]\r\nShowStatusBar=true\r\n'
+                  b'SnappingEnabled=true\r\nPreviewEnabled=false\r\n')
+        first = self.convert(config)
+        self.assertEqual(first, self.convert(config))
+        output, result = first
+        self.assertEqual(
+            output,
+            b'[BasicWindow]\nPreviewEnabled=false\nShowStatusBar=true\n'
+            b'SnappingEnabled=true\n\n[General]\nConfirmOnExit=false\n')
+        self.assertNotIn(b'\r', output)
+        self.assertNotIn(b'\xef\xbb\xbf', output)
+        self.assertEqual(result['adapter'], 'obs-portable-user-preferences-v1')
+        self.assertEqual(result['status'], 'converted-subset')
+        self.assertEqual(result['accepted_settings'], 4)
+        self.assertEqual(result['blocked_settings'], 0)
+        self.assertEqual(result['activation'], 'not-performed')
+
+    def test_upstream_leading_ascii_whitespace_is_supported(self):
+        config = (b'  # synthetic comment before first section\n'
+                  b' \t[General]\n \tConfirmOnExit=true\n'
+                  b'\t[BasicWindow]\n  PreviewEnabled=false\n')
+        output, result = self.convert(config)
+        self.assertEqual(output, b'[BasicWindow]\nPreviewEnabled=false\n\n'
+                         b'[General]\nConfirmOnExit=true\n')
+        self.assertEqual(result['accepted_settings'], 2)
+        self.assertEqual(result['blocked_settings'], 0)
+
+    def test_paths_auth_browser_scripts_os_features_and_unknowns_are_raw_only(self):
+        markers = ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_CREDENTIAL_MARKER',
+                   'SYNTHETIC_BROWSER_MARKER', 'SYNTHETIC_SCRIPT_MARKER',
+                   'SYNTHETIC_IDENTIFIER')
+        config = r'''[General]
+ConfirmOnExit=false
+ProcessPriority=High
+[BasicWindow]
+PreviewEnabled=true
+SysTrayEnabled=false
+RecordWhenStreaming=true
+[Locations]
+Profiles=C:\Users\Fixture\SYNTHETIC_WINDOWS_PATH
+[WebsocketServer]
+ServerPassword=SYNTHETIC_CREDENTIAL_MARKER
+[BrowserSource]
+Url=https://SYNTHETIC_BROWSER_MARKER.invalid/
+[Scripts]
+LuaScript=SYNTHETIC_SCRIPT_MARKER
+[Custom]
+Name=SYNTHETIC_IDENTIFIER
+'''
+        output, result = self.convert(config)
+        self.assertEqual(output,
+                         b'[BasicWindow]\nPreviewEnabled=true\n\n'
+                         b'[General]\nConfirmOnExit=false\n')
+        self.assertEqual(result['accepted_settings'], 2)
+        self.assertEqual(result['blocked_settings'], 8)
+        serialized = json.dumps(result)
+        for marker in markers:
+            self.assertNotIn(marker, serialized)
+            self.assertNotIn(marker.encode(), output)
+        self.assertNotIn('C:\\\\Users', serialized)
+        self.assertNotIn('ServerPassword', serialized)
+        for unknown_key in ('ProcessPriority', 'SysTrayEnabled', 'RecordWhenStreaming',
+                            'Profiles', 'Url', 'LuaScript', 'Name'):
+            self.assertNotIn(unknown_key, serialized)
+
+    def test_duplicate_casefold_alias_and_noncanonical_boolean_are_blocked(self):
+        config = (b'[General]\nConfirmOnExit=true\nConfirmOnExit=false\n'
+                  b'[basicwindow]\npreviewenabled=true\n'
+                  b'[BasicWindow]\nSnappingEnabled=1\nShowStatusBar=false\n')
+        output, result = self.convert(config)
+        self.assertEqual(output, b'[BasicWindow]\nShowStatusBar=false\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 4)
+        serialized = json.dumps(result)
+        self.assertIn('duplicate-setting', serialized)
+        self.assertIn('noncanonical-key-name', serialized)
+        self.assertIn('unsupported-value', serialized)
+        self.assertNotIn('previewenabled', serialized)
+        self.assertNotIn('=1', serialized)
+
+        output, result = self.convert(b'[basicwindow]\npreviewenabled=true\n')
+        self.assertIsNone(output)
+        self.assertEqual(result['reason'], 'no-supported-settings')
+        self.assertEqual(result['blocked_settings'], 1)
+
+    def test_repeated_sections_do_not_select_a_duplicate_setting_winner(self):
+        config = (b'[General]\nConfirmOnExit=true\n'
+                  b'[BasicWindow]\nPreviewEnabled=false\n'
+                  b'[General]\nConfirmOnExit=false\n')
+        output, result = self.convert(config)
+        self.assertEqual(output, b'[BasicWindow]\nPreviewEnabled=false\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 2)
+        self.assertIn('duplicate-setting', json.dumps(result))
+
+    def test_malformed_encoding_controls_and_oversized_inputs_are_sanitized(self):
+        for payload, reason in (
+                (b'\xff', 'invalid-config'),
+                (b'\xef\xbb\xbf\xef\xbb\xbf[General]\nConfirmOnExit=true\n',
+                 'invalid-config'),
+                (b'[General]\x00ConfirmOnExit=true\n', 'invalid-config'),
+                (b'[General\nConfirmOnExit=true\n', 'invalid-config'),
+                (b'C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH\n', 'invalid-config'),
+                (b'[General]\xe2\x80\xa8ConfirmOnExit=true\n', 'invalid-config'),
+                (b'[General ]\nConfirmOnExit=false\n', 'no-supported-settings'),
+                (b'[General]\nConfirmOnExit =false\n', 'no-supported-settings'),
+                (b'[General]\nConfirmOnExit= false\n', 'no-supported-settings'),
+                (b'[General]\nConfirmOnExit=tr\\ue\n', 'no-supported-settings'),
+                (b'[General]\nConfirmOnExit=yes\n', 'no-supported-settings'),
+                (b'[General]\nConfirmOnExit=' + b'9' * 10000,
+                 'no-supported-settings'),
+                (b'x' * (lm.MAX_CONFIG_BYTES + 1), 'config-size-limit')):
+            with self.subTest(reason=reason):
+                output, result = lm.convert_obs_user_config(payload)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], reason)
+                self.assertGreaterEqual(result['blocked_settings'], 1)
+                self.assertNotIn('SYNTHETIC_WINDOWS_PATH', json.dumps(result))
+
+
 class QBittorrentAdapterTests(unittest.TestCase):
     HEADER = (b'; Bounded qBittorrent preferences generated offline; '
               b'original profile is preserved separately.\n')
@@ -1284,6 +1411,175 @@ class QBittorrentMigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
                          b'[Preferences]\nGeneral\\ExitConfirm=true\n')
+
+
+class OBSUserIniMigrationRecoveryTests(unittest.TestCase):
+    SOURCE = 'obs-studio/user.ini'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.backup = self.root / 'backup'
+        self.backup.mkdir()
+        self.dest = self.root / 'offline'
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text('{"items": []}')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def archive(self, name, members):
+        with ZipFile(self.backup / name, 'w') as archive:
+            for key, payload in members:
+                archive.writestr(key, payload)
+
+    def recover(self, **kwargs):
+        return lr.copy_recovery(self.backup, self.dest,
+                                manifest_path=self.manifest,
+                                mode=kwargs.pop('mode', 'full'), **kwargs)
+
+    def test_exact_user_ini_converts_allowlist_preserves_bytes_and_blocks_profiles(self):
+        config = (b'\xef\xbb\xbf[General]\r\nConfirmOnExit=false\r\n'
+                  b'ProcessPriority=High\r\n[BasicWindow]\r\n'
+                  b'PreviewEnabled=true\r\nSysTrayEnabled=false\r\n'
+                  b'[Custom]\r\nName=SYNTHETIC_IDENTIFIER\r\n')
+        self.archive('mainframe-quick.zip', [
+            (self.SOURCE, config),
+            ('obs-studio/global.ini',
+             b'[Locations]\nConfiguration=C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH\n'),
+            ('obs-studio/basic/profiles/profile-fixture/basic.ini',
+             b'[Output]\nServer=SYNTHETIC_SERVER_MARKER\nKey=SYNTHETIC_CREDENTIAL_MARKER\n'),
+            ('obs-studio/basic/scenes/SYNTHETIC_SCENE.json',
+             b'{"path":"C:\\\\Users\\\\Fixture\\\\SYNTHETIC_SCENE_PATH"}'),
+            ('obs-studio/plugin_config/SYNTHETIC_PLUGIN/config.ini',
+             b'Command=SYNTHETIC_SCRIPT_MARKER\n'),
+        ])
+        self.archive('mainframe-persist.zip', [])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}):
+            report = self.recover(apply_portable=True, convert_portable=True)
+
+        converted = self.dest / 'home-staging/.config/obs-studio/user.ini'
+        recovered = self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE
+        self.assertEqual(converted.read_bytes(),
+                         b'[BasicWindow]\nPreviewEnabled=true\n\n'
+                         b'[General]\nConfirmOnExit=false\n')
+        self.assertEqual(recovered.read_bytes(), config)
+        self.assertEqual(lr.file_hash(self.dest / 'raw-archives/mainframe-quick.zip'),
+                         lr.file_hash(self.backup / 'mainframe-quick.zip'))
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/global.ini').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/basic').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/plugin_config').exists())
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['accepted_settings'], 2)
+        self.assertEqual(entry['migration']['blocked_settings'], 3)
+        migration_audit = json.dumps(entry['migration'])
+        self.assertEqual(report['conversion_counts'], {'converted-subset': 1})
+        self.assertEqual(report['activation_status'], 'not-performed')
+        self.assertEqual(report['operational_status'], 'incomplete')
+        serialized = json.dumps(report)
+        for marker in ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_IDENTIFIER',
+                       'SYNTHETIC_SERVER_MARKER', 'SYNTHETIC_CREDENTIAL_MARKER',
+                       'SYNTHETIC_SCENE_PATH', 'SYNTHETIC_SCRIPT_MARKER'):
+            self.assertNotIn(marker, serialized)
+            self.assertNotIn(marker, migration_audit)
+            self.assertNotIn(marker.encode(), converted.read_bytes())
+        for unknown_key in ('ProcessPriority', 'SysTrayEnabled', 'ServerPassword',
+                            'Url', 'LuaScript', 'Name'):
+            self.assertNotIn(unknown_key, migration_audit)
+        for suffix in ('global.ini', 'basic.ini', 'SYNTHETIC_SCENE.json', 'config.ini'):
+            item = next(e for e in report['entries']
+                        if e['normalized_path'].endswith(suffix))
+            self.assertEqual(item['category'], 'blocked')
+
+    def test_only_exact_user_ini_can_be_staged_as_an_unconverted_candidate(self):
+        config = (b'[General]\nConfirmOnExit=false\n'
+                  b'[Locations]\nProfiles=C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH\n')
+        self.archive('mainframe-quick.zip', [
+            (self.SOURCE, config),
+            ('obs-studio/basic/scenes/scene.json', b'SYNTHETIC_SCENE_PAYLOAD'),
+        ])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}), \
+                patch.object(lr, 'convert_obs_user_config',
+                             side_effect=AssertionError('candidate copy must not convert')):
+            report = self.recover(mode='quick', apply_portable=True)
+
+        candidate = self.dest / 'home-staging/.config/obs-studio/user.ini'
+        self.assertEqual(candidate.read_bytes(), config)
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/USER.ini').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/basic').exists())
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        self.assertEqual(report['conversion_status'], 'not-requested')
+        self.assertNotIn('SYNTHETIC_WINDOWS_PATH', json.dumps(report))
+        for suffix in ('scene.json',):
+            item = next(e for e in report['entries']
+                        if e['normalized_path'].endswith(suffix))
+            self.assertEqual(item['category'], 'blocked')
+
+    def test_nonexact_user_ini_never_reaches_adapter_or_staging(self):
+        alias = 'obs-studio/USER.ini'
+        self.archive('mainframe-quick.zip', [
+            (alias, b'[General]\nConfirmOnExit=true\n'),
+            ('obs-studio/basic/scenes/scene.json', b'SYNTHETIC_SCENE_PAYLOAD'),
+        ])
+        with patch.object(lr, 'convert_obs_user_config',
+                          side_effect=AssertionError('nonexact source must not parse')):
+            report = self.recover(mode='quick', apply_portable=True,
+                                  convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all(e['category'] == 'blocked' for e in report['entries']))
+
+    def test_duplicate_quick_and_full_sources_have_no_winner(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE,
+                    b'[General]\nConfirmOnExit=true\n')])
+        self.archive('mainframe-persist.zip', [(self.SOURCE,
+                    b'[General]\nConfirmOnExit=false\n')])
+        with patch.object(lr, 'convert_obs_user_config',
+                          side_effect=AssertionError('duplicate source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/user.ini').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 2})
+        entries = [e for e in report['entries'] if e['normalized_path'] == self.SOURCE]
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
+                            for e in entries))
+
+    def test_casefold_source_alias_blocks_exact_source_without_parsing_alias(self):
+        alias = 'OBS-STUDIO/USER.INI'
+        self.archive('mainframe-quick.zip', [(self.SOURCE,
+                    b'[General]\nConfirmOnExit=true\n')])
+        self.archive('mainframe-persist.zip', [(alias,
+                    b'[General]\nConfirmOnExit=false\n')])
+        with patch.object(lr, 'convert_obs_user_config',
+                          side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/obs-studio/user.ini').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
+
+    def test_existing_output_is_never_overwritten(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE,
+                    b'[General]\nConfirmOnExit=true\n')])
+        report = self.recover(mode='quick')
+        target = self.dest / 'home-staging/.config/obs-studio/user.ini'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'existing synthetic target bytes\n')
+        lr.stage_conversions(report, self.dest)
+        self.assertEqual(target.read_bytes(), b'existing synthetic target bytes\n')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
+                         b'[General]\nConfirmOnExit=true\n')
 
 
 if __name__ == '__main__':
