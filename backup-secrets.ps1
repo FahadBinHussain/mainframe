@@ -39,9 +39,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSScriptRoot 'wacli-vss-backup.psm1') -Force
 
 function Assert-WindowsWhatsappCaptureSafe {
-    param([Parameter(Mandatory)][string]$Source, [string]$Context = 'standalone secret capture')
+    param([Parameter(Mandatory)][string]$Source, [string]$Context = 'standalone secret capture', [string]$VerifiedVssRoot)
     # Windows WhatsApp is a live SQLite tree, not a WACLI migration target.
     # Inspect names only and block unless a consistent snapshot is proven.
     $roots = @()
@@ -52,6 +53,10 @@ function Assert-WindowsWhatsappCaptureSafe {
             Where-Object { $_.Name -ieq 'whatsapp' } | Select-Object -ExpandProperty FullName)
     }
     foreach ($root in $roots) {
+        if ($VerifiedVssRoot -and [string]::Equals([System.IO.Path]::GetFullPath($root).TrimEnd([char[]]@('\', '/')),
+                [System.IO.Path]::GetFullPath($VerifiedVssRoot).TrimEnd([char[]]@('\', '/')), [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
         $sqliteFiles = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop |
             Where-Object { $_.Name -match '(?i)(-wal|-shm|-journal)$|\.(sqlite3?|db)(-wal|-shm|-journal)?$' })
         if ($sqliteFiles.Count -gt 0) {
@@ -164,6 +169,14 @@ New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 
 try {
     $copied = 0
+    $wacliInputs = Get-WacliVssInputs
+    $verifiedWacliRoot = $null
+    if ($wacliInputs.HasState) {
+        Invoke-WacliVssCopy -Inputs $wacliInputs -DestinationRoot (Join-Path $tempRoot 'WacliWindowsVss') -RepositoryRoot $PSScriptRoot | Out-Null
+        if (Test-Path -LiteralPath $wacliInputs.ProfileRoot -PathType Container) {
+            $verifiedWacliRoot = $wacliInputs.ProfileRoot
+        }
+    }
 
     foreach ($item in $items) {
         $source = Resolve-TemplateString -Value $item.Source
@@ -172,12 +185,19 @@ try {
             continue
         }
 
-        Assert-WindowsWhatsappCaptureSafe -Source $source -Context "secret $($item.Name)"
+        $verifiedSourceRoot = $null
+        $accountsRoot = Join-Path (Join-Path $env:APPDATA 'mainframe') 'accounts'
+        if ($verifiedWacliRoot -and [string]::Equals([System.IO.Path]::GetFullPath($source).TrimEnd([char[]]@('\', '/')),
+                [System.IO.Path]::GetFullPath($accountsRoot).TrimEnd([char[]]@('\', '/')), [StringComparison]::OrdinalIgnoreCase)) {
+            $verifiedSourceRoot = $verifiedWacliRoot
+        }
+        Assert-WindowsWhatsappCaptureSafe -Source $source -Context "secret $($item.Name)" -VerifiedVssRoot $verifiedSourceRoot
         $archiveRelativePath = Get-SafeArchivePath -ArchivePath $item.ArchivePath
         $destination = Join-Path $tempRoot $archiveRelativePath
         Write-Host "Copying $($item.Name)..."
         $itemExcludeDirs = @($item.ExcludeDirs)
         $itemExcludeFiles = @($item.ExcludeFiles)
+        if ($verifiedSourceRoot) { $itemExcludeDirs += $verifiedSourceRoot }
         Copy-PathIntoStage -Source $source -Destination $destination -ExcludeDirNames ($ExcludeDirNames + $itemExcludeDirs) -ExcludeFileNames $itemExcludeFiles
         $copied++
         Write-Host "Staged secret path: $($item.Name)"

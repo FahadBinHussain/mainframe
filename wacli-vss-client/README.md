@@ -1,26 +1,20 @@
-# Development-only Windows VSS transaction library
+# Internal Windows VSS WACLI backup-copy helper
 
-**Not an enabled WACLI capture backend.** This isolated library has no public capture command, receipt importer, archive writer or override. All results retain `capture_enabled=false` and `windows_validated=false`. Caller-supplied roots are not proof of complete WACLI membership or a complete producer drain.
+The normal Windows backup scripts invoke `wacli_vss_backup` when supported WACLI profile roots exist. It produces a writerless, crash-consistent copy for the backup archive. It is not a coordinated WACLI application-capture protocol, a guarantee of 100% usable state, or restore activation. No WACLI process is stopped or killed. Results keep `capture_enabled=false` and `windows_validated=false` for those stronger claims.
 
-`probe_volumes` resolves explicitly supplied roots, creates one writerless fixed-membership VSS set, verifies it and deletes the shadows before returning. `stage_snapshot_roots` extends that same transaction: while the **same set remains owned**, inventory every explicit root from its verified shadow volume, copy every supported file into new private staging, compare bytes and inventories, recheck set membership, then release the whole set. There is no live-source copy after snapshot creation, no sequential per-volume fallback, and no partial-set success.
+## One set, all required roots
 
-`ok` means only the requested development transaction and cleanup succeeded. For the copy transaction, `staged_verified=true` additionally means the internal staged tree passed verification before shadow release. It does not mean WACLI application consistency, accepted backup provenance or publishability. Snapshot IDs, root mappings and staging paths are private metadata, not log output.
+The PowerShell wrapper reads supported profile/store JSON metadata only; it never opens or decrypts real SQLite databases. It enumerates the profile tree (including profile `store` and config), metadata `storePath`, legacy `.wacli`, and explicit config/media roots represented in supported metadata. Missing or unavailable required roots fail the backup before any live-copy fallback could occur.
 
-## Ownership and failure rules
+The native helper passes every enumerated root together to one `stage_snapshot_roots` transaction. The requester initializes `VSS_CTX_FILE_SHARE_BACKUP`, starts one fixed-membership set, adds every unique local volume, calls `DoSnapshotSet` once, then inventories and copies every supported member from verified shadow devices while retaining the set. It checks byte contents and inventories, rechecks set membership, closes shadow handles and releases the whole set. It then exports the verified staging tree to the backup payload and checks the exported inventory and bytes again. Nothing reads source contents from live drive paths after snapshot creation. WAL/SHM/journal files and media have no filename exclusions.
 
-The backend is single-use on one COM-initialized thread. The native adapter uses balanced multithreaded COM initialization and strict process security, `InitializeForBackup`, `VSS_CTX_FILE_SHARE_BACKUP`, one `StartSnapshotSet`, all unique canonical local volumes, one `DoSnapshotSet`, bounded status observations, exact `VSS_S_ASYNC_FINISHED`, snapshot properties and whole-set deletion. No writer preparation or `SetBackupState` is used. Existing process COM security is not assumed safe: `RPC_E_TOO_LATE` fails. Individual provider calls may still block despite bounded polling.
+Writerless VSS does not freeze WACLI producers or coordinate databases, metadata and media through an application protocol. SQLite files may therefore be mutually inconsistent despite exact byte copying and successful integrity checks. External media paths that exist only inside a database are not inspected; external roots must be represented in supported profile metadata. Do not claim app consistency, complete producer ownership, guaranteed usability, provenance or a common logical instant across volumes.
 
-The copy seam is internal development code. It first builds the complete inventory for **all explicit shadow roots**, before copying file contents. Missing roots, unsupported entries, incomplete enumeration, read/write/flush failures, byte or inventory mismatches, exceptions, and uncertain shadow cleanup fail the entire transaction and request staging removal. A failed staging removal remains an explicit failure, never a publishable partial result. `staging_directory` is exposed only on successful verified copy and confirmed shadow cleanup.
+## Backup and restore boundaries
 
-Native staging is temporary, not an archive: the caller must keep the copier alive while using its successful result and explicitly discard it afterward; the copier destructor is a cleanup backstop. No manifests containing source paths are published. Root ordinals correspond to the private `Result.mappings` order.
+The existing Windows source guard remains in force for ordinary live copies. Only the exact profile root can be excluded from a later generic account-tree copy, and only after the native helper successfully verifies and exports its VSS payload. Other WhatsApp trees remain blocked. The payload is stored under `WacliWindowsVss/` with a root map and a crash-consistency label; the restore scripts do not activate or remap it.
 
-## Conservative source support
-
-The live resolver accepts only explicitly supplied uppercase drive-absolute existing directory roots with exact long-path spelling on fixed local drives. It checks ancestors and descendants and rejects reparse points, junctions, mounted folders, inaccessible entries and incomplete enumeration. It does not follow or silently skip unsupported roots. Preflight has conservative path, entry and depth limits. Unique canonical volume GUID paths are deduplicated; more than 64 required volumes fail before requester side effects.
-
-Preflight only validates eligibility; it does not freeze the live namespace. The copier must revalidate every source ancestor and recursively inventory roots **inside the verified shadow devices**. No live source content is reopened. Unsupported features must fail rather than lose source bytes: named alternate streams, reparse points, EFS, offline placeholders and other unsupported modes are not silently omitted or transformed. Ordinary binary files, empty files and directories are copied without database recovery, checkpointing, text conversion or media rewriting. SQLite WAL/journal/SHM files are not excluded. Original ACLs, timestamps, sparse layout and hardlink topology are not a claimed restore format.
-
-Staging is newly created atomically with a protected inheritable DACL for SYSTEM and the requester process's token user, on a fixed local volume that reports persistent ACL support. This is a dedicated-process development contract, not an impersonating service API or a security boundary against another process of the same owner. The parent must be canonical and outside every source tree, including whole-drive roots. No existing output entry is reused or overwritten. Parent/directory/file pins protect the copy and verification phase; source handles close before whole-set deletion, and staging pins close before staging removal. Output namespaces and entries are verified separately from source inventories. No account/HOME discovery or real account access is present.
+When WACLI roots exist, CMake and a Windows C++ build toolchain are required to build the helper. Build or VSS failure is fatal; there is no live-copy or sequential-per-volume fallback. The helper is single-use on one COM-initialized thread and fails on unsupported roots, reparse/mounted paths, inaccessible members, alternate streams, incomplete enumeration, copy/verification errors, or uncertain cleanup.
 
 ## Synthetic and compile-only checks
 
@@ -31,6 +25,11 @@ cmake -S wacli-vss-client -B /tmp/vss-build
 cmake --build /tmp/vss-build
 ctest --test-dir /tmp/vss-build --output-on-failure
 
+cmake -S wacli-vss-client -B /tmp/vss-win-build \
+  -DCMAKE_SYSTEM_NAME=Windows \
+  -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ -DBUILD_TESTING=OFF
+cmake --build /tmp/vss-win-build --target wacli_vss_backup
+
 x86_64-w64-mingw32-g++ -std=c++17 -Wall -Wextra -Werror \
   -I wacli-vss-client/include wacli-vss-client/src/orchestrator.cpp \
   wacli-vss-client/src/native_vss_backend.cpp \
@@ -39,8 +38,10 @@ x86_64-w64-mingw32-g++ -std=c++17 -Wall -Wextra -Werror \
   -o /tmp/vss-link-only.exe
 
 python3 -m unittest discover -s tests -p 'test_wacli_vss_client.py' -v
+python3 -m unittest tests.test_wacli_windows_vss_backup -v
+python3 -m unittest tests.test_wacli_windows_contract -v
 ```
 
-The portable backend and copier doubles test one-set ordering, all-root membership, binary/empty/WAL/SHM bytes, live mutations after freezing, verification before release, errors and exceptions, rollback and cleanup failures. The native copier's API-double fixture additionally copies a synthetic WACLI tree containing `session.db`, `wacli.db`, their WAL/SHM/journal sidecars, profile configuration and a media file byte-for-byte; no filename filter may silently omit those members. Existing probe tests retain volume-limit, async timeout/cancellation and exception coverage. Additional test-only Win32/VSS headers run the actual native adapter sources against in-memory API doubles, including private ACL setup, delete-sharing semantics, unsupported streams/reparse points, incomplete inventories and I/O failures. These doubles model selected API contracts, not the operating system. They are never included in the production library or real-Windows cross-compilation. The Windows fixture forces adapter linkage but does not initialize COM, resolve a root, create a snapshot or copy anything. **Cross-compilation and API doubles are not Windows runtime validation.**
+The portable backend and copier doubles test one-set ordering, all-root membership, binary/empty/WAL/SHM bytes, live mutations after freezing, verification before release, errors and exceptions, rollback and cleanup failures. The native copier API-double fixture includes `session.db`, `wacli.db`, WAL/SHM/journal sidecars, profile configuration and media; it also checks the separately exported payload byte-for-byte and fails on export errors. PowerShell tests use only synthetic profile metadata, missing roots and temporary directories. These doubles model selected APIs, not the operating system. They do not execute COM/VSS, Windows path handling, ACL/share modes, provider cancellation, multi-volume freezing or shadow deletion on Windows. **Cross-compilation and API doubles are not Windows runtime validation.**
 
-Windows synthetic namespace/ACL/share-mode/provider/multi-volume mutation acceptance, complete WACLI/SDK causal-drain coverage, historical provenance and authenticated encrypted restore round trips remain required; see [the milestone](../docs/wacli-windows-client-vss.md). Neither this library nor its tests enable public capture or remove either Windows backup guard.
+Synthetic real-Windows namespace/ACL/share-mode/provider/multi-volume mutation acceptance, complete WACLI/SDK causal-drain coverage, historical provenance and authenticated encrypted restore round trips remain separate requirements for any application-consistency or restore-readiness claim; see [the milestone](../docs/wacli-windows-client-vss.md).
