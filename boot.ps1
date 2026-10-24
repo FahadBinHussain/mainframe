@@ -50,9 +50,21 @@ foreach ($pkg in @('Microsoft.PowerShell', 'Git.Git', 'Bitwarden.CLI', 'GitHub.c
     if ($LASTEXITCODE -ne 0) { Write-Host "$($pkg): already installed or winget hiccup (continuing)" }
 }
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
-$pwshDefaultPath = Join-Path $env:ProgramFiles 'PowerShell\7'
-if (-not (Get-Command pwsh -ErrorAction SilentlyContinue) -and (Test-Path $pwshDefaultPath)) {
-    $env:Path = "$pwshDefaultPath;$env:Path"
+# Not every winget install registers on PATH: 7-Zip's installer adds
+# nothing at all, so Get-Command 7z fails right after a successful install.
+# Probe the well-known install dirs (this used to special-case pwsh only)
+# and prepend any that exist, so the check below - and the later bare
+# '7z x ...' calls - can actually find the tools.
+$knownToolDirs = @(
+    (Join-Path $env:ProgramFiles 'PowerShell\7'),
+    (Join-Path $env:ProgramFiles 'Git\cmd'),
+    (Join-Path $env:ProgramFiles '7-Zip')
+)
+if (${env:ProgramFiles(x86)}) { $knownToolDirs += Join-Path ${env:ProgramFiles(x86)} '7-Zip' }
+foreach ($toolDir in $knownToolDirs) {
+    if ((Test-Path -LiteralPath $toolDir) -and ($env:Path -split ';' -notcontains $toolDir)) {
+        $env:Path = "$toolDir;$env:Path"
+    }
 }
 foreach ($cmd in @('pwsh', 'git', 'bw', 'gh', '7z')) {
     if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) { Die "$cmd missing after winget step - install it manually and re-run" }
