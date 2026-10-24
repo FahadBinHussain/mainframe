@@ -22,3 +22,6 @@ mainframe-backup/
 last-sync-content.txt
 last-popup.txt
 __pycache__/
+
+# per-user project config (see mainframe.config.example.json) - never commit
+mainframe.config.json
