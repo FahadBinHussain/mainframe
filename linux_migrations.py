@@ -7,6 +7,7 @@ scope. No configured command, helper, filter, hook, URL or include is executed.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from collections import Counter
 
@@ -16,6 +17,13 @@ MIGRATION_MAP = {
     '.gitconfig': {
         'adapter': 'git-portable-settings-v1',
         'target': '.gitconfig',
+        'preservation': 'original bytes retained separately',
+        'activation': 'never; offline subset only',
+    },
+    'persist/mpv/portable_config/mpv.conf': {
+        'adapter': 'mpv-portable-options-v1',
+        'target': '.config/mpv/mpv.conf',
+        'source_layout': 'scoop-mpv-portable-config-v1',
         'preservation': 'original bytes retained separately',
         'activation': 'never; offline subset only',
     },
@@ -30,6 +38,11 @@ RULES = {
     'merge.conflictstyle': {v: v for v in ('merge', 'diff3', 'zdiff3')},
     'color.ui': {v: v for v in ('auto', 'always', 'never', 'true', 'false')},
 }
+MPV_BOOLEAN_OPTIONS = frozenset({
+    'fullscreen', 'force-window', 'input-default-bindings', 'osc',
+    'save-position-on-quit',
+})
+MPV_FLAG_ALIASES = {'fs': 'fullscreen'}
 
 
 def convert_git_config(payload, runner=subprocess.run):
@@ -101,5 +114,100 @@ def convert_git_config(payload, runner=subprocess.run):
             lines.append(f'[{group}]')
             section = group
         lines.append(f'\t{option} = {value}')
+    result['status'] = 'converted-subset'
+    return ('\n'.join(lines) + '\n').encode('ascii'), result
+
+
+def convert_mpv_config(payload):
+    """Convert only simple, global mpv booleans; never execute or activate config.
+
+    Profile-scoped settings, paths, scripts, includes, device/backend choices,
+    unknown options, and non-boolean values are excluded without echoing values.
+    """
+    result = {'adapter': MIGRATION_MAP['persist/mpv/portable_config/mpv.conf']['adapter'],
+              'version': ADAPTER_VERSION, 'status': 'blocked',
+              'decisions': [], 'activation': 'not-performed'}
+    if len(payload) > MAX_CONFIG_BYTES:
+        return None, dict(result, reason='config-size-limit')
+    if b'\x00' in payload:
+        return None, dict(result, reason='invalid-config')
+    try:
+        text = payload.decode('utf-8')
+    except UnicodeDecodeError:
+        return None, dict(result, reason='invalid-config')
+    if '\ufeff' in text:
+        return None, dict(result, reason='invalid-config')
+
+    key_pattern = re.compile(r'^[A-Za-z][A-Za-z0-9-]*$')
+    profile_pattern = re.compile(r'^\[([^\[\]]+)\]$')
+    in_profile = False
+    accepted_values = {}
+    counts = Counter()
+    raw_values = {}
+    unknown_count = 0
+    profile_count = 0
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        body = line.split('#', 1)[0].strip()
+        if not body:
+            continue
+        if body.startswith('['):
+            match = profile_pattern.fullmatch(body)
+            if not match:
+                return None, dict(result, reason='invalid-config')
+            in_profile = match.group(1) != 'default'
+            continue
+        if '=' in body:
+            name, value = body.split('=', 1)
+            name, value = name.strip(), value.strip()
+        else:
+            name, value = body, 'yes'  # mpv treats a valueless option as enabled.
+        if not key_pattern.fullmatch(name):
+            return None, dict(result, reason='invalid-config')
+        if in_profile:
+            profile_count += 1
+            continue
+        canonical_name = name[3:] if name.startswith('no-') else name
+        canonical_name = MPV_FLAG_ALIASES.get(canonical_name, canonical_name)
+        if canonical_name not in MPV_BOOLEAN_OPTIONS:
+            unknown_count += 1
+            continue
+        counts[canonical_name] += 1
+        if counts[canonical_name] == 1:
+            # Alternate spellings are counted against the canonical option but
+            # never migrated alone; this also blocks aliases from overriding it.
+            raw_values[canonical_name] = value if canonical_name == name else None
+
+    if unknown_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'unmapped-or-sensitive-setting',
+                                    'count': unknown_count})
+    if profile_count:
+        result['decisions'].append({'status': 'blocked',
+                                    'reason': 'profile-scoped-setting',
+                                    'count': profile_count})
+    for name in sorted(counts):
+        decision = {'key': name}
+        if counts[name] != 1:
+            decision.update(status='blocked', reason='duplicate-setting', count=counts[name])
+        elif raw_values[name] not in ('yes', 'no'):
+            decision.update(status='blocked', reason='unsupported-value')
+        else:
+            accepted_values[name] = raw_values[name]
+            decision.update(status='retained', reason='portable-boolean')
+        result['decisions'].append(decision)
+
+    result['accepted_settings'] = len(accepted_values)
+    result['blocked_settings'] = (unknown_count + profile_count
+                                  + sum(d.get('count', 1) for d in result['decisions']
+                                        if d['status'] == 'blocked'
+                                        and 'key' in d))
+    if not accepted_values:
+        return None, dict(result, reason='no-supported-settings')
+    lines = ['# Portable mpv subset generated offline; original config is preserved separately.']
+    lines.extend(f'{name} = {accepted_values[name]}' for name in sorted(accepted_values))
     result['status'] = 'converted-subset'
     return ('\n'.join(lines) + '\n').encode('ascii'), result
