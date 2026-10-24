@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 using namespace wacli::vss;
 using namespace fake_win32;
@@ -50,10 +51,33 @@ static void setup() {
   dir(L"C:\\PARENT");
   dir(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1");
   dir(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src");
+  dir(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store");
+  dir(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\profile");
+  dir(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\media");
   file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\binary",
        std::string("\0\xff\r\n", 4));
   file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\empty", "");
   dir(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\empty-dir");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\session.db",
+       std::string("\0\xff\r\n", 4));
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\session.db-wal",
+       "session-wal");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\session.db-shm",
+       "session-shm");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\session.db-journal",
+       "session-journal");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\wacli.db",
+       "wacli-db");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\wacli.db-wal",
+       "wacli-wal");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\wacli.db-shm",
+       "wacli-shm");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\store\\wacli.db-journal",
+       "wacli-journal");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\profile\\config.json",
+       "synthetic-profile-config");
+  file(L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\src\\media\\blob",
+       std::string("\0\x80\xff", 3));
 }
 static std::unique_ptr<SnapshotCopy> make() {
   return make_native_snapshot_copy("C:\\PARENT");
@@ -90,6 +114,23 @@ static void success_and_shadow_only() {
      "binary copy");
   ok(fs.count(s + L"\\root0\\empty"), "empty file");
   ok(fs.count(s + L"\\root0\\empty-dir"), "empty directory");
+  const std::vector<std::pair<std::wstring, std::string>> wacli_inputs = {
+      {L"store\\session.db", std::string("\0\xff\r\n", 4)},
+      {L"store\\session.db-wal", "session-wal"},
+      {L"store\\session.db-shm", "session-shm"},
+      {L"store\\session.db-journal", "session-journal"},
+      {L"store\\wacli.db", "wacli-db"},
+      {L"store\\wacli.db-wal", "wacli-wal"},
+      {L"store\\wacli.db-shm", "wacli-shm"},
+      {L"store\\wacli.db-journal", "wacli-journal"},
+      {L"profile\\config.json", "synthetic-profile-config"},
+      {L"media\\blob", std::string("\0\x80\xff", 3)},
+  };
+  for (const auto &input : wacli_inputs) {
+    const auto staged = fs.find(s + L"\\root0\\" + input.first);
+    ok(staged != fs.end() && staged->second.bytes == input.second,
+       "WACLI input and SQLite sidecar copied byte-for-byte");
+  }
   ok(c->discard(e), "discard");
   ok(!fs.count(s), "private stage removed");
 }
