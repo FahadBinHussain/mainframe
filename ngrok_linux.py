@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import http.client
 import re
 import urllib.error
 import urllib.request
@@ -39,7 +40,7 @@ def _fetch_metadata(url: str) -> bytes:
         response = urllib.request.build_opener(_NoRedirect()).open(request, timeout=TIMEOUT)
     except RuntimeError:
         raise
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
         raise RuntimeError("Official ngrok metadata request failed") from None
     with response:
         if response.geturl() != url:
@@ -56,7 +57,7 @@ def _fetch_metadata(url: str) -> bytes:
         while True:
             try:
                 chunk = response.read(min(65536, limit - total + 1))
-            except (urllib.error.URLError, OSError, ValueError):
+            except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
                 raise RuntimeError("Official ngrok metadata request failed") from None
             if not chunk:
                 break

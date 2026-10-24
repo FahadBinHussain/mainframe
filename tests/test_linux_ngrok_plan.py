@@ -1,4 +1,5 @@
 import json
+import http.client
 import sys
 import unittest
 from pathlib import Path
@@ -128,6 +129,26 @@ class NgrokMetadataTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as caught:
                 ngrok._fetch_metadata(ngrok.SCOOP_MANIFEST)
         self.assertNotIn(marker, str(caught.exception))
+
+    def test_metadata_fetch_sanitizes_http_protocol_failures(self):
+        opener = MagicMock()
+        opener.open.side_effect = http.client.IncompleteRead(b"synthetic-http-body", 100)
+        with patch.object(ngrok.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaisesRegex(RuntimeError, "request failed") as caught:
+                ngrok._fetch_metadata(ngrok.SCOOP_MANIFEST)
+        self.assertNotIn("synthetic-http-body", str(caught.exception))
+
+        response = MagicMock()
+        response.geturl.return_value = ngrok.SCOOP_MANIFEST
+        response.headers = {}
+        response.__enter__.return_value = response
+        response.read.side_effect = http.client.IncompleteRead(b"synthetic-http-body", 100)
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch.object(ngrok.urllib.request, "build_opener", return_value=opener):
+            with self.assertRaisesRegex(RuntimeError, "request failed") as caught:
+                ngrok._fetch_metadata(ngrok.SCOOP_MANIFEST)
+        self.assertNotIn("synthetic-http-body", str(caught.exception))
 
     def test_metadata_fetch_redirect_handler_refuses_redirects(self):
         with self.assertRaisesRegex(RuntimeError, "redirect refused"):

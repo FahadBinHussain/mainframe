@@ -7,6 +7,7 @@ secret archive payloads.
 """
 from __future__ import annotations
 import argparse
+import http.client
 import json
 import os
 import platform
@@ -306,8 +307,10 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
         elif name == "ngrok" and ngrok_metadata_plan:
             try:
                 detail = ngrok_tools.build_dry_plan(architecture)
-            except (RuntimeError, OSError, ValueError, TypeError) as exc:
-                reason = f"ngrok: official metadata-only review failed: {exc}"
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"ngrok: official metadata-only review failed: {detail}"
                 blockers.append(reason)
                 actions.append(_blocked("ngrok-metadata", name, reason, "scoop"))
             else:
