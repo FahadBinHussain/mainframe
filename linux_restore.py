@@ -18,7 +18,8 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
 
-from linux_migrations import MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config
+from linux_migrations import (MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config,
+                              convert_mpv_config)
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 VERSION = 3
@@ -337,24 +338,31 @@ def write_private_json(path, obj):
 def stage_conversions(report, destination):
     """Convert only explicit maps; keep conversion failures separate from A.
 
-    Count all mapped source records before reading any payload so quick/full
-    duplicates (even blocked members) cannot pick an archive-order winner.
+    Count exact source records and case/Unicode aliases before reading payloads
+    so quick/full duplicates cannot pick an archive-order winner. Only exact
+    allowlisted paths are ever passed to an adapter.
     """
     stage = destination / 'home-staging'
-    sources = [e for e in report['entries']
-               if unicodedata.normalize('NFC', e.get('normalized_path') or '').casefold() in MIGRATION_MAP]
-    targets = Counter(MIGRATION_MAP[e['normalized_path'].casefold()]['target'] for e in sources)
-    for entry in sources:
-        mapping = MIGRATION_MAP[entry['normalized_path'].casefold()]
+    sources = [(e, e.get('normalized_path')) for e in report['entries']
+               if e.get('normalized_path') in MIGRATION_MAP]
+    targets = Counter(MIGRATION_MAP[key]['target'] for _, key in sources)
+    folded_targets = {unicodedata.normalize('NFC', key).casefold(): mapping['target']
+                      for key, mapping in MIGRATION_MAP.items()}
+    for entry in report['entries']:
+        path = entry.get('normalized_path')
+        if path is None or path in MIGRATION_MAP:
+            continue
+        alias_target = folded_targets.get(unicodedata.normalize('NFC', path).casefold())
+        if alias_target:
+            targets[alias_target] += 1
+    for entry, source_key in sources:
+        mapping = MIGRATION_MAP[source_key]
         audit = {'adapter': mapping['adapter'], 'status': 'blocked', 'activation': 'not-performed'}
         entry['migration'] = audit
         out = stage / mapping['target']
         temporary = out.with_name(out.name + '.convert-partial')
         if targets[mapping['target']] != 1 or out.exists() or out.is_symlink():
             audit['reason'] = 'conversion-target-conflict'
-            continue
-        if entry['normalized_path'] not in MIGRATION_MAP:
-            audit['reason'] = 'unsupported-source-layout'
             continue
         if entry['is_dir'] or entry['status'] != 'bytes-preserved':
             audit['reason'] = 'source-not-verified-regular-file'
@@ -370,7 +378,13 @@ def stage_conversions(report, destination):
             if hashlib.sha256(payload).hexdigest() != entry['sha256']:
                 audit['reason'] = 'source-verification-failed'
                 continue
-            output, audit = convert_git_config(payload)
+            if mapping['adapter'] == 'git-portable-settings-v1':
+                output, audit = convert_git_config(payload)
+            elif mapping['adapter'] == 'mpv-portable-options-v1':
+                output, audit = convert_mpv_config(payload)
+            else:
+                audit['reason'] = 'unsupported-adapter'
+                continue
             entry['migration'] = audit
             if output is None:
                 continue
@@ -401,7 +415,7 @@ def stage_conversions(report, destination):
                     temporary.unlink()
             except OSError:
                 audit.update(status='blocked', reason='conversion-temporary-cleanup-failed')
-    report['conversion_counts'] = dict(Counter(e['migration']['status'] for e in sources))
+    report['conversion_counts'] = dict(Counter(e['migration']['status'] for e, _ in sources))
 
 
 def copy_recovery(root, destination, apply_portable=False, manifest_path=None, mode='full',

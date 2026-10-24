@@ -155,6 +155,100 @@ class GitAdapterTests(unittest.TestCase):
         self.assertEqual(result['blocked_settings'], 2)
 
 
+class MpvAdapterTests(unittest.TestCase):
+    def convert(self, text):
+        return lm.convert_mpv_config(text.encode())
+
+    def test_supported_boolean_subset_is_deterministic_and_lf_only(self):
+        config = ('save-position-on-quit=yes\r\n'
+                  'fullscreen = no # display preference\r\n'
+                  'force-window=no\r\n'
+                  'input-default-bindings\r\n'
+                  'osc=yes\r\n')
+        first = self.convert(config)
+        self.assertEqual(first, self.convert(config))
+        output, result = first
+        self.assertEqual(output, (
+            b'# Portable mpv subset generated offline; original config is preserved separately.\n'
+            b'force-window = no\nfullscreen = no\ninput-default-bindings = yes\n'
+            b'osc = yes\nsave-position-on-quit = yes\n'))
+        self.assertNotIn(b'\r', output)
+        self.assertEqual(result['adapter'], 'mpv-portable-options-v1')
+        self.assertEqual(result['accepted_settings'], 5)
+        self.assertEqual(result['blocked_settings'], 0)
+        self.assertEqual(result['activation'], 'not-performed')
+
+    def test_profile_settings_are_not_flattened_and_default_resumes_global(self):
+        output, result = self.convert(
+            'fullscreen=yes\n[portable]\nfullscreen=no\n'
+            'script=C:\\Users\\Fixture\\custom.lua\n[default]\nosc=no\n')
+        self.assertIn(b'fullscreen = yes\n', output)
+        self.assertIn(b'osc = no\n', output)
+        self.assertNotIn(b'custom.lua', output)
+        self.assertEqual(result['accepted_settings'], 2)
+        self.assertEqual(result['blocked_settings'], 2)
+        self.assertIn('profile-scoped-setting', json.dumps(result))
+        self.assertNotIn('C:\\Users', json.dumps(result))
+
+    def test_unknown_paths_scripts_and_devices_are_blocked_without_echo(self):
+        marker = 'SYNTHETIC_PRIVATE_MARKER'
+        config = (f'fullscreen=yes\ninclude=C:\\Users\\{marker}\\extra.conf\n'
+                  f'script=C:\\Users\\{marker}\\scripts\\user.lua\n'
+                  f'glsl-shaders=~~exe_dir/{marker}.glsl\n'
+                  f'input-ipc-server=\\\\.\\pipe\\{marker}\n')
+        output, result = self.convert(config)
+        self.assertIn(b'fullscreen = yes\n', output)
+        self.assertNotIn(marker.encode(), output)
+        self.assertNotIn(marker, json.dumps(result))
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 4)
+        self.assertEqual(result['decisions'][0]['reason'], 'unmapped-or-sensitive-setting')
+
+    def test_duplicates_and_non_boolean_values_are_blocked(self):
+        output, result = self.convert('fullscreen=yes\nfullscreen=no\nosc=auto\n')
+        self.assertIsNone(output)
+        self.assertEqual(result['accepted_settings'], 0)
+        self.assertEqual(result['blocked_settings'], 3)
+        self.assertIn('duplicate-setting', json.dumps(result))
+        self.assertIn('unsupported-value', json.dumps(result))
+        self.assertNotIn('auto', json.dumps(result))
+
+    def test_no_flag_and_fs_aliases_are_blocked_and_collide_canonically(self):
+        for config, option in (
+                ('osc=yes\nno-osc\n', 'osc'),
+                ('fullscreen=yes\nfs=no\n', 'fullscreen')):
+            with self.subTest(option=option):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                decision = next(d for d in result['decisions'] if d.get('key') == option)
+                self.assertEqual(decision['reason'], 'duplicate-setting')
+                self.assertEqual(decision['count'], 2)
+        for config, option in (('no-osc\n', 'osc'), ('fs\n', 'fullscreen')):
+            with self.subTest(lone_alias=config):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                decision = next(d for d in result['decisions'] if d.get('key') == option)
+                self.assertEqual(decision['reason'], 'unsupported-value')
+
+    def test_unknown_only_empty_malformed_and_invalid_encoding_inputs(self):
+        for payload, reason in (
+                (b'', 'no-supported-settings'),
+                (b'script=fixture.lua\n', 'no-supported-settings'),
+                (b'[unterminated\nfullscreen=yes\n', 'invalid-config'),
+                (b'fullscreen=yes\n=bad\n', 'invalid-config'),
+                (b'fullscreen=\xff\n', 'invalid-config'),
+                (b'fullscreen=yes\x00\n', 'invalid-config')):
+            with self.subTest(reason=reason, payload=payload[:24]):
+                output, result = lm.convert_mpv_config(payload)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], reason)
+
+    def test_size_limit_is_checked_before_parsing(self):
+        output, result = lm.convert_mpv_config(b'x' * (lm.MAX_CONFIG_BYTES + 1))
+        self.assertIsNone(output)
+        self.assertEqual(result['reason'], 'config-size-limit')
+
+
 class MigrationRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -219,12 +313,27 @@ class MigrationRecoveryTests(unittest.TestCase):
                 with patch.object(lr, 'convert_git_config', side_effect=AssertionError('conflict must preclude parsing')):
                     report = self.recover(mode='full', convert_portable=True)
                 self.assertFalse((self.dest / 'home-staging/.gitconfig').exists())
-                self.assertEqual(report['conversion_counts'], {'blocked': 2})
+                self.assertEqual(report['conversion_counts'],
+                                 {'blocked': 2 if second == '.gitconfig' else 1})
                 self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
-                for entry in report['entries']:
-                    self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+                exact = next(e for e in report['entries'] if e['path'] == '.gitconfig')
+                self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+                if second == '.gitconfig':
+                    for entry in report['entries']:
+                        self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+                else:
+                    alias = next(e for e in report['entries'] if e['path'] == '.GITCONFIG')
+                    self.assertNotIn('migration', alias)
                 import shutil
                 shutil.rmtree(self.dest)
+
+    def test_case_variant_root_config_is_not_an_adapter_input(self):
+        self.archive('mainframe-quick.zip', [('.GITCONFIG', self.payload)])
+        with patch.object(lr, 'convert_git_config', side_effect=AssertionError('variant path must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.gitconfig').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all('migration' not in entry for entry in report['entries']))
 
     def test_preexisting_output_is_not_overwritten(self):
         report = self.recover(convert_portable=True)
@@ -283,7 +392,6 @@ class MigrationRecoveryTests(unittest.TestCase):
             report = self.recover(convert_portable=True)
         self.assertEqual(adapter.call_count, 1)
         self.assertEqual(adapter.call_args.args[0], self.payload)
-        self.assertEqual(sum('migration' in entry for entry in report['entries']), 1)
 
     def test_symlinked_staging_parent_prevents_publication(self):
         report = self.recover(convert_portable=True)
@@ -327,6 +435,139 @@ class MigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)  # explicitly incomplete operational restore
         self.assertEqual(json.loads(result.stdout)['conversion_status'], 'review-required')
         self.assertNotIn('SYNTHETIC_PRIVATE_MARKER', result.stdout + result.stderr)
+
+
+class MpvMigrationRecoveryTests(unittest.TestCase):
+    SOURCE = 'persist/mpv/portable_config/mpv.conf'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.backup = self.root / 'backup'
+        self.backup.mkdir()
+        self.dest = self.root / 'offline'
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text('{"items": []}')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def archive(self, name, members):
+        with ZipFile(self.backup / name, 'w') as archive:
+            for key, payload in members:
+                archive.writestr(key, payload)
+
+    def recover(self, **kwargs):
+        return lr.copy_recovery(self.backup, self.dest, manifest_path=self.manifest,
+                                mode=kwargs.pop('mode', 'full'), **kwargs)
+
+    def test_exact_scoop_portable_config_layout_converts_only_mpvcfg(self):
+        config = (b'fullscreen=yes\r\nosc=no\r\n'
+                  b'script=C:\\Users\\Fixture\\mpv\\scripts\\ignored.lua\r\n')
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            (self.SOURCE, config),
+            ('persist/mpv/portable_config/input.conf', b'Q quit\n'),
+            ('persist/mpv/portable_config/scripts/user.lua', b'-- inert fixture\n'),
+            ('persist/mpv/portable_config/script-opts/example.conf', b'path=C:\\Fixture\n'),
+            ('persist/mpv/portable_config/watch_later/fixture', b'opaque state\n'),
+            ('persist/mpv/mpv.conf', b'fullscreen=no\n'),
+        ])
+        report = self.recover(convert_portable=True)
+        converted = self.dest / 'home-staging/.config/mpv/mpv.conf'
+        recovered = self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE
+        self.assertEqual(converted.read_bytes(),
+                         b'# Portable mpv subset generated offline; original config is preserved separately.\n'
+                         b'fullscreen = yes\nosc = no\n')
+        self.assertEqual(recovered.read_bytes(), config)
+        self.assertEqual(lr.file_hash(self.dest / 'raw-archives/mainframe-persist.zip'),
+                         lr.file_hash(self.backup / 'mainframe-persist.zip'))
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/input.conf').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/scripts/user.lua').exists())
+        source_entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(source_entry['migration']['adapter'], 'mpv-portable-options-v1')
+        self.assertEqual(source_entry['migration']['target'],
+                         'home-staging/.config/mpv/mpv.conf')
+        self.assertEqual(report['conversion_counts'], {'converted-subset': 1})
+        self.assertEqual(report['activation_status'], 'not-performed')
+        self.assertEqual(report['operational_status'], 'incomplete')
+        self.assertNotIn('Fixture', json.dumps(report))
+
+    def test_alternate_or_nested_layouts_are_not_adapter_inputs(self):
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            ('persist/mpv/mpv.conf', b'fullscreen=yes\n'),
+            ('persist/mpv/portable_config/nested/mpv.conf', b'osc=no\n'),
+            ('persist/mpv/portable_config/input.conf', b'Q quit\n'),
+        ])
+        with patch.object(lr, 'convert_mpv_config', side_effect=AssertionError('unsupported layout must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all('migration' not in entry for entry in report['entries']))
+
+    def test_quick_full_duplicate_source_has_no_winner(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'fullscreen=yes\n')])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, b'fullscreen=no\n')])
+        with patch.object(lr, 'convert_mpv_config', side_effect=AssertionError('duplicate must preclude parsing')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 2})
+        self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
+                            for e in report['entries']))
+        self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
+
+    def test_case_and_unicode_casefold_variants_are_not_adapter_inputs(self):
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            ('PERSIST/MPV/PORTABLE_CONFIG/MPV.CONF', b'fullscreen=yes\n'),
+            ('perſist/mpv/portable_config/mpv.conf', b'osc=no\n'),
+        ])
+        with patch.object(lr, 'convert_mpv_config', side_effect=AssertionError('variant path must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all('migration' not in entry for entry in report['entries']))
+
+    def test_casefold_alias_conflict_blocks_exact_source_without_parsing_alias(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, b'fullscreen=yes\n')])
+        alias = 'persist/MPV/portable_config/mpv.conf'
+        self.archive('mainframe-persist.zip', [(alias, b'fullscreen=no\n')])
+        with patch.object(lr, 'convert_mpv_config', side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
+
+    def test_candidate_output_collision_is_not_overwritten(self):
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [
+            (self.SOURCE, b'fullscreen=yes\n'),
+            ('persist/mpv/mpv.conf', b'candidate bytes\n'),
+        ])
+        report = self.recover(apply_portable=True, convert_portable=True)
+        output = self.dest / 'home-staging/.config/mpv/mpv.conf'
+        self.assertEqual(output.read_bytes(), b'candidate bytes\n')
+        source_entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(source_entry['migration']['reason'], 'conversion-target-conflict')
+        self.assertEqual((self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE).read_bytes(),
+                         b'fullscreen=yes\n')
+
+    def test_failed_publication_preserves_archive_and_emits_no_partial_config(self):
+        self.archive('mainframe-quick.zip', [])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, b'fullscreen=yes\n')])
+        with patch.object(lr.os, 'link', side_effect=OSError('SYNTHETIC_PRIVATE_ERROR')):
+            report = self.recover(convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/mpv/mpv.conf').exists())
+        self.assertFalse(any((self.dest / 'home-staging').rglob('*.convert-partial')))
+        self.assertEqual((self.dest / 'recovered/mainframe-persist.zip' / self.SOURCE).read_bytes(),
+                         b'fullscreen=yes\n')
+        self.assertEqual(report['entries'][0]['migration']['reason'], 'conversion-write-or-read-failed')
+        self.assertNotIn('SYNTHETIC_PRIVATE_ERROR', json.dumps(report))
+        self.assertEqual(sum('migration' in entry for entry in report['entries']), 1)
 
 
 if __name__ == '__main__':
