@@ -130,9 +130,17 @@ if ($bwStatus.status -eq 'unauthenticated') {
     if (-not $bwEmail) {
         # Per-user project setting: copy mainframe.config.example.json to
         # mainframe.config.json in the project root and set bitwardenEmail.
+        # Also read last-backup.json: publish-backup.ps1 stamps it with the
+        # bw email it detected during backup (plus the latest release tag),
+        # and this clone - downloaded in step 1, before the vault - is the
+        # only place a fresh machine can learn the address without asking.
         $configCandidates = @()
-        if ($PSScriptRoot) { $configCandidates += Join-Path $PSScriptRoot 'mainframe.config.json' }
+        if ($PSScriptRoot) {
+            $configCandidates += Join-Path $PSScriptRoot 'mainframe.config.json'
+            $configCandidates += Join-Path $PSScriptRoot 'last-backup.json'
+        }
         $configCandidates += Join-Path $MainframeDir 'mainframe.config.json'
+        $configCandidates += Join-Path $MainframeDir 'last-backup.json'
         foreach ($configPath in $configCandidates) {
             if (Test-Path -LiteralPath $configPath) {
                 try {
