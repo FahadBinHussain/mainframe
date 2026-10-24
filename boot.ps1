@@ -108,6 +108,55 @@ if (Test-Path $MainframeDir) { Set-Location $MainframeDir; git pull --rebase 2>$
 else { git clone "https://github.com/$Repo.git" $MainframeDir | Out-Null; if ($LASTEXITCODE -ne 0) { Die "git clone failed (no network? github blocked?)" } }
 Set-Location $MainframeDir
 
+# --- sealed bw email (bw-email.enc.json) ---
+# publish-backup.ps1 / seal-bw-email.ps1 seal the vault account email with a
+# key derived from the master password (PBKDF2-HMAC-SHA256, 600k iterations,
+# AES-256-CBC, HMAC-SHA256 over salt|iv|ciphertext). The blob committed to
+# this (public) repo is ciphertext only: useless without the master
+# password, which setup asks for anyway. Unsealing it means a fresh machine
+# never has to type the email address.
+function Get-BwEmailKeyMaterial {
+    param([securestring]$Password, [byte[]]$Salt, [int]$Iterations)
+    $plain = [System.Net.NetworkCredential]::new('', $Password).Password
+    $pwBytes = [System.Text.Encoding]::UTF8.GetBytes($plain)
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($pwBytes, $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try { return ,$kdf.GetBytes(64) } finally { $kdf.Dispose() }
+}
+
+function Unseal-BwEmail {
+    param([string]$BlobPath, [securestring]$Password)
+    try {
+        $blob = Get-Content -LiteralPath $BlobPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $salt = [Convert]::FromBase64String([string]$blob.salt)
+        $iv = [Convert]::FromBase64String([string]$blob.iv)
+        $ct = [Convert]::FromBase64String([string]$blob.ct)
+        $macExpected = [Convert]::FromBase64String([string]$blob.mac)
+        $km = Get-BwEmailKeyMaterial -Password $Password -Salt $salt -Iterations ([int]$blob.iter)
+        $encKey = New-Object byte[] 32; [Array]::Copy($km, 0, $encKey, 0, 32)
+        $macKey = New-Object byte[] 32; [Array]::Copy($km, 32, $macKey, 0, 32)
+        $hmac = [System.Security.Cryptography.HMACSHA256]::new($macKey)
+        $macInput = New-Object byte[] ($salt.Length + $iv.Length + $ct.Length)
+        [Array]::Copy($salt, 0, $macInput, 0, $salt.Length)
+        [Array]::Copy($iv, 0, $macInput, $salt.Length, $iv.Length)
+        [Array]::Copy($ct, 0, $macInput, $salt.Length + $iv.Length, $ct.Length)
+        $macActual = $hmac.ComputeHash($macInput)
+        $hmac.Dispose()
+        if ($macExpected.Length -ne $macActual.Length) { return $null }
+        $diff = 0
+        for ($i = 0; $i -lt $macExpected.Length; $i++) { $diff = $diff -bor ($macExpected[$i] -bxor $macActual[$i]) }
+        if ($diff -ne 0) { return $null }
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.Key = $encKey; $aes.IV = $iv
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $pt = $aes.CreateDecryptor().TransformFinalBlock($ct, 0, $ct.Length)
+        $aes.Dispose()
+        $email = [System.Text.Encoding]::UTF8.GetString($pt)
+        if ($email -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { return $email }
+        return $null
+    } catch { return $null }
+}
+
 # --- 2. bitwarden unlock (the ONE password you type) ---
 Step 'unlocking bitwarden vault'
 $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
@@ -156,18 +205,51 @@ if ($bwStatus.status -eq 'unauthenticated') {
         $gitEmail = & git config --global user.email 2>$null
         if ($gitEmail -and ($gitEmail -match '^[^@\s]+@[^@\s]+\.[^@\s]+$')) { $bwEmail = ([string]$gitEmail).Trim() }
     }
+    $sealedMasterPw = $null
+    if (-not $bwEmail) {
+        $blobCandidates = @()
+        if ($PSScriptRoot) { $blobCandidates += Join-Path $PSScriptRoot 'bw-email.enc.json' }
+        $blobCandidates += Join-Path $MainframeDir 'bw-email.enc.json'
+        $blobPath = $blobCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if ($blobPath) {
+            for ($sealAttempt = 1; $sealAttempt -le 3 -and -not $bwEmail; $sealAttempt++) {
+                $candidatePw = Read-Host "type your bitwarden MASTER PASSWORD (unseals your login email; attempt $sealAttempt of 3)" -AsSecureString
+                $unsealed = Unseal-BwEmail -BlobPath $blobPath -Password $candidatePw
+                if ($unsealed) {
+                    $bwEmail = $unsealed
+                    $sealedMasterPw = $candidatePw
+                    Write-Host "email unsealed from bw-email.enc.json - logging in as $bwEmail"
+                } elseif ($sealAttempt -lt 3) {
+                    Write-Warning 'that password did not unseal the email blob - wrong master password?'
+                }
+            }
+            if (-not $bwEmail) { Write-Warning 'could not unseal bw-email.enc.json - falling back to typing the email once' }
+        }
+    }
     if (-not $bwEmail) {
         Write-Host 'bitwarden CLI is not logged in on this machine - one-time login:'
         $bwEmail = Read-Host 'bitwarden EMAIL (asked once per machine; saved for next time)'
     } else {
         Write-Host "bitwarden CLI is not logged in on this machine - logging in as $bwEmail (one-time):"
     }
-    & bw login $bwEmail
-    if ($LASTEXITCODE -ne 0) {
+    $loginOk = $false
+    if ($sealedMasterPw) {
+        $env:BW_PASSWORD = <redacted>
+        & bw login $bwEmail --passwordenv BW_PASSWORD
+        if ($LASTEXITCODE -eq 0) { $loginOk = $true }
+        else {
+            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+            Write-Warning 'passwordenv login failed - falling back to the interactive login'
+        }
+    }
+    if (-not $loginOk) {
+        & bw login $bwEmail
+        if ($LASTEXITCODE -ne 0) {
         Write-Warning "login as $bwEmail failed."
         $bwEmail = Read-Host 'bitwarden EMAIL'
         & bw login $bwEmail
         if ($LASTEXITCODE -ne 0) { Die 'bitwarden login failed - re-run boot.ps1 and complete the login prompts.' }
+    }
     }
     New-Item -ItemType Directory -Force -Path (Split-Path $bwEmailFile) | Out-Null
     Set-Content -LiteralPath $bwEmailFile -Value $bwEmail -Encoding UTF8
@@ -224,6 +306,7 @@ if ($bwStatus.status -ne 'unlocked') {
         Die 'vault unlock failed after 3 attempts. verify your master password and keyboard layout, then run boot.ps1 again.'
     }
     $env:BW_SESSION = $session
+    Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
     # persist for the restore helpers that read session.key
     $sk = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
     New-Item -ItemType Directory -Force -Path (Split-Path $sk) | Out-Null
