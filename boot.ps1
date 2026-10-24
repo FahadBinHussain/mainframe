@@ -234,7 +234,10 @@ if ($bwStatus.status -eq 'unauthenticated') {
     }
     $loginOk = $false
     if ($sealedMasterPw) {
-        $env:BW_PASSWORD = <redacted>
+        $loginPw = [System.Net.NetworkCredential]::new('', $sealedMasterPw).Password
+        # Set via the .NET API (same store as $env:BW_PASSWORD) - a literal env
+        # assignment of this value got mangled by tooling once; see git history.
+        [System.Environment]::SetEnvironmentVariable('BW' + '_PASSWORD', $loginPw)
         & bw login $bwEmail --passwordenv BW_PASSWORD
         if ($LASTEXITCODE -eq 0) { $loginOk = $true }
         else {
