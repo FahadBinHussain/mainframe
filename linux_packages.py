@@ -32,6 +32,7 @@ import google_workspace_cli_linux as gws_tools
 import ngrok_linux as ngrok_tools
 import pwsh_linux as pwsh_tools
 import tor_browser_linux as tor_browser_tools
+import windscribe_linux as windscribe_tools
 import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
@@ -94,7 +95,7 @@ NATIVE_REVIEW_REASONS = {
 }
 WINGET_REVIEW_REASONS = {
     "GPSoftware.DirectoryOpus": "Windows-only Directory Opus; no same-product native Linux build or Windows-state adapter.",
-    "Windscribe.Windscribe": "Official Linux VPN exists, but pinned signed package verification, service/network side effects, and Windows-state handling are not validated.",
+    "Windscribe.Windscribe": "Official Linux desktop builds exist, but no validated install/activation adapter is available. GPG signature/key trust, package contents, privileged VPN service/routing/firewall effects, account activation, and Windows-state handling remain unvalidated.",
     "StartIsBack.StartAllBack": "Windows shell/Explorer customization; no same-product native Linux equivalent.",
     "Tonec.InternetDownloadManager": "Vendor explicitly does not support Linux; no same-product native Linux build.",
     "Wakatime.DesktopWakatime": "Official Linux desktop exists, but exact product release/checksum installation and Windows-state handling are not validated; CLI is not a substitute.",
@@ -238,6 +239,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                ngrok_metadata_plan: bool = False,
                pwsh_metadata_plan: bool = False,
                tor_browser_metadata_plan: bool = False,
+               windscribe_metadata_plan: bool = False,
                gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -394,6 +396,23 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
             actions.append(Action("winget", ident, source="winget", status="covered", covered_by="anydesk",
                                   reason="Duplicate AnyDesk package intent covered by official Linux AnyDesk; "
                                          "Windows identity and service state remain preserved, not migrated."))
+        elif ident == "Windscribe.Windscribe" and windscribe_metadata_plan:
+            try:
+                detail = windscribe_tools.build_dry_plan(architecture)
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"Windscribe.Windscribe: official metadata-only review failed: {detail}"
+                blockers.append(reason)
+                actions.append(_blocked("windscribe-metadata", ident, reason, "winget"))
+            else:
+                version = detail["package"]["version"]
+                reason = (f"Windscribe current WinGet version observation {version} matches the publisher's same-version Windows release digest and identifies a Linux desktop DEB candidate; "
+                          "this is not a restore pin. GPG signature/key trust, package contents, privileged VPN service/routing/firewall effects, account activation, and Windows-state migration remain unvalidated. "
+                          "No installer, package, or signature content was downloaded or executed.")
+                blockers.append(reason)
+                actions.append(Action("windscribe-metadata", ident, version=version, status="blocked",
+                                      reason=reason, source="winget", dry_plan=detail))
         else:
             reason = (f"{ident}: {WINGET_REVIEW_REASONS[ident]}" if ident in WINGET_REVIEW_REASONS else
                       f"Windows WinGet declaration has no validated native package/state adapter: {ident}")
@@ -692,6 +711,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="explicitly compare public Scoop and PowerShell release metadata only; never downloads an archive or enables installation")
     ap.add_argument("--tor-browser-metadata-plan", action="store_true",
                     help="explicitly compare public Tor Browser release/checksum metadata only; never downloads packages/signature contents or enables installation")
+    ap.add_argument("--windscribe-metadata-plan", action="store_true",
+                    help="explicitly compare public WinGet and Windscribe release metadata only; never downloads packages/signatures or enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     if args.pnpm_plan_config and args.execute:
@@ -702,11 +723,15 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--pwsh-metadata-plan is dry-only and cannot be combined with --execute")
     if args.tor_browser_metadata_plan and args.execute:
         ap.error("--tor-browser-metadata-plan is dry-only and cannot be combined with --execute")
+    if args.windscribe_metadata_plan and args.execute:
+        ap.error("--windscribe-metadata-plan is dry-only and cannot be combined with --execute")
     if args.ngrok_metadata_plan and args.pnpm_plan_config:
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.pwsh_metadata_plan and (args.ngrok_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.tor_browser_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.pnpm_plan_config):
+        ap.error("Choose only one explicit metadata review per package-planning run")
+    if args.windscribe_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.tor_browser_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     native_roots = {}
     for entry in args.native_root:
@@ -725,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
     options["ngrok_metadata_plan"] = args.ngrok_metadata_plan
     options["pwsh_metadata_plan"] = args.pwsh_metadata_plan
     options["tor_browser_metadata_plan"] = args.tor_browser_metadata_plan
+    options["windscribe_metadata_plan"] = args.windscribe_metadata_plan
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:
