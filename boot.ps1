@@ -120,11 +120,33 @@ if ($bwStatus.status -eq 'unauthenticated') {
     # like a manual 'bw login'. Then lock again so the normal unlock
     # flow below can mint the session key boot.ps1 persists.
     # Resolve the account email without typing it: machine env var, the
-    # address saved by a previous boot on this machine, or git config.
-    # It deliberately does NOT live in this public repo. If none of those
-    # has it, ask once and save it under %APPDATA%\mainframe for next time.
+    # per-user project config (see below), the address saved by a previous
+    # boot on this machine, or git config. A personal address deliberately
+    # does NOT live in this repo's tracked files; mainframe.config.json is
+    # git-ignored. If nothing has it, ask once and save the answer under
+    # %APPDATA%\mainframe for next time.
     $bwEmail = $null
     if (-not [string]::IsNullOrWhiteSpace($env:MAINFRAME_BW_EMAIL)) { $bwEmail = $env:MAINFRAME_BW_EMAIL.Trim() }
+    if (-not $bwEmail) {
+        # Per-user project setting: copy mainframe.config.example.json to
+        # mainframe.config.json in the project root and set bitwardenEmail.
+        $configCandidates = @()
+        if ($PSScriptRoot) { $configCandidates += Join-Path $PSScriptRoot 'mainframe.config.json' }
+        $configCandidates += Join-Path $MainframeDir 'mainframe.config.json'
+        foreach ($configPath in $configCandidates) {
+            if (Test-Path -LiteralPath $configPath) {
+                try {
+                    $projectConfig = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    if ($projectConfig.bitwardenEmail -and ([string]$projectConfig.bitwardenEmail -match '^[^@\s]+@[^@\s]+\.[^@\s]+$')) {
+                        $bwEmail = ([string]$projectConfig.bitwardenEmail).Trim()
+                        break
+                    }
+                } catch {
+                    Write-Warning "ignoring unreadable project config: $configPath"
+                }
+            }
+        }
+    }
     $bwEmailFile = Join-Path $env:APPDATA 'mainframe\bw-email.txt'
     if (-not $bwEmail -and (Test-Path -LiteralPath $bwEmailFile)) {
         $savedEmail = Get-Content -LiteralPath $bwEmailFile -Raw -ErrorAction SilentlyContinue
