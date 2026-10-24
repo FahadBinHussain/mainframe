@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: offline fixture-tested recovery plus Git, mpv, yt-dlp, and Flameshot subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: offline fixture-tested recovery plus Git, mpv, yt-dlp, Flameshot, and qBittorrent subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -8,7 +8,7 @@ The Linux path is deliberately **offline and non-destructive**:
 
 - `linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
 - `--apply-portable` may additionally copy explicitly classified files into a **new** `home-staging/` tree. It never writes the live home directory, activates services, changes global agent instructions, imports credentials, or executes Windows files.
-- `--convert-portable` separately opts into the exact Git, mpv, yt-dlp, and Flameshot settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
+- `--convert-portable` separately opts into the exact Git, mpv, yt-dlp, Flameshot, and qBittorrent settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
 - Every native target below is a **staging candidate layout, not confirmed operational**. A staged byte is not proof that its application, plugins, identity, paths, permissions, or behavior work on Linux.
 - This is **not the user's requested 100% Linux runtime**. It is a lossless-byte-preservation and selective-native-staging tool with explicit blockers.
 
@@ -65,7 +65,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `x64dbg` | Blocked | Windows debugger state/plugins have no native Linux runtime. |
 | `yt-dlp` | Exact config candidate plus bounded config converter | Only `yt-dlp.conf` may be copied under `.config/yt-dlp/` as an unconverted candidate; `--convert-portable` can emit one documented error-policy option to `.config/yt-dlp/config`. Scoop plugin directories and all other unreviewed persist paths remain raw-only; executable/package, JavaScript runtime, plugin, and runtime behavior are unverified. |
 
-Additional quick-persist data has explicit handling: the exact Flameshot config above is the only Flameshot path eligible for candidate staging or conversion; OBS exports remain candidates under `.config/obs-studio/`; qBittorrent exports remain candidates under `.config/qBittorrent/` and torrent metadata under `.local/share/qBittorrent/`. These are staging candidates, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
+Additional quick-archive data has explicit handling: the exact Flameshot config above is the only Flameshot path eligible for candidate staging or conversion; OBS exports remain candidates under `.config/obs-studio/`. qBittorrent conversion reads only `qbittorrent/config/qBittorrent.ini` and emits the six-key subset described below to `.config/qBittorrent/qBittorrent.conf`. `--apply-portable` alone may stage that exact source as an unconverted `.ini` candidate; when conversion is also requested, the raw candidate is not staged. All other qBittorrent paths, including `data/BT_backup` torrent and fast-resume files, remain raw-only. These targets are not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
 
 ## Implemented conversion map: Git portable settings v1
 
@@ -255,6 +255,65 @@ launched, or activated, and the upstream `flameshot config --check` command is
 not run. Package/runtime version, display-stack behavior, and operational
 equivalence therefore remain unverified.
 
+## Implemented conversion map: qBittorrent portable preferences v1
+
+The tracked Windows [backup script](../backup.ps1#L606-L619) copies the Scoop
+custom-profile tree `persist/qbittorrent/profile/qBittorrent` to a `qbittorrent/`
+directory in the output tree; its [split-ZIP packaging](../backup.ps1#L934-L960)
+puts that directory at the quick-ZIP root and excludes the separate `persist/`
+tree. The tracked [restore script](../restore.ps1#L1287-L1297) puts it back under
+the same Windows profile root. The only recognized source file is therefore the exact quick-ZIP member
+`qbittorrent/config/qBittorrent.ini`; other qBittorrent profile paths are raw-only.
+
+The official [FAQ](https://github.com/qbittorrent/qBittorrent/wiki/Frequently-Asked-Questions)
+documents Windows preferences under `%APPDATA%\\qBittorrent` and Linux
+preferences under `~/.config/qBittorrent/`; Linux torrent data normally lives in
+`~/.local/share/qBittorrent/`. Current upstream
+[`profile_p.cpp`](https://raw.githubusercontent.com/qbittorrent/qBittorrent/master/src/base/profile_p.cpp)
+selects Windows `AppDataLocation` versus Unix `AppConfigLocation`, and uses
+`qBittorrent.ini` on Windows versus `qBittorrent.conf` on Unix for a custom
+profile while forcing `QSettings::IniFormat`. The official
+[portable-mode guide](https://github.com/qbittorrent/qBittorrent/wiki/How-to-use-portable-mode)
+supports portable mode from version 4.2.1 but warns that path-specific settings
+may not work after moving profiles between machines.
+
+The adapter emits only these six current shared boolean preferences, whose
+getters/setters are not behind OS-specific guards in upstream
+[`preferences.cpp`](https://raw.githubusercontent.com/qbittorrent/qBittorrent/master/src/base/preferences.cpp):
+
+| QSettings key | Accepted value | Evidence-backed behavior |
+|---|---|---|
+| `Preferences/General/ExitConfirm` | Literal `true` or `false` | Shared exit-confirmation preference. |
+| `Preferences/General/AlternatingRowColors` | Literal `true` or `false` | Shared transfer-list display preference. |
+| `Preferences/General/NoSplashScreen` | Literal `true` or `false` | Shared startup-display preference; no startup action is enabled. |
+| `Preferences/General/ToolbarDisplayed` | Literal `true` or `false` | Shared UI visibility preference. |
+| `Preferences/General/StatusbarDisplayed` | Literal `true` or `false` | Shared UI visibility preference. |
+| `GUI/TransferList/UseTorrentStatesColors` | Literal `true` or `false` | Shared transfer-list display preference. |
+
+The output is written offline to
+`home-staging/.config/qBittorrent/qBittorrent.conf` using the QSettings INI
+group/key form. Only exact section/key spelling and lowercase boolean literals
+are accepted. Duplicate or case-fold-equivalent supported keys are blocked
+rather than resolved; malformed input blocks the file. Unknown and unsupported
+settings stay only in the byte-preserved original and produce reason/count-only
+decisions. The audit does not echo values or unknown key names. This strict
+subset is not a general QSettings migrator: [Qt's QSettings documentation](https://doc.qt.io/qt-6/qsettings.html)
+states that Windows INI keys are case-insensitive while Unix keys are case-sensitive, and qBittorrent's
+[`SettingsStorage`](https://raw.githubusercontent.com/qbittorrent/qBittorrent/master/src/base/settingsstorage.cpp)
+retains manually inserted and feature-disabled keys when saving.
+
+Download/save/watch paths, incomplete paths, fast-resume paths, torrent data,
+WebUI credentials/API keys, proxy and SMTP settings, TLS certificates, external
+programs, custom themes, network bindings, OS-specific startup/tray behavior,
+unknown keys/sections, and all `data/BT_backup` files remain raw-only. The exact
+`.ini` source may be staged as an **unconverted candidate** only when
+`--apply-portable` is requested alone; it may contain those unsupported values.
+When `--convert-portable` is also requested, the raw candidate is suppressed and
+only the allowlisted `.conf` subset may be staged. Source collisions and
+pre-existing output targets block conversion without overwriting; no application
+is installed, launched, or activated. The source package version, target runtime,
+full profile behavior, and operational equivalence remain unverified.
+
 ## Source action coverage
 
 This table records the actual source actions, not hypothetical Linux work. Windows actions remain reference evidence; Linux actions are limited to the checked-in planner/recovery behavior.
@@ -268,6 +327,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Git preference conversion | Opt-in six-setting `.gitconfig` adapter above; original preserved, Windows line-ending defaults translated, unknown/identity/command/credential state excluded with explicit decisions. No native activation. |
 | yt-dlp configuration | Opt-in exact-source adapter above; one documented platform-neutral error-policy option at most. Unknown/auth/path/proxy/plugin/command settings block conversion with sanitized counts; plugin directories stay raw-only. No package install or activation. |
 | Flameshot configuration | Opt-in exact quick-persist adapter above; only `showHelp`, three color settings, and bounded `contrastOpacity` can be emitted. Unsupported fields remain only in the preserved original with sanitized counts; no installation, app validation, or activation occurs. |
+| qBittorrent configuration and torrent metadata | Windows exports a custom profile including config and WebUI state but excludes downloads. Linux emits only six shared booleans from the exact config source; the optional raw `.ini` candidate is never labeled converted, and all other profile fields plus `data/BT_backup` remain raw-only. No installation or activation. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Only `AnyDesk.AnyDesk` package intent is covered by native `anydesk`; other WinGet IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
@@ -285,7 +345,8 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Shortcuts and running processes | Windows package-manager hooks may create shell integration. The restore explicitly launches Edge during extension recovery, stops AnyDesk/Directory Opus processes for persist copying, and restarts processes that were previously running. Linux recovery does not activate `.lnk`, launch browsers, stop/restart apps, or infer startup services. A separately authorized AnyDesk DEB installation may start its vendor service; no Windows service-state migration is implied. |
 | Scheduled tasks | Windows exports only explicitly selected task XML (the default selection is empty). Linux preserves selected XML as documentation; no trigger, credential, SID, timezone, or action is converted to systemd/cron. |
 | Registry and associations | Windows exports user environment/PATH, mpv context-menu, qBittorrent, VLC, and 7-Zip association `.reg` files. The number and contents of association exports are determined from each supplied archive, not a release-specific baseline. Linux retains them as text/reference only; it does not import registry keys or shell verbs. |
-| OBS and qBittorrent | Windows copies scenes/profiles/config while excluding caches/logs/crashes and qBittorrent downloads/cache/logs. Linux exposes only the explicit candidate targets above; source paths, devices, encoders, WebUI credentials, and client versions need review. |
+| OBS | Windows copies scenes/profiles/config while excluding caches, logs, and crashes. Linux exposes only the `.config/obs-studio/` candidate; paths, devices, encoders, plugins, and client versions need review. |
+| qBittorrent | Windows exports a custom profile. Linux converts only the six shared booleans above; the raw config candidate is explicit and unconverted, while paths, WebUI/auth, proxy/SMTP, scripts, OS-specific settings, torrent files, and fast-resume data remain raw-only. Package/runtime version and operational equivalence are unverified. |
 | Browser and account state | Edge/profile and account material may be preserved as opaque bytes or metadata, but DPAPI/app-bound encryption, Secure Preferences, credentials, and Windows identity are not activated. SSH gets a candidate `.ssh` relative export with permission remediation; auth still requires review/re-authentication. |
 | Short-lived setup | `boot.sh --setup-tools` installs only the four prerequisites and clones the public source checkout. It does not run any restore action. |
 
