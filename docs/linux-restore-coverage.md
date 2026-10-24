@@ -57,7 +57,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `rufus` | Blocked | Windows-only disk utility configuration. |
 | `syncplay` | Native staging candidate | `.config/syncplay/`; original Windows layout and player paths remain unverified. |
 | `tesseract` | Native staging candidate | `.local/share/tessdata/`; data layout is a candidate only; package/runtime and language compatibility need review. |
-| `tor-browser` | Blocked | Browser encryption, profile layout, and version migration are not validated. |
+| `tor-browser` | Blocked | Metadata-only review matches the observed Windows 15.0.26 hash to Tor's published checksum text and records a same-version Linux x86_64 candidate. OpenPGP signature/key trust, archive layout/safe extraction, isolated activation, and profile encryption/version migration remain unvalidated; no profile state is imported. See [metadata review](linux-tor-browser-metadata-review.md). |
 | `v2rayn` | Blocked | Windows frontend profiles need an explicit native client adapter. |
 | `vlc` | Native staging candidate | `.config/vlc/`; configuration layout is a candidate only; plugins, paths, and version behavior are unverified. |
 | `windhawk` | Blocked | Windows injection/modification framework has no Linux equivalent. |

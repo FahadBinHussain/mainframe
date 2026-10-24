@@ -31,6 +31,7 @@ import pnpm_global_plan as pnpm_global_tools
 import google_workspace_cli_linux as gws_tools
 import ngrok_linux as ngrok_tools
 import pwsh_linux as pwsh_tools
+import tor_browser_linux as tor_browser_tools
 import wacli_go_plan as wacli_go_tools
 
 NATIVE_PACKAGES = {"bun", "cloudflared", "deno", "nodejs-lts", "opencode2", "pnpm", "uv", "yq"}
@@ -88,7 +89,7 @@ NATIVE_REVIEW_REASONS = {
     "parsec": "Official Linux app is client-only, without hosting; Windows role/state and a pinned checksum/install adapter are unresolved.",
     "pwsh": "Official Linux PowerShell exists, but supported distro/runtime dependencies and pinned package/checksum installation are not validated; Windows modules are not ported.",
     "steam": "The allowlist has no Steam version pin; Valve's Linux steam_latest.deb URL is an unversioned bootstrapper with a self-updating client and udev rules, and no top-level checksum is published there, so no same-version bounded install route is validated.",
-    "tor-browser": "Official Linux Tor Browser exists, but release signature/trust verification and safe version-pinned installation are not implemented.",
+    "tor-browser": "The opt-in metadata-only plan can compare same-version Scoop and Tor release/checksum metadata; OpenPGP signature/key trust, archive layout/safe extraction, and isolated activation remain unvalidated, and no profile state is imported.",
     "vscode": "Official Microsoft Linux VS Code exists with checksums, but download/use requires separately scoped vendor terms acceptance and a validated native adapter; consent is not inferred.",
 }
 WINGET_REVIEW_REASONS = {
@@ -236,6 +237,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                *, pnpm_plan_config: dict[str, Any] | None = None,
                ngrok_metadata_plan: bool = False,
                pwsh_metadata_plan: bool = False,
+               tor_browser_metadata_plan: bool = False,
                gws_root: Path | None = None) -> Plan:
     actual_distro, actual_arch = host_info()
     distro, architecture = distro if distro is not None else actual_distro, architecture if architecture is not None else actual_arch
@@ -322,6 +324,23 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                           "No archive was downloaded and no token/configuration, service or PATH state was read or changed.")
                 blockers.append(reason)
                 actions.append(Action("ngrok-metadata", name, version=version, status="blocked",
+                                      reason=reason, source="scoop", dry_plan=detail))
+        elif name == "tor-browser" and tor_browser_metadata_plan:
+            try:
+                detail = tor_browser_tools.build_dry_plan(architecture)
+            except (RuntimeError, OSError, ValueError, TypeError, http.client.HTTPException) as exc:
+                detail = ("malformed or incomplete HTTP response" if isinstance(exc, http.client.HTTPException)
+                          else str(exc))
+                reason = f"tor-browser: official metadata-only review failed: {detail}"
+                blockers.append(reason)
+                actions.append(_blocked("tor-browser-metadata", name, reason, "scoop"))
+            else:
+                version = detail["package"]["version"]
+                reason = (f"tor-browser current Scoop version observation {version} matches the publisher's Windows x64 checksum and lists a same-version Linux x86_64 candidate; "
+                          "this is not a restore pin, and OpenPGP signature/key trust, archive layout, safe extraction, runtime and activation remain unvalidated. "
+                          "No package or signature content was downloaded, and no browser profile/Tor state is imported.")
+                blockers.append(reason)
+                actions.append(Action("tor-browser-metadata", name, version=version, status="blocked",
                                       reason=reason, source="scoop", dry_plan=detail))
         elif name == "pwsh" and pwsh_metadata_plan:
             try:
@@ -671,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="explicitly compare public Scoop and ngrok archive-index metadata only; never downloads a binary or enables installation")
     ap.add_argument("--pwsh-metadata-plan", action="store_true",
                     help="explicitly compare public Scoop and PowerShell release metadata only; never downloads an archive or enables installation")
+    ap.add_argument("--tor-browser-metadata-plan", action="store_true",
+                    help="explicitly compare public Tor Browser release/checksum metadata only; never downloads packages/signature contents or enables installation")
     ap.add_argument("--distro"); ap.add_argument("--arch", dest="architecture")
     args = ap.parse_args(argv)
     if args.pnpm_plan_config and args.execute:
@@ -679,9 +700,13 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--ngrok-metadata-plan is dry-only and cannot be combined with --execute")
     if args.pwsh_metadata_plan and args.execute:
         ap.error("--pwsh-metadata-plan is dry-only and cannot be combined with --execute")
+    if args.tor_browser_metadata_plan and args.execute:
+        ap.error("--tor-browser-metadata-plan is dry-only and cannot be combined with --execute")
     if args.ngrok_metadata_plan and args.pnpm_plan_config:
         ap.error("Choose only one explicit metadata review per package-planning run")
     if args.pwsh_metadata_plan and (args.ngrok_metadata_plan or args.pnpm_plan_config):
+        ap.error("Choose only one explicit metadata review per package-planning run")
+    if args.tor_browser_metadata_plan and (args.ngrok_metadata_plan or args.pwsh_metadata_plan or args.pnpm_plan_config):
         ap.error("Choose only one explicit metadata review per package-planning run")
     native_roots = {}
     for entry in args.native_root:
@@ -699,6 +724,7 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("pnpm dry-plan config must be a JSON object")
     options["ngrok_metadata_plan"] = args.ngrok_metadata_plan
     options["pwsh_metadata_plan"] = args.pwsh_metadata_plan
+    options["tor_browser_metadata_plan"] = args.tor_browser_metadata_plan
     plan = build_plan(args.repo, args.backup_root, args.distro, args.architecture, gws_root=args.gws_root, **options)
     if args.execute:
         if plan.blockers and not args.select:
