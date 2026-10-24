@@ -75,6 +75,32 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertIn("github.com/openclaw/wacli/cmd/wacli", names)
         self.assertTrue(all(a.status in {"planned", "blocked", "covered"} for a in plan.actions))
 
+    def test_vercel_default_plan_never_resolves_registry_or_runs_package_manager(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            repo = Path(d)
+            manifests = {
+                "scoop-allowed.json": {"apps": ["curl"]},
+                "winget-allowed.json": {"packages": [{"id": "Vendor.Tool"}]},
+                "pnpm-allowed.json": {"packages": ["vercel"]},
+                "uv-allowed.json": {"packages": [{"name": "synthetic-tool"}]},
+                "go-allowed.json": {"packages": ["example.com/synthetic-tool"]},
+            }
+            for name, value in manifests.items():
+                (repo / name).write_text(json.dumps(value))
+            runner = Mock(side_effect=AssertionError("default Vercel plan must not run commands"))
+            with patch.object(lp.pnpm_global_tools, "build_dry_plan") as dry_plan, \
+                 patch.object(lp.pnpm_global_tools, "manifest") as registry_manifest:
+                plan = lp.build_plan(repo, distro="ubuntu", architecture="x86_64")
+                action = next(item for item in plan.actions if item.name == "vercel")
+                self.assertEqual(action.status, "blocked")
+                self.assertIsNone(action.dry_plan)
+                dry_plan.assert_not_called()
+                registry_manifest.assert_not_called()
+                with self.assertRaisesRegex(RuntimeError, "blockers"):
+                    lp.execute(plan, ["vercel"], runner=runner)
+            runner.assert_not_called()
+
     def test_autohotkey_removed_from_both_allowlists_and_dry_plan(self):
         scoop = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
         winget = [x["id"] for x in json.loads((ROOT / "winget-allowed.json").read_text())["packages"]]
