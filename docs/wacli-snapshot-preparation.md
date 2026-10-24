@@ -30,7 +30,7 @@ python3 wacli_snapshot.py capture \
   --destination /approved/new-output
 ```
 
-Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The legacy native `wacli_state.py capture --quiesced` path is now also unconditionally disabled: caller attestation cannot substitute for writer ownership and launch exclusion. Its `snapshot()` API refuses too; offline export and metadata sidecar checks remain available. Separately, the normal Windows backup scripts use a writerless VSS copy for WACLI roots; its source guard exception applies only to the exact profile root after successful VSS verification. This Windows payload is crash-consistent only and does not enable the no-I/O or coordinated capture APIs.
+Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The legacy native `wacli_state.py capture --quiesced` path is now also unconditionally disabled: caller attestation cannot substitute for writer ownership and launch exclusion. Its `snapshot()` API refuses too; offline export and metadata sidecar checks remain available. The Windows native helper retains a writerless VSS copy implementation, but the integrated backup now fails closed before export for WACLI state because supported metadata cannot prove coverage of media paths stored only in SQLite. Any future permitted payload remains crash-consistent only and does not enable the no-I/O or coordinated capture APIs.
 
 ## Upstream command proposal, not a snapshot backend
 
