@@ -24,6 +24,54 @@ if (-not (Test-Path -LiteralPath $QuickZip)) { throw "quick zip not found: $Quic
 if (-not (Test-Path -LiteralPath $PersistZip)) { throw "persist zip not found: $PersistZip (was backup taken with -SkipPersist? both zips are required)" }
 if (-not (Test-Path -LiteralPath $SecretsZip)) { throw "secrets archive not found: $SecretsZip (run .\backup-secrets.ps1 first - backup.ps1 -Publish does that for you)" }
 
+# --- sealed bw email (bw-email.enc.json) ---
+# The email detected below is also sealed with a key derived from the master
+# password (see Seal-BwEmail) into bw-email.enc.json in this (public) repo:
+# ciphertext only, so boot.ps1 can unseal it with the master password setup
+# asks for anyway and a fresh machine never has to type the email.
+function Get-BwEmailKeyMaterial {
+    param([securestring]$Password, [byte[]]$Salt, [int]$Iterations)
+    $plain = [System.Net.NetworkCredential]::new('', $Password).Password
+    $pwBytes = [System.Text.Encoding]::UTF8.GetBytes($plain)
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($pwBytes, $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try { return ,$kdf.GetBytes(64) } finally { $kdf.Dispose() }
+}
+
+function Seal-BwEmail {
+    param([string]$Email, [securestring]$Password)
+    $salt = New-Object byte[] 16
+    $iv = New-Object byte[] 16
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($salt); $rng.GetBytes($iv); $rng.Dispose()
+    $iterations = 600000
+    $km = Get-BwEmailKeyMaterial -Password $Password -Salt $salt -Iterations $iterations
+    $encKey = New-Object byte[] 32; [Array]::Copy($km, 0, $encKey, 0, 32)
+    $macKey = New-Object byte[] 32; [Array]::Copy($km, 32, $macKey, 0, 32)
+    $aes = [System.Security.Cryptography.Aes]::Create()
+    $aes.Key = $encKey; $aes.IV = $iv
+    $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($Email)
+    $ct = $aes.CreateEncryptor().TransformFinalBlock($plainBytes, 0, $plainBytes.Length)
+    $aes.Dispose()
+    $macInput = New-Object byte[] ($salt.Length + $iv.Length + $ct.Length)
+    [Array]::Copy($salt, 0, $macInput, 0, $salt.Length)
+    [Array]::Copy($iv, 0, $macInput, $salt.Length, $iv.Length)
+    [Array]::Copy($ct, 0, $macInput, $salt.Length + $iv.Length, $ct.Length)
+    $hmac = [System.Security.Cryptography.HMACSHA256]::new($macKey)
+    $mac = $hmac.ComputeHash($macInput)
+    $hmac.Dispose()
+    return [ordered]@{
+        v    = 1
+        kdf  = 'PBKDF2-HMAC-SHA256'
+        iter = $iterations
+        salt = [Convert]::ToBase64String($salt)
+        iv   = [Convert]::ToBase64String($iv)
+        ct   = [Convert]::ToBase64String($ct)
+        mac  = [Convert]::ToBase64String($mac)
+    }
+}
+
 # --- vault session (must be unlocked) ---
 $sessionKeyFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
 if (-not (Test-Path -LiteralPath $sessionKeyFile)) {
@@ -162,3 +210,29 @@ if (-not ($after | Where-Object { $_.tagName -eq $tag })) {
 }
 Write-Host "verified: $tag survived prune"
 Write-Host "done: $Repo now holds $([Math]::Min($mine.Count, $Keep)) releases for $hostname"
+
+# --- seal the bw email for fresh-machine restores ---
+# The release notes above are private, but boot.ps1 cannot read them before
+# the vault is unlocked (the gh token comes FROM the vault). The sealed
+# blob is the pre-vault carrier: public ciphertext, openable only with the
+# master password. Seal once; re-seal after an email change by deleting
+# bw-email.enc.json and re-running publish (or run seal-bw-email.ps1).
+$blobPath = Join-Path $PSScriptRoot 'bw-email.enc.json'
+if ($bwEmail) {
+    if (Test-Path -LiteralPath $blobPath) {
+        Write-Host 'seal: bw-email.enc.json already exists - delete it and re-run publish to re-seal'
+    } else {
+        $sealPw = Read-Host 'master password (seals the bw email for fresh-machine restores)' -AsSecureString
+        $sealedBlob = Seal-BwEmail -Email $bwEmail -Password $sealPw
+        Set-Content -LiteralPath $blobPath -Value ($sealedBlob | ConvertTo-Json) -Encoding UTF8
+        try {
+            & git -C $PSScriptRoot add -- bw-email.enc.json 2>$null | Out-Null
+            & git -C $PSScriptRoot commit -m "chore: seal bw email blob $tag" -- bw-email.enc.json 2>$null | Out-Null
+            & git -C $PSScriptRoot push 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-Host 'seal: bw-email.enc.json pushed (ciphertext only)' }
+            else { Write-Warning 'seal: git push of bw-email.enc.json failed - commit it manually; fresh machines will ask for the email once' }
+        } catch {
+            Write-Warning "seal: could not push bw-email.enc.json ($($_.Exception.Message)) - commit it manually"
+        }
+    }
+}
