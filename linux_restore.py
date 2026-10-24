@@ -21,7 +21,8 @@ from zipfile import BadZipFile, ZipFile
 from linux_migrations import (MAX_CONFIG_BYTES, MIGRATION_MAP, convert_git_config,
                               convert_flameshot_config, convert_mpv_config,
                               convert_obs_user_config,
-                              convert_qbittorrent_config, convert_yt_dlp_config)
+                              convert_qbittorrent_config,
+                              convert_user_environment, convert_yt_dlp_config)
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 VERSION = 3
@@ -403,6 +404,8 @@ def stage_conversions(report, destination):
                 output, audit = convert_obs_user_config(payload)
             elif mapping['adapter'] == 'flameshot-portable-preferences-v1':
                 output, audit = convert_flameshot_config(payload)
+            elif mapping['adapter'] == 'user-environment-less-options-v1':
+                output, audit = convert_user_environment(payload)
             else:
                 audit['reason'] = 'unsupported-adapter'
                 continue

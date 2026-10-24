@@ -15,6 +15,18 @@ import linux_migrations as lm
 import linux_restore as lr
 
 
+def encode_registry_export(text):
+    return b'\xff\xfe' + text.encode('utf-16-le')
+
+
+def user_env_reg(*entries):
+    text = ('Windows Registry Editor Version 5.00\r\n\r\n'
+            '[HKEY_CURRENT_USER\\Environment]\r\n')
+    if entries:
+        text += '\r\n'.join(entries) + '\r\n'
+    return encode_registry_export(text)
+
+
 class GitAdapterTests(unittest.TestCase):
     def convert(self, text):
         return lm.convert_git_config(text.encode())
@@ -644,6 +656,106 @@ PrivateIdentifier=SYNTHETIC_UNKNOWN_MARKER
                 self.assertEqual(result['reason'], reason)
                 self.assertGreaterEqual(result['blocked_settings'], 1)
                 self.assertNotIn('SYNTHETIC_WINDOWS_PATH', json.dumps(result))
+
+
+class UserEnvironmentAdapterTests(unittest.TestCase):
+    def convert(self, *entries):
+        return lm.convert_user_environment(user_env_reg(*entries))
+
+    def test_canonical_documented_less_option_sets_are_deterministic(self):
+        for value in sorted(lm.LESS_ALLOWED_OPTION_SETS):
+            with self.subTest(value=value):
+                output, result = self.convert(f'"LESS"="{value}"')
+                self.assertEqual(output, f'LESS={value}\n'.encode('ascii'))
+                self.assertEqual(result['status'], 'converted-subset')
+                self.assertEqual(result['accepted_settings'], 1)
+                self.assertEqual(result['blocked_settings'], 0)
+                self.assertEqual(result['activation'], 'not-performed')
+                self.assertEqual(result, self.convert(f'"LESS"="{value}"')[1])
+
+    def test_unknown_values_stay_raw_and_only_sanitized_counts_are_reported(self):
+        marker = 'SYNTHETIC_CREDENTIAL_MARKER'
+        output, result = self.convert(
+            '"LESS"="-FRX"',
+            r'"PATH"="C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH"',
+            f'"TOKEN"="{marker}"',
+            '"PAGER"="cmd.exe /c SYNTHETIC_SCRIPT_MARKER"',
+            r'"OTHER"="SYNTHETIC\\PATH \"SYNTHETIC_IDENTIFIER\""',
+        )
+        self.assertEqual(output, b'LESS=-FRX\n')
+        self.assertEqual(result['accepted_settings'], 1)
+        self.assertEqual(result['blocked_settings'], 4)
+        serialized = json.dumps(result)
+        for private_value in ('SYNTHETIC_WINDOWS_PATH', marker,
+                              'SYNTHETIC_SCRIPT_MARKER', 'SYNTHETIC_IDENTIFIER'):
+            self.assertNotIn(private_value, serialized)
+        for unknown_name in ('PATH', 'TOKEN', 'PAGER', 'OTHER'):
+            self.assertNotIn(unknown_name, serialized)
+
+    def test_hex_registry_values_are_counted_raw_and_expanded_less_is_rejected(self):
+        output, result = self.convert(
+            '"LESS"="-F"',
+            '"PATH"=hex(2):25,00,\\',
+            '  50,00,00,00',
+        )
+        self.assertEqual(output, b'LESS=-F\n')
+        self.assertEqual(result['blocked_settings'], 1)
+        self.assertEqual(result['decisions'][0]['reason'],
+                         'unmapped-or-sensitive-environment-variable')
+
+        output, result = self.convert('"LESS"=hex(2):2d,00,46,00,00,00')
+        self.assertIsNone(output)
+        self.assertEqual(result['reason'], 'no-supported-settings')
+        self.assertEqual(result['decisions'][0]['reason'],
+                         'unsupported-registry-type')
+        self.assertEqual(result['blocked_settings'], 1)
+
+    def test_casefold_duplicates_unknown_flags_paths_credentials_and_scripts_block(self):
+        output, result = self.convert('"LESS"="-F"', '"less"="-R"')
+        self.assertIsNone(output)
+        self.assertEqual(result['blocked_settings'], 2)
+        self.assertIn('duplicate-setting', json.dumps(result))
+
+        blocked_values = (
+            '-RF', '-FF', '-r', '-FRZ', '-F -R',
+            r'C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH',
+            'SYNTHETIC_CREDENTIAL_MARKER',
+            '-F;SYNTHETIC_SCRIPT_MARKER',
+            '%USERPROFILE%\\SYNTHETIC_PATH',
+            '$(SYNTHETIC_SCRIPT_MARKER)',
+        )
+        for value in blocked_values:
+            with self.subTest(value=value):
+                output, result = self.convert(f'"LESS"="{value}"')
+                self.assertIsNone(output)
+                self.assertEqual(result['blocked_settings'], 1)
+                self.assertNotIn(value, json.dumps(result))
+
+    def test_encoding_header_section_escaping_and_malformed_data_are_strict(self):
+        good_text = ('Windows Registry Editor Version 5.00\r\n\r\n'
+                     '[HKEY_CURRENT_USER\\Environment]\r\n"LESS"="-F"\r\n')
+        invalid_payloads = (
+            good_text.encode('utf-16-le'),
+            b'\xef\xbb\xbf' + good_text.encode('utf-8'),
+            b'\xfe\xff' + good_text.encode('utf-16-be'),
+            encode_registry_export(good_text.replace('Version 5.00', 'REGEDIT4')),
+            encode_registry_export(good_text.replace(
+                'HKEY_CURRENT_USER\\Environment', 'HKEY_LOCAL_MACHINE\\Environment')),
+            user_env_reg('"LESS"="-F', '"TOKEN"="SYNTHETIC_MARKER"'),
+            user_env_reg(r'"PATH"="bad\q"', '"LESS"="-F"'),
+            user_env_reg('[HKEY_CURRENT_USER\\Environment]', '"LESS"="-F"'),
+        )
+        for payload in invalid_payloads:
+            with self.subTest(size=len(payload)):
+                output, result = lm.convert_user_environment(payload)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], 'invalid-registry-export')
+                self.assertNotIn('SYNTHETIC_MARKER', json.dumps(result))
+
+        output, result = lm.convert_user_environment(
+            b'\xff\xfe' + ('x' * (lm.MAX_CONFIG_BYTES + 1)).encode('utf-16-le'))
+        self.assertIsNone(output)
+        self.assertEqual(result['reason'], 'config-size-limit')
 
 
 class MigrationRecoveryTests(unittest.TestCase):
@@ -1411,6 +1523,130 @@ class QBittorrentMigrationRecoveryTests(unittest.TestCase):
         self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
                          b'[Preferences]\nGeneral\\ExitConfirm=true\n')
+
+
+class UserEnvironmentMigrationRecoveryTests(unittest.TestCase):
+    SOURCE = 'user-env.reg'
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.backup = self.root / 'backup'
+        self.backup.mkdir()
+        self.dest = self.root / 'offline'
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text('{"items": []}')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def archive(self, name, members):
+        with ZipFile(self.backup / name, 'w') as archive:
+            for key, payload in members:
+                archive.writestr(key, payload)
+
+    def recover(self, **kwargs):
+        return lr.copy_recovery(self.backup, self.dest,
+                                manifest_path=self.manifest,
+                                mode=kwargs.pop('mode', 'quick'), **kwargs)
+
+    def test_exact_export_converts_only_less_and_preserves_all_original_bytes(self):
+        payload = user_env_reg(
+            '"LESS"="-FRX"',
+            r'"PATH"="C:\\Users\\Fixture\\SYNTHETIC_WINDOWS_PATH"',
+            '"TOKEN"="SYNTHETIC_CREDENTIAL_MARKER"',
+            '"PAGER"="SYNTHETIC_SCRIPT_MARKER"',
+        )
+        self.archive('mainframe-quick.zip', [(self.SOURCE, payload)])
+        live = self.root / 'live-home'
+        live.mkdir()
+        (live / 'sentinel').write_bytes(b'unchanged')
+        with patch.dict(os.environ, {'HOME': str(live)}):
+            report = self.recover(apply_portable=True, convert_portable=True)
+
+        converted = self.dest / 'home-staging/.config/environment.d/90-mainframe-restore.conf'
+        recovered = self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE
+        self.assertEqual(converted.read_bytes(), b'LESS=-FRX\n')
+        self.assertEqual(recovered.read_bytes(), payload)
+        self.assertEqual(lr.file_hash(self.dest / 'raw-archives/mainframe-quick.zip'),
+                         lr.file_hash(self.backup / 'mainframe-quick.zip'))
+        self.assertFalse((self.dest / 'home-staging/user-env.reg').exists())
+        self.assertEqual((live / 'sentinel').read_bytes(), b'unchanged')
+        self.assertEqual(report['data_preservation_status'], 'raw-archives-verified')
+        self.assertEqual(report['conversion_counts'], {'converted-subset': 1})
+        self.assertEqual(report['activation_status'], 'not-performed')
+        self.assertEqual(report['operational_status'], 'incomplete')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['accepted_settings'], 1)
+        self.assertEqual(entry['migration']['blocked_settings'], 3)
+        serialized = json.dumps(report)
+        for marker in ('SYNTHETIC_WINDOWS_PATH', 'SYNTHETIC_CREDENTIAL_MARKER',
+                       'SYNTHETIC_SCRIPT_MARKER', 'LESS=-FRX'):
+            self.assertNotIn(marker, serialized)
+
+    def test_apply_portable_alone_does_not_stage_or_parse_registry_source(self):
+        self.archive('mainframe-quick.zip', [(self.SOURCE, user_env_reg('"LESS"="-F"'))])
+        with patch.object(lr, 'convert_user_environment',
+                          side_effect=AssertionError('conversion not requested')):
+            report = self.recover(apply_portable=True)
+        self.assertFalse((self.dest / 'home-staging/user-env.reg').exists())
+        self.assertFalse((self.dest / 'home-staging/.config/environment.d'
+                          / '90-mainframe-restore.conf').exists())
+        self.assertEqual(report['conversion_status'], 'not-requested')
+
+    def test_case_variant_source_is_not_an_adapter_input(self):
+        self.archive('mainframe-quick.zip', [('USER-ENV.REG', user_env_reg('"LESS"="-F"'))])
+        with patch.object(lr, 'convert_user_environment',
+                          side_effect=AssertionError('nonexact path must not parse')):
+            report = self.recover(apply_portable=True, convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/environment.d'
+                          / '90-mainframe-restore.conf').exists())
+        self.assertEqual(report['conversion_counts'], {})
+        self.assertTrue(all('migration' not in entry for entry in report['entries']))
+
+    def test_duplicate_exact_sources_have_no_winner(self):
+        payload = user_env_reg('"LESS"="-F"')
+        self.archive('mainframe-quick.zip', [(self.SOURCE, payload)])
+        self.archive('mainframe-persist.zip', [(self.SOURCE, payload)])
+        with patch.object(lr, 'convert_user_environment',
+                          side_effect=AssertionError('duplicate source must not parse')):
+            report = self.recover(mode='full', convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/environment.d'
+                          / '90-mainframe-restore.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 2})
+        entries = [e for e in report['entries'] if e['normalized_path'] == self.SOURCE]
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(all(e['migration']['reason'] == 'conversion-target-conflict'
+                            for e in entries))
+
+    def test_casefold_alias_blocks_exact_source_without_parsing_alias(self):
+        alias = 'USER-ENV.REG'
+        self.archive('mainframe-quick.zip', [(self.SOURCE, user_env_reg('"LESS"="-F"'))])
+        self.archive('mainframe-persist.zip', [(alias, user_env_reg('"LESS"="-R"'))])
+        with patch.object(lr, 'convert_user_environment',
+                          side_effect=AssertionError('ambiguous source must not parse')):
+            report = self.recover(mode='full', convert_portable=True)
+        self.assertFalse((self.dest / 'home-staging/.config/environment.d'
+                          / '90-mainframe-restore.conf').exists())
+        self.assertEqual(report['conversion_counts'], {'blocked': 1})
+        exact = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        variant = next(e for e in report['entries'] if e['normalized_path'] == alias)
+        self.assertEqual(exact['migration']['reason'], 'conversion-target-conflict')
+        self.assertNotIn('migration', variant)
+
+    def test_existing_converted_target_is_never_overwritten(self):
+        payload = user_env_reg('"LESS"="-FRX"')
+        self.archive('mainframe-quick.zip', [(self.SOURCE, payload)])
+        report = self.recover(mode='quick')
+        target = self.dest / 'home-staging/.config/environment.d/90-mainframe-restore.conf'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b'existing synthetic target bytes\n')
+        lr.stage_conversions(report, self.dest)
+        self.assertEqual(target.read_bytes(), b'existing synthetic target bytes\n')
+        entry = next(e for e in report['entries'] if e['normalized_path'] == self.SOURCE)
+        self.assertEqual(entry['migration']['reason'], 'conversion-target-conflict')
+        self.assertEqual((self.dest / 'recovered/mainframe-quick.zip' / self.SOURCE).read_bytes(),
+                         payload)
 
 
 class OBSUserIniMigrationRecoveryTests(unittest.TestCase):

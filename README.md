@@ -130,6 +130,18 @@ The source file and original ZIP remain unchanged; the archive does not establis
 that the Linux package version or runtime behavior matches. `mpv-git` remains a
 version/fork candidate, not a supported package substitution.
 
+The user-environment adapter reads only root-level `user-env.reg` from the quick
+ZIP and emits a single canonical plain-string `LESS` assignment containing only
+documented `-F`, `-R`, and `-X` combinations to the offline
+`home-staging/.config/environment.d/90-mainframe-restore.conf` candidate. It
+requires an explicit UTF-16LE BOM and Registry Editor Version 5.00 format because
+Microsoft's `reg export` documentation does not guarantee the file encoding.
+Windows `PATH`, expanded values, credentials, paths, commands, unknown variables,
+and unsupported encodings remain raw-only; `--apply-portable` alone does not parse
+or stage the registry file. The systemd environment file is scoped to the user
+manager and is not a universal shell/login environment change or an activation
+step.
+
 Adapter blocker/migration decisions represent unsupported values, duplicate keys,
 malformed inputs, and source/target conflicts with reason/count data, without
 echoing config values or unknown setting names. The local `restore-manifest.json`

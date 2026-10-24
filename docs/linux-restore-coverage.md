@@ -1,6 +1,6 @@
 # Linux restore coverage: Windows backup inventory
 
-**Status: offline fixture-tested recovery plus Git, mpv, yt-dlp, Flameshot, and qBittorrent subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
+**Status: offline fixture-tested recovery plus Git, mpv, yt-dlp, Flameshot, qBittorrent, OBS, and user-environment LESS-option subset conversion; live setup and restore have not been executed.** This document describes the checked-in Linux recovery implementation and the Windows backup/restore source it can inspect. It is a preservation, staging, and bounded conversion contract, not a claim that the Windows machine becomes a native Linux machine.
 
 ## Scope and safety boundary
 
@@ -8,7 +8,7 @@ The Linux path is deliberately **offline and non-destructive**:
 
 - `linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
 - `--apply-portable` may additionally copy explicitly classified files into a **new** `home-staging/` tree. It never writes the live home directory, activates services, changes global agent instructions, imports credentials, or executes Windows files.
-- `--convert-portable` separately opts into the exact Git, mpv, yt-dlp, Flameshot, and qBittorrent settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
+- `--convert-portable` separately opts into the exact Git, mpv, yt-dlp, Flameshot, qBittorrent, OBS, and user-environment LESS settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
 - Every native target below is a **staging candidate layout, not confirmed operational**. A staged byte is not proof that its application, plugins, identity, paths, permissions, or behavior work on Linux.
 - This is **not the user's requested 100% Linux runtime**. It is a lossless-byte-preservation and selective-native-staging tool with explicit blockers.
 
@@ -65,7 +65,7 @@ The following describes application schemas recognized by the classifier, not a 
 | `x64dbg` | Blocked | Windows debugger state/plugins have no native Linux runtime. |
 | `yt-dlp` | Exact config candidate plus bounded config converter | Only `yt-dlp.conf` may be copied under `.config/yt-dlp/` as an unconverted candidate; `--convert-portable` can emit one documented error-policy option to `.config/yt-dlp/config`. Scoop plugin directories and all other unreviewed persist paths remain raw-only; executable/package, JavaScript runtime, plugin, and runtime behavior are unverified. |
 
-Additional quick-archive data has explicit handling: Flameshot is limited to its exact config candidate/converter; qBittorrent reads only `qbittorrent/config/qBittorrent.ini` and emits the six-key subset below. OBS reads only exact `obs-studio/user.ini`: `--apply-portable` alone stages that file as an unconverted `.config/obs-studio/user.ini` candidate, while `--convert-portable` emits four shared UI/exit-confirmation booleans. All other OBS and qBittorrent paths, including OBS profiles/scenes and qBittorrent torrent/fast-resume data, remain raw-only. The candidate targets are default layouts, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
+Additional quick-archive data has explicit handling: Flameshot is limited to its exact config candidate/converter; qBittorrent reads only `qbittorrent/config/qBittorrent.ini` and emits the six-key subset below. OBS reads only exact `obs-studio/user.ini`: `--apply-portable` alone stages that file as an unconverted `.config/obs-studio/user.ini` candidate, while `--convert-portable` emits four shared UI/exit-confirmation booleans. The root-level `user-env.reg` has a separate converter limited to literal `LESS` pager flags; `--apply-portable` alone neither stages nor parses it. All other OBS and qBittorrent paths, including OBS profiles/scenes and qBittorrent torrent/fast-resume data, remain raw-only. The candidate targets are default layouts, not confirmed operational. Unknown persist application/path data is retained raw and marked unresolved.
 
 ## Implemented conversion map: Git portable settings v1
 
@@ -374,6 +374,52 @@ installed, launched, checked with an OBS executable, or activated. Custom config
 locations, version compatibility, full settings behavior, and operational
 equivalence remain unverified.
 
+## Implemented conversion map: user environment LESS options v1
+
+The tracked [backup script](../backup.ps1#L628-L629) exports `HKCU\Environment`
+to `user-env.reg` at the backup output root. The [quick-ZIP packager](../backup.ps1#L924-L960)
+includes that root member in `mainframe-quick.zip`; the Windows [restore script](../restore.ps1#L1332-L1340)
+imports it, but Linux never imports a registry file. Microsoft documents that
+[`reg export`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/reg-export)
+copies the selected registry key and its subkeys/values, but does not specify the
+exported text encoding. For that reason this converter accepts only a strict
+UTF-16LE-BOM `Windows Registry Editor Version 5.00` file with one exact
+`[HKEY_CURRENT_USER\Environment]` section; other or ambiguous encodings and
+unsupported `.reg` syntax are preserved raw and blocked, never guessed.
+
+Only one case-insensitive `LESS` value is eligible, and only as a plain quoted
+`REG_SZ` string with one of these exact canonical option sets: `-F`, `-R`, `-X`,
+`-FR`, `-FX`, `-RX`, or `-FRX`. Fixed order avoids accepting duplicate, reordered,
+argument-bearing, or unknown switches. Microsoft distinguishes plain `REG_SZ`
+strings from [`REG_EXPAND_SZ`](https://learn.microsoft.com/en-us/windows/win32/sysinfo/registry-value-types)
+values containing unexpanded environment references; every typed `LESS` value,
+including expanded/hex data, is blocked. The [less manual](https://man7.org/linux/man-pages/man1/less.1.html)
+defines `-F` as quitting when a file fits on one screen, `-R` as passing only
+limited ANSI color and OSC 8 hyperlink sequences through, and `-X` as suppressing
+terminal initialization/deinitialization (with a warning that some terminals may
+not behave correctly). Command-line options can override environment defaults.
+
+When at least one supported value exists, conversion emits only the literal
+`LESS=<allowlisted-flags>` line as UTF-8 at the default
+`home-staging/.config/environment.d/90-mainframe-restore.conf`. The
+[systemd `environment.d` manual](https://www.freedesktop.org/software/systemd/man/latest/environment.d.html)
+describes these as user-manager environment settings; they do not themselves
+change the manager's own environment or guarantee propagation to shells,
+PAM/login sessions, non-systemd desktops, or every GUI launch path. No manager,
+shell, registry tool, or `less` process is invoked. The file remains an inactive,
+review-required candidate, not a claim of operational equivalence.
+
+Windows `PATH`, drive/device paths, browser or cookie paths, credentials,
+proxies, shell/script values, other variable names, non-`REG_SZ` data, unknown or
+noncanonical `LESS` options, duplicate values/sections, malformed strings, and
+unsupported encodings remain in the original ZIP and recovered `.reg` bytes.
+Blocker decisions report fixed reasons and counts only; they do not echo unknown
+variable names or values. `--apply-portable` alone does not stage this registry
+source. Source and target collisions block conversion without overwriting, and
+no supported value means no generated file. Exact export encoding, less/systemd
+versions, terminal behavior, session propagation, package installation, and
+operational equivalence remain unverified.
+
 ## Source action coverage
 
 This table records the actual source actions, not hypothetical Linux work. Windows actions remain reference evidence; Linux actions are limited to the checked-in planner/recovery behavior.
@@ -388,6 +434,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | yt-dlp configuration | Opt-in exact-source adapter above; one documented platform-neutral error-policy option at most. Unknown/auth/path/proxy/plugin/command settings block conversion with sanitized counts; plugin directories stay raw-only. No package install or activation. |
 | Flameshot configuration | Opt-in exact quick-persist adapter above; only `showHelp`, three color settings, and bounded `contrastOpacity` can be emitted. Unsupported fields remain only in the preserved original with sanitized counts; no installation, app validation, or activation occurs. |
 | qBittorrent configuration and torrent metadata | Windows exports a custom profile including config and WebUI state but excludes downloads. Linux emits only six shared booleans from the exact config source; the optional raw `.ini` candidate is never labeled converted, and all other profile fields plus `data/BT_backup` remain raw-only. No installation or activation. |
+| User environment (`user-env.reg`) | Opt-in exact-source adapter emits only one literal `LESS` setting with canonical `-F`/`-R`/`-X` combinations to an offline systemd `environment.d` candidate. Encoding is not specified by Microsoft export docs; only strict UTF-16LE-BOM Registry Editor V5 is parsed. `PATH`, expanded values, credentials, commands, unknown variables/types, and unsupported encodings remain raw-only; no registry import, manager update, or activation occurs. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Only `AnyDesk.AnyDesk` package intent is covered by native `anydesk`; other WinGet IDs remain unsupported records. |
 | APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
@@ -404,7 +451,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Pinned opencode v2 | Windows restore recognizes `opencode2` as the pinned v2 install and refuses to run the v1 fork patcher against it because that would overwrite v2; it only runs the v1 patcher when v1 is installed and v2 is absent. Linux stages opencode config/skills/plugins only, excludes `node_modules`, and does not install or activate the v2 runtime. |
 | Shortcuts and running processes | Windows package-manager hooks may create shell integration. The restore explicitly launches Edge during extension recovery, stops AnyDesk/Directory Opus processes for persist copying, and restarts processes that were previously running. Linux recovery does not activate `.lnk`, launch browsers, stop/restart apps, or infer startup services. A separately authorized AnyDesk DEB installation may start its vendor service; no Windows service-state migration is implied. |
 | Scheduled tasks | Windows exports only explicitly selected task XML (the default selection is empty). Linux preserves selected XML as documentation; no trigger, credential, SID, timezone, or action is converted to systemd/cron. |
-| Registry and associations | Windows exports user environment/PATH, mpv context-menu, qBittorrent, VLC, and 7-Zip association `.reg` files. The number and contents of association exports are determined from each supplied archive, not a release-specific baseline. Linux retains them as text/reference only; it does not import registry keys or shell verbs. |
+| Registry and associations | Windows exports user environment/PATH, mpv context-menu, qBittorrent, VLC, and 7-Zip association `.reg` files. The number and contents of association exports are determined from each supplied archive, not a release-specific baseline. Linux never imports registry keys or shell verbs; all association files remain text/reference only, while `user-env.reg` has only the exact bounded LESS subset described above. |
 | OBS | Windows copies the OBS config root while excluding caches, logs, and crashes. Linux recognizes only exact `obs-studio/user.ini`: an unconverted candidate or a four-boolean offline subset. Profiles, scenes, `global.ini`, output/auth, paths, devices, plugins, and all other members remain raw-only; custom XDG/`Locations` paths, version behavior, and operational equivalence are unverified. |
 | qBittorrent | Windows exports a custom profile. Linux converts only the six shared booleans above; the raw config candidate is explicit and unconverted, while paths, WebUI/auth, proxy/SMTP, scripts, OS-specific settings, torrent files, and fast-resume data remain raw-only. Package/runtime version and operational equivalence are unverified. |
 | Browser and account state | Edge/profile and account material may be preserved as opaque bytes or metadata, but DPAPI/app-bound encryption, Secure Preferences, credentials, and Windows identity are not activated. SSH gets a candidate `.ssh` relative export with permission remediation; auth still requires review/re-authentication. |
