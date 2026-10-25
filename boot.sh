@@ -7,12 +7,17 @@ usage() {
 Usage: boot.sh --restore [restore.sh arguments]
        boot.sh --packages [linux_packages.py arguments]
        boot.sh --setup-tools
+       boot.sh --real [linux_real.py arguments]
        boot.sh --help
 
 Restore and package planning require a reviewed local checkout. Defaults are
 read-only; recovery/installation require their own explicit action flags.
 Windows-only state is reported as blocked, never silently skipped.
 --setup-tools installs prerequisites and clones source; it is NOT a restore.
+--real is the live machine setup (the Windows irm flow, for Linux): it
+installs tools, downloads the latest release via the vault, and ACTIVATES
+the portable restore into live HOME. It is the only mode that writes live
+home, and it says so before doing it.
 EOF
 }
 [[ "$(uname -s)" == Linux ]] || fail 'boot.sh supports Linux only.'
@@ -31,7 +36,24 @@ case "$mode" in
         exec python3 "$script_dir/linux_packages.py" "$@"
         ;;
     --setup-tools) (($# == 0)) || fail '--setup-tools accepts no extra arguments.' ;;
-    '') usage >&2; fail 'Select --restore, --packages, or --setup-tools. Nothing has been changed.' ;;
+    --real)
+        if [[ -f "$script_dir/linux_real.py" ]]; then
+            command -v python3 >/dev/null || fail 'Python 3 is required for real mode.'
+            exec python3 "$script_dir/linux_real.py" "$@"
+        fi
+        # Remote one-liner path: only boot.sh itself was downloaded, so
+        # fetch the checkout first (reuse it if a previous run left one).
+        mainframe_dir="$HOME/Downloads/mainframe"
+        if [[ ! -e "$mainframe_dir" ]]; then
+            command -v git >/dev/null || fail 'git is required to fetch the checkout for real mode.'
+            mkdir -p "$(dirname "$mainframe_dir")"
+            git clone https://github.com/FahadBinHussain/mainframe.git "$mainframe_dir"
+        fi
+        [[ -f "$mainframe_dir/linux_real.py" ]] || fail 'Checkout has no linux_real.py; nothing has been changed.'
+        command -v python3 >/dev/null || fail 'Python 3 is required for real mode.'
+        exec python3 "$mainframe_dir/linux_real.py" "$@"
+        ;;
+    '') usage >&2; fail 'Select --restore, --packages, --setup-tools, or --real. Nothing has been changed.' ;;
     *) usage >&2; fail "Unknown mode: $mode" ;;
 esac
 [[ -r /etc/os-release ]] || fail 'Cannot identify Linux distribution: /etc/os-release is missing.'
