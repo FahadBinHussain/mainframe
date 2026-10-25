@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>mainframe password tab</title>
+</head>
+<body>
+<h2>mainframe password tab</h2>
+<p>Type the Bitwarden master password. This page encrypts it in your
+browser with a one-time key and downloads only the encrypted file to
+the machine. The password itself is never sent anywhere, and the page
+makes no network requests at all.</p>
+<form id="f">
+<input id="pw" type="password" autocomplete="off" spellcheck="false"
+  placeholder="Bitwarden master password" style="width:320px">
+<button id="go" type="submit">Send encrypted password</button>
+</form>
+<p id="msg"></p>
+<script>
+function show(t) { document.getElementById('msg').textContent = t; }
+function b64urlToBytes(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const b = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
+  return b;
+}
+function bytesToB64(b) {
+  let s = '';
+  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
+  return btoa(s);
+}
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!window.crypto || !crypto.subtle) {
+    show('this page needs a secure (https) page to encrypt.');
+    return;
+  }
+  const m = location.hash.match(/#k=([A-Za-z0-9_-]+)/);
+  if (!m) { show('bad link — ask for a fresh tab link.'); return; }
+  let key;
+  try {
+    key = await crypto.subtle.importKey('spki', b64urlToBytes(m[1]),
+      { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+  } catch (err) {
+    show('bad key — ask for a fresh tab link.');
+    return;
+  }
+  const field = document.getElementById('pw');
+  const pw = field.value;
+  if (!pw) { show('type the password first.'); return; }
+  let ct;
+  try {
+    ct = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key,
+      new TextEncoder().encode(pw));
+  } catch (err) {
+    show('encryption failed (password may be too long for one key).');
+    return;
+  }
+  field.value = '';
+  const blob = new Blob([bytesToB64(new Uint8Array(ct))],
+    { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'mainframe-vault-pass.enc';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  document.getElementById('go').disabled = true;
+  show('received — the script will pick it up. you can close this tab.');
+});
+</script>
+</body>
+</html>
