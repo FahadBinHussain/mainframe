@@ -216,6 +216,123 @@ def unseal_email(blob_path: Path, password: str) -> str:
     return proc.stdout.decode().strip()
 
 
+# ---------------------------------------------------------------- password tab
+# The agent running this script has no terminal the user can see, so a
+# plain getpass prompt is useless there: the user cannot type into it.
+# Instead, when stdin is not a tty, the script generates an ephemeral
+# RSA keypair, prints a tab URL for the static page docs/vault-tab.html
+# (served by GitHub Pages from this repo's main branch root), and waits
+# for the browser to download the encrypted password file into
+# ~/Downloads. The page makes no network requests: it encrypts in the
+# browser with the one-time public key (passed in the URL fragment) and
+# downloads only ciphertext. The private key never leaves this machine,
+# the ciphertext file is deleted after decryption, and the password
+# itself is never printed, logged, or sent anywhere. A human at a real
+# terminal still gets the plain getpass prompt (stdin is a tty there).
+
+TAB_CIPHER_NAME = "mainframe-vault-pass.enc"
+TAB_WAIT_SECONDS = 600
+
+
+# The tab page lives in the public tool repo, NOT the private release store.
+TOOL_REPO = "FahadBinHussain/mainframe"
+
+
+def _pages_base() -> str:
+    owner, repo = TOOL_REPO.split("/", 1)
+    return f"https://{owner.lower()}.github.io/{repo}"
+
+
+def generate_tab_key(work_root: Path) -> tuple[str, Path]:
+    """Generate an ephemeral RSA keypair; return (tab URL, private key path)."""
+    tmp = work_root / "tmp"
+    mkdirs(tmp)
+    priv = tmp / "vault-tab.key"
+    if priv.exists():
+        priv.unlink()
+    proc = subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "RSA",
+         "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(priv)],
+        capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError("openssl key generation failed")
+    os.chmod(priv, 0o600)
+    proc = subprocess.run(
+        ["openssl", "pkey", "-pubout", "-outform", "DER", "-in", str(priv)],
+        capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError("openssl public key export failed")
+    pub = base64.urlsafe_b64encode(proc.stdout).decode().rstrip("=")
+    return f"{_pages_base()}/docs/vault-tab.html#k={pub}", priv
+
+
+def _try_open_tab(url: str) -> None:
+    """Best effort: open the tab in a desktop browser. Agent runs ignore
+    failure here because the agent opens the printed URL itself."""
+    for cmd in (["xdg-open", url], ["open", url]):
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            continue
+
+
+def wait_for_tab_password(priv: Path) -> str:
+    """Poll ~/Downloads for the encrypted password file, decrypt, clean up."""
+    target = Path.home() / "Downloads" / TAB_CIPHER_NAME
+    if target.exists():
+        target.unlink()  # never decrypt a stale submission
+    deadline = time.time() + TAB_WAIT_SECONDS
+    while time.time() < deadline:
+        if target.exists() and target.stat().st_size > 0:
+            break
+        time.sleep(2)
+    else:
+        raise RuntimeError(
+            "no password arrived in the browser tab within "
+            f"{TAB_WAIT_SECONDS // 60} minutes")
+    try:
+        try:
+            ct = base64.b64decode(target.read_text().strip())
+        except Exception:
+            raise RuntimeError("tab password file was not valid base64")
+    finally:
+        target.unlink(missing_ok=True)
+    proc = subprocess.run(
+        ["openssl", "pkeyutl", "-decrypt", "-inkey", str(priv),
+         "-pkeyopt", "rsa_padding_mode:oaep",
+         "-pkeyopt", "rsa_oaep_md:sha256",
+         "-pkeyopt", "rsa_mgf1_md:sha256"],
+        input=ct, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError("tab password decryption failed")
+    return proc.stdout.decode()
+
+
+def obtain_master_password(work_root: Path, checkout: Path) -> str:
+    """Return the master password: terminal prompt for a human at a tty,
+    browser tab otherwise (the agent case: the user cannot see this shell)."""
+    if sys.stdin.isatty():
+        return getpass.getpass("Bitwarden master password (unlocks the "
+                               "sealed email, then the vault): ")
+    url, priv = generate_tab_key(work_root)
+    try:
+        log(f"password tab: {url}")
+        (work_root / "vault-tab.url").write_text(url)
+        _try_open_tab(url)
+        try:
+            return wait_for_tab_password(priv)
+        except RuntimeError:
+            # A human piping the one-liner may still have /dev/tty.
+            try:
+                return getpass.getpass("Bitwarden master password: ")
+            except Exception:
+                raise
+    finally:
+        priv.unlink(missing_ok=True)
+
+
 def vault_session(work_root: Path, checkout: Path) -> tuple[str, str]:
     """Log in to Vaultwarden via bw, return (gh_token, secrets_password).
 
@@ -238,8 +355,7 @@ def vault_session(work_root: Path, checkout: Path) -> tuple[str, str]:
     email = None
     blob = checkout / "bw-email.enc.json"
     if blob.exists():
-        password = getpass.getpass("Bitwarden master password (unlocks the "
-                                   "sealed email, then the vault): ")
+        password = obtain_master_password(work_root, checkout)
         email = unseal_email(blob, password)
         log("email unsealed from bw-email.enc.json")
     else:
