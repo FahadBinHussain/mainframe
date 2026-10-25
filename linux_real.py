@@ -192,7 +192,8 @@ def unseal_email(blob_path: Path, password: str) -> str:
     package is needed; the key derivation and MAC check are stdlib.
     """
     blob = json.loads(blob_path.read_text())
-    if blob.get("v") != 1 or blob.get("kdf") != "PBKDF2-SHA256":
+    if blob.get("v") != 1 or blob.get("kdf") not in ("PBKDF2-SHA256",
+                                                  "PBKDF2-HMAC-SHA256"):
         raise ValueError(f"unsupported sealed-email blob (v={blob.get('v')}, "
                          f"kdf={blob.get('kdf')})")
     salt = base64.b64decode(blob["salt"])
