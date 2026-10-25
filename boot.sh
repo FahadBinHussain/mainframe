@@ -45,7 +45,23 @@ case "$mode" in
         # fetch the checkout first (reuse it if a previous run left one).
         mainframe_dir="$HOME/Downloads/mainframe"
         if [[ ! -e "$mainframe_dir" ]]; then
-            command -v git >/dev/null || fail 'git is required to fetch the checkout for real mode.'
+            # A fresh box has no git yet; install just that one tool so
+            # the one-liner stays one command (same elevate rule as
+            # --setup-tools). If apt is unavailable, fail loudly.
+            if ! command -v git >/dev/null; then
+                [[ -r /etc/os-release ]] && . /etc/os-release
+                case " ${ID:-} ${ID_LIKE:-} " in
+                    *' debian '*|*' ubuntu '*) ;;
+                    *) fail 'git is missing and this is not a Debian/Ubuntu system; install git, then rerun.' ;;
+                esac
+                if [[ "$(id -u)" == 0 ]]; then elevate=(); else
+                    command -v sudo >/dev/null || fail 'git is missing and sudo is required to install it.'
+                    elevate=(sudo)
+                fi
+                "${elevate[@]}" apt-get update
+                "${elevate[@]}" apt-get install -y git
+                command -v git >/dev/null || fail 'git install failed; nothing has been changed.'
+            fi
             mkdir -p "$(dirname "$mainframe_dir")"
             git clone https://github.com/FahadBinHussain/mainframe.git "$mainframe_dir"
         fi
