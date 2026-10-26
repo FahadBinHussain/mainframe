@@ -57,6 +57,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -232,6 +233,69 @@ def unseal_email(blob_path: Path, password: str) -> str:
 
 TAB_CIPHER_NAME = "mainframe-vault-pass.enc"
 TAB_WAIT_SECONDS = 600
+DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+
+
+def load_config(checkout: Path | None = None) -> dict[str, str]:
+    """Read mainframe.config.json if present from checkout or standard paths."""
+    candidates = []
+    if checkout:
+        candidates.append(checkout / "mainframe.config.json")
+    candidates.append(Path.cwd() / "mainframe.config.json")
+    try:
+        candidates.append(Path.home() / ".config" / "mainframe" / "mainframe.config.json")
+    except Exception:
+        pass
+    for p in candidates:
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+    return {}
+
+
+def get_ntfy_topic(checkout: Path | None = None, explicit: str | None = None) -> str | None:
+    """Resolve ntfy topic: explicit arg > MAINFRAME_NTFY_TOPIC env > mainframe.config.json."""
+    if explicit and explicit.strip():
+        return explicit.strip()
+    from_env = os.environ.get("MAINFRAME_NTFY_TOPIC")
+    if from_env and from_env.strip():
+        return from_env.strip()
+    from_cfg = load_config(checkout).get("ntfyTopic")
+    if from_cfg and isinstance(from_cfg, str) and from_cfg.strip():
+        return from_cfg.strip()
+    return None
+
+
+def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None) -> bool:
+    """Send phone approval push notification via ntfy with clickable link."""
+    host = hostname
+    if not host:
+        try:
+            host = os.uname().nodename
+        except Exception:
+            host = "linux-machine"
+    endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{DEFAULT_NTFY_SERVER}/{ntfy_topic}"
+    body = (f"Headless restore on '{host}' requires Bitwarden vault unlock.\n"
+            f"Tap to approve and transmit encrypted password.")
+    headers = {
+        "Title": f"Mainframe Restore: Vault Unlock ({host})",
+        "Priority": "urgent",
+        "Tags": "lock,key",
+        "Click": url,
+        "Actions": f"view, Unlock Vault, {url}, clear=true",
+    }
+    req = urllib.request.Request(endpoint, data=body.encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status in (200, 201)
+    except Exception as exc:
+        log(f"WARNING: ntfy dispatch to {ntfy_topic} failed: {exc}")
+        return False
+
 
 
 # The tab page lives in the public tool repo, NOT the private release store.
@@ -243,8 +307,9 @@ def _pages_base() -> str:
     return f"https://{owner.lower()}.github.io/{repo}"
 
 
-def generate_tab_key(work_root: Path) -> tuple[str, Path]:
-    """Generate an ephemeral RSA keypair; return (tab URL, private key path)."""
+def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
+                     enable_relay: bool = True) -> tuple[str, Path, str | None]:
+    """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic)."""
     tmp = work_root / "tmp"
     mkdirs(tmp)
     priv = tmp / "vault-tab.key"
@@ -263,7 +328,11 @@ def generate_tab_key(work_root: Path) -> tuple[str, Path]:
     if proc.returncode != 0:
         raise RuntimeError("openssl public key export failed")
     pub = base64.urlsafe_b64encode(proc.stdout).decode().rstrip("=")
-    return f"{_pages_base()}/docs/vault-tab.html#k={pub}", priv
+    sid = reply_topic if reply_topic else (f"mf-vault-{secrets.token_hex(12)}" if enable_relay else None)
+    fragment = f"k={pub}"
+    if sid:
+        fragment += f"&sid={sid}"
+    return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid
 
 
 def _try_open_tab(url: str) -> None:
@@ -278,27 +347,58 @@ def _try_open_tab(url: str) -> None:
             continue
 
 
-def wait_for_tab_password(priv: Path) -> str:
-    """Poll ~/Downloads for the encrypted password file, decrypt, clean up."""
+def wait_for_tab_password(priv: Path, reply_topic: str | None = None) -> str:
+    """Poll for encrypted password from relay or ~/Downloads, decrypt, clean up."""
     target = Path.home() / "Downloads" / TAB_CIPHER_NAME
     if target.exists():
         target.unlink()  # never decrypt a stale submission
     deadline = time.time() + TAB_WAIT_SECONDS
+    raw_b64: str | None = None
+    source = ""
+
+    if reply_topic:
+        log(f"waiting for password via phone approval relay ({reply_topic}) or ~/Downloads/{TAB_CIPHER_NAME} ...")
+    else:
+        log(f"waiting for password via ~/Downloads/{TAB_CIPHER_NAME} ...")
+
     while time.time() < deadline:
         if target.exists() and target.stat().st_size > 0:
+            try:
+                raw_b64 = target.read_text().strip()
+                source = f"~/Downloads/{TAB_CIPHER_NAME}"
+            finally:
+                target.unlink(missing_ok=True)
             break
+
+        if reply_topic:
+            try:
+                poll_url = f"{DEFAULT_NTFY_SERVER}/{reply_topic}/raw?poll=1"
+                req = urllib.request.Request(poll_url)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        body = resp.read().decode("utf-8").strip()
+                        if body:
+                            raw_b64 = body
+                            source = f"ntfy relay ({reply_topic})"
+                            break
+            except Exception:
+                pass
+
         time.sleep(2)
     else:
         raise RuntimeError(
             "no password arrived in the browser tab within "
             f"{TAB_WAIT_SECONDS // 60} minutes")
+
+    if not raw_b64:
+        raise RuntimeError("empty password ciphertext received")
+
+    log(f"vault password ciphertext received via {source}")
     try:
-        try:
-            ct = base64.b64decode(target.read_text().strip())
-        except Exception:
-            raise RuntimeError("tab password file was not valid base64")
-    finally:
-        target.unlink(missing_ok=True)
+        ct = base64.b64decode(raw_b64)
+    except Exception:
+        raise RuntimeError("tab password ciphertext was not valid base64")
+
     proc = subprocess.run(
         ["openssl", "pkeyutl", "-decrypt", "-inkey", str(priv),
          "-pkeyopt", "rsa_padding_mode:oaep",
@@ -310,19 +410,27 @@ def wait_for_tab_password(priv: Path) -> str:
     return proc.stdout.decode()
 
 
-def obtain_master_password(work_root: Path, checkout: Path) -> str:
+def obtain_master_password(work_root: Path, checkout: Path,
+                           ntfy_topic: str | None = None) -> str:
     """Return the master password: terminal prompt for a human at a tty,
-    browser tab otherwise (the agent case: the user cannot see this shell)."""
+    browser tab / phone approval push otherwise."""
     if sys.stdin.isatty():
         return getpass.getpass("Bitwarden master password (unlocks the "
                                "sealed email, then the vault): ")
-    url, priv = generate_tab_key(work_root)
+    url, priv, reply_topic = generate_tab_key(work_root)
     try:
         log(f"password tab: {url}")
         (work_root / "vault-tab.url").write_text(url)
         _try_open_tab(url)
+        if ntfy_topic:
+            log(f"dispatching phone approval notification to ntfy topic: {ntfy_topic}")
+            sent = dispatch_ntfy_unlock(ntfy_topic, url)
+            if sent:
+                log("push notification dispatched to phone successfully.")
+            else:
+                log("push notification dispatch failed; check topic or open the printed URL manually.")
         try:
-            return wait_for_tab_password(priv)
+            return wait_for_tab_password(priv, reply_topic=reply_topic)
         except RuntimeError:
             # A human piping the one-liner may still have /dev/tty.
             try:
@@ -333,7 +441,8 @@ def obtain_master_password(work_root: Path, checkout: Path) -> str:
         priv.unlink(missing_ok=True)
 
 
-def vault_session(work_root: Path, checkout: Path) -> tuple[str, str]:
+def vault_session(work_root: Path, checkout: Path,
+                  ntfy_topic: str | None = None) -> tuple[str, str]:
     """Log in to Vaultwarden via bw, return (gh_token, secrets_password).
 
     The master password is prompted once and reused for login + unlock,
@@ -355,12 +464,16 @@ def vault_session(work_root: Path, checkout: Path) -> tuple[str, str]:
     email = None
     blob = checkout / "bw-email.enc.json"
     if blob.exists():
-        password = obtain_master_password(work_root, checkout)
+        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic)
         email = unseal_email(blob, password)
         log("email unsealed from bw-email.enc.json")
     else:
-        email = input("Bitwarden email: ").strip()
-        password = getpass.getpass("Bitwarden master password: ")
+        email = os.environ.get("MAINFRAME_BW_EMAIL") or load_config(checkout).get("bitwardenEmail")
+        if not email:
+            if not sys.stdin.isatty():
+                fail("headless run without bw-email.enc.json or bitwardenEmail config")
+            email = input("Bitwarden email: ").strip()
+        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic)
     if status.get("status") == "unauthenticated":
         log("bw login ...")
         run([bw, "login", email], env={"BW_PASSWORD": password})
@@ -866,6 +979,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--work-root", type=Path,
                     default=Path.home() / ".local" / "share" / "mainframe",
                     help="tool installs, staging and backups live here")
+    ap.add_argument("--ntfy-topic", type=str, default=None,
+                    help="ntfy.sh topic for phone approval of vault unlock")
     args = ap.parse_args(argv)
 
     if sys.platform != "linux" or sys.version_info < (3, 10):
@@ -900,9 +1015,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # Vault + release.
     backup_root = args.backup_root
+    ntfy_topic = get_ntfy_topic(HERE, explicit=args.ntfy_topic)
+    if ntfy_topic and not args.skip_vault:
+        log(f"phone approval enabled via ntfy topic: {ntfy_topic}")
     if not args.skip_vault:
         try:
-            gh_token, secrets_pw = vault_session(work_root, HERE)
+            gh_token, secrets_pw = vault_session(work_root, HERE, ntfy_topic=ntfy_topic)
             report["secrets_password_present"] = bool(secrets_pw)
             backup_root = backup_root or download_release(work_root, gh_token)
         except Exception as exc:
