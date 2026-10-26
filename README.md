@@ -67,8 +67,10 @@ and a package planner, not a complete operational Windows-to-Linux restore.**
 See the [item-by-item coverage inventory](docs/linux-restore-coverage.md) for every
 persist app, Windows restore action, secret boundary, and remaining blocker.
 Windows DPAPI/browser logins, Windows-only apps, services, task XML, registry,
-private build patchers, and live account-helper activation are not ported. No
-global agent instructions are changed. No unqualified “100% working” claim is made.
+private build patchers, and live account-helper activation are not ported. Global
+agent instructions are unchanged by default; `linux_real.py --restore-global-agents`
+is a narrow opt-in for the exact top-level `AGENTS.md` only. No unqualified
+“100% working” claim is made.
 
 From a **reviewed checkout**, Bash and Python **3.10+** can inspect existing quick
 and persist ZIPs without reading member payloads, decrypting anything, installing
@@ -101,6 +103,14 @@ use restrictive permissions; existing/symlink destinations are rejected. Recover
 streams and verifies bytes, checks free space, and limits expanded data to 100 GiB
 and any one member to 8 GiB by default. Limits can be raised explicitly with
 `--max-expanded-bytes` and `--max-member-bytes` after reviewing metadata.
+
+For a live Linux restore, `linux_real.py --restore-global-agents` copies the exact
+top-level `AGENTS.md` from `mainframe-quick.zip` to `$HOME/AGENTS.md`, verifies
+the bytes, and backs up an existing destination. This option alone activates only
+that file; other staged candidates stay offline. Add `--yes` only when you also
+want all other staged candidates activated. Nested `AGENTS.md` files and
+`.agents/skills` remain blocked. The offline exporter has a separate
+`--include-global-agents` option that stages the file without touching live HOME.
 
 An additional **opt-in conversion**, separate from candidate copying, is available:
 

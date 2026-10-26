@@ -757,7 +757,8 @@ def confirm_activation(file_count: int) -> bool:
         return tty.readline().strip().lower() in ("y", "yes")
 
 
-def activate(staging: Path, home: Path, work_root: Path) -> dict:
+def activate(staging: Path, home: Path, work_root: Path,
+             only_paths: set[str] | None = None) -> dict:
     """Copy home-staging into live HOME. Overwritten files are backed up
     first; symlinks in staging are refused; symlink targets in HOME are
     recorded, not followed."""
@@ -770,6 +771,8 @@ def activate(staging: Path, home: Path, work_root: Path) -> dict:
     refused: list[str] = []
     for src in files:
         rel = src.relative_to(src_root)
+        if only_paths is not None and rel.as_posix() not in only_paths:
+            continue
         target = home / rel
         if src.is_symlink():
             refused.append(str(rel))
@@ -786,20 +789,24 @@ def activate(staging: Path, home: Path, work_root: Path) -> dict:
             backed_up.append(str(rel))
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, target)
+        if rel.as_posix() == "AGENTS.md" and sha256_file(src) != sha256_file(target):
+            raise RuntimeError("AGENTS.md activation failed byte-for-byte verification")
         activated.append(str(rel))
     return {"activated": activated, "backed_up": backed_up,
             "refused_symlinks": refused,
             "backup_dir": str(backup_root) if backed_up else ""}
 
 
-def run_restore(backup_root: Path, work_root: Path, yes: bool) -> dict:
+def run_restore(backup_root: Path, work_root: Path, yes: bool,
+                restore_global_agents: bool = False) -> dict:
     import linux_restore as lr
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     staging = work_root / "restore-staging" / stamp
     # copy_recovery refuses to create the destination's parent.
     staging.parent.mkdir(parents=True, exist_ok=True)
     report = lr.copy_recovery(backup_root, staging, apply_portable=True,
-                              mode="quick", convert_portable=True)
+                              mode="quick", convert_portable=True,
+                              include_global_agents=restore_global_agents)
     staged = sorted(str(p.relative_to(staging / "home-staging"))
                     for p in (staging / "home-staging").rglob("*")
                     if p.is_file() or p.is_symlink()) \
@@ -807,6 +814,24 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool) -> dict:
     log(f"staged {len(staged)} portable file(s); "
         f"recovered members kept under {staging / 'recovered'} (not activated: "
         f"Windows paths do not map to Linux home)")
+    if restore_global_agents:
+        # This explicit option authorizes only the root-level instructions file.
+        # Other candidates stay staged unless the existing --yes flag authorizes all.
+        selected = None if yes else {"AGENTS.md"}
+        activation = activate(staging, Path.home(), work_root,
+                              only_paths=selected)
+        activated = set(activation["activated"])
+        if "AGENTS.md" not in activated:
+            raise RuntimeError("Requested global AGENTS restore did not activate HOME/AGENTS.md")
+        log("restored exact top-level AGENTS.md to HOME/AGENTS.md; byte-for-byte verification passed")
+        remaining = [path for path in staged if path not in activated]
+        note = (f"{len(remaining)} other candidate(s) remain staged; use --yes to activate all"
+                if remaining and not yes else "")
+        if note:
+            log(note)
+        return {"staged": staged, "activation": activation,
+                "staging": str(staging), "status": report.get("operational_status"),
+                "note": note}
     if not staged:
         return {"staged": [], "activation": None,
                 "note": "no portable conversions; nothing to activate"}
@@ -834,6 +859,8 @@ def main(argv: list[str] | None = None) -> int:
                          "(overrides the release download)")
     ap.add_argument("--yes", action="store_true",
                     help="activate into live HOME without asking")
+    ap.add_argument("--restore-global-agents", action="store_true",
+                    help="restore only the exact top-level AGENTS.md to HOME/AGENTS.md; other staged files remain offline unless --yes is also given")
     ap.add_argument("--skip-packages", action="store_true",
                     help="skip the package leg (restore only)")
     ap.add_argument("--work-root", type=Path,
@@ -843,6 +870,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if sys.platform != "linux" or sys.version_info < (3, 10):
         fail("Linux + Python 3.10 or newer required")
+    if args.restore_global_agents and args.skip_vault and args.backup_root is None:
+        fail("--restore-global-agents requires a backup source; pass --backup-root or allow the vault release download")
+    if (args.restore_global_agents and args.backup_root is not None
+            and not (args.backup_root / "mainframe-quick.zip").is_file()):
+        fail("--restore-global-agents requested but --backup-root has no mainframe-quick.zip")
     work_root: Path = args.work_root
     bin_dir = Path.home() / ".local" / "bin"
     mkdirs(bin_dir)
@@ -900,7 +932,8 @@ def main(argv: list[str] | None = None) -> int:
     # Restore + activation.
     if backup_root is not None and (backup_root / "mainframe-quick.zip").exists():
         try:
-            report["restore"] = run_restore(backup_root, work_root, args.yes)
+            report["restore"] = run_restore(
+                backup_root, work_root, args.yes, args.restore_global_agents)
         except Exception as exc:
             failures.append(f"restore: {exc}")
             log(f"restore FAILED: {exc}")

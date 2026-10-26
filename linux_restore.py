@@ -65,7 +65,7 @@ ACTION_BLOCKERS = [
     {'action': 'registry-and-services', 'reason': 'Registry, Windows service identity, and shell integration require separately reviewed native adapters.'},
     {'action': 'scheduled-tasks', 'reason': 'Task XML is preserved; triggers, Windows commands, credentials, and timezones require a deliberate systemd/cron port.'},
     {'action': 'private-source-and-patches', 'reason': 'Private repository clone and Windows fork patch/build actions are not run by offline recovery.'},
-    {'action': 'instruction-activation', 'reason': 'AGENTS.md and skills are preserved only; global agent instructions are never changed.'},
+    {'action': 'instruction-activation', 'reason': 'Global instruction restore is disabled by default; only the exact top-level AGENTS.md can be opted into, while nested instruction files and skills remain blocked.'},
 ]
 
 
@@ -89,7 +89,7 @@ def zip_signature(infos):
     return hashlib.sha256(json.dumps(records, ensure_ascii=True).encode()).hexdigest()
 
 
-def classify(path, archive=''):
+def classify(path, archive='', include_global_agents=False):
     """Return explicit category, reason, optional native-relative export target."""
     low = path.lower()
     p = PurePosixPath(path)
@@ -101,6 +101,9 @@ def classify(path, archive=''):
         return 'opaque-archive', 'Nested archive preserved unopened; encrypted secrets require a separately authorized export/unlock workflow.', None
     if low.endswith(('.dpapi', '.enc')) or p.name == '.encryption_key':
         return 'blocked', 'Encrypted/key material preserved, never decrypted or claimed usable.', None
+    if (include_global_agents and archive == 'mainframe-quick.zip'
+            and path == 'AGENTS.md'):
+        return 'native-staging', 'Exact top-level Windows global instructions; staged byte-for-byte as Linux HOME/AGENTS.md only by explicit opt-in.', 'AGENTS.md'
     if p.name.lower() in ('agents.md', 'agent.md') or low.startswith(('.agents/', 'userprofile/.agents/')):
         return 'blocked', 'Agent instructions/skills are retained, never activated or written globally.', None
     if p.suffix.lower() in BINARY_SUFFIXES or p.suffix.lower() in {'.ps1', '.cmd', '.bat', '.reg'}:
@@ -163,7 +166,7 @@ def discover(root, mode):
     return sources
 
 
-def inventory(root, manifest_path=None, mode='full'):
+def inventory(root, manifest_path=None, mode='full', include_global_agents=False):
     root = Path(root)
     errors, archives, entries = [], [], []
     if not root.is_dir() or root.is_symlink():
@@ -199,7 +202,9 @@ def inventory(root, manifest_path=None, mode='full'):
                                 conflict_names.update((name, str(parent)))
                 for info in infos:
                     ok, norm = safe_member(info.filename)
-                    category, reason, target = classify(norm or info.filename, src.name)
+                    category, reason, target = classify(
+                        norm or info.filename, src.name,
+                        include_global_agents=include_global_agents)
                     problem = None
                     if not ok:
                         problem = 'Unsafe path: absolute, traversal, drive, empty segment, or control character.'
@@ -444,9 +449,18 @@ def stage_conversions(report, destination):
 
 def copy_recovery(root, destination, apply_portable=False, manifest_path=None, mode='full',
                   max_member_bytes=MAX_MEMBER_BYTES, max_expanded_bytes=MAX_EXPANDED_BYTES,
-                  convert_portable=False):
+                  convert_portable=False, include_global_agents=False):
     root = Path(root)
-    archives, entries, errors = inventory(root, manifest_path, mode)
+    archives, entries, errors = inventory(
+        root, manifest_path, mode, include_global_agents=include_global_agents)
+    if include_global_agents:
+        global_agent_entries = [e for e in entries
+                                if e.get('archive') == 'mainframe-quick.zip'
+                                and e.get('normalized_path') == 'AGENTS.md'
+                                and e.get('native_target') == 'AGENTS.md'
+                                and not e.get('materialization_blocked')]
+        if len(global_agent_entries) != 1:
+            raise ValueError('Global AGENTS restore was requested, but the quick archive does not contain exactly one safe top-level AGENTS.md.')
     expanded = sum(e['size'] for e in entries if not e.get('materialization_blocked'))
     if max_member_bytes <= 0 or max_expanded_bytes <= 0:
         errors.append('Extraction safety limits must be positive.')
@@ -455,6 +469,8 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
     if errors:
         raise ValueError('Input preflight failed: ' + '; '.join(errors))
     needed = sum(a['size'] for a in archives) + expanded * (2 if apply_portable else 1)
+    if include_global_agents and not apply_portable:
+        needed += global_agent_entries[0]['size']
     if convert_portable:
         needed += MAX_CONFIG_BYTES * 2  # generated subset plus private publication temporary
     if Path(destination).parent.is_dir() and shutil.disk_usage(Path(destination).parent).free < needed:
@@ -467,14 +483,14 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
               'wacli_restoration': restoration_status(),
               'action_blockers': ACTION_BLOCKERS,
               'limitations': ['Every original ZIP is retained byte-for-byte; unsafe/encrypted members remain in that raw ZIP.',
-                              'Native targets are OFFLINE export candidates only. No settings, tasks, services, packages, credentials, or global instructions are activated.']}
+                              'Native targets are OFFLINE export candidates only. No settings, tasks, services, packages, credentials, or global instructions are activated by this recovery step. The exact top-level AGENTS.md may be staged only with --include-global-agents; live activation is handled separately by linux_real.py.']}
     try:
         raw = destination / 'raw-archives'
         raw.mkdir(mode=0o700)
         recovered = destination / 'recovered'
         recovered.mkdir(mode=0o700)
         stage = destination / 'home-staging'
-        if apply_portable or convert_portable:
+        if apply_portable or convert_portable or include_global_agents:
             stage.mkdir(mode=0o700)
         for arc in archives:
             src = root / arc['name']
@@ -518,7 +534,11 @@ def copy_recovery(root, destination, apply_portable=False, manifest_path=None, m
                                 'qbittorrent/config/qBittorrent.ini',
                                 'obs-studio/user.ini',
                             })
-                        if (apply_portable and e.get('native_target')
+                        should_stage = (
+                            (apply_portable and e.get('native_target'))
+                            or (include_global_agents
+                                and e.get('native_target') == 'AGENTS.md'))
+                        if (should_stage
                                 and not suppress_raw_converter_candidate):
                             out = stage / e['native_target']
                             staging_created = False
@@ -578,6 +598,7 @@ def main(argv=None):
     parser.add_argument('--destination', type=Path)
     parser.add_argument('--apply-portable', action='store_true', help='also export native-path candidates to offline home-staging, NOT live HOME')
     parser.add_argument('--convert-portable', action='store_true', help='convert explicit allowlisted settings into offline home-staging; no activation')
+    parser.add_argument('--include-global-agents', action='store_true', help='stage only the exact top-level AGENTS.md from mainframe-quick.zip as home-staging/AGENTS.md; still offline')
     parser.add_argument('--manifest', type=Path, help='public path manifest; never a credential payload')
     parser.add_argument('--max-member-bytes', type=int, default=MAX_MEMBER_BYTES)
     parser.add_argument('--max-expanded-bytes', type=int, default=MAX_EXPANDED_BYTES)
@@ -586,6 +607,8 @@ def main(argv=None):
         parser.error('--convert-portable requires --recover')
     if args.apply_portable and not args.recover:
         parser.error('--apply-portable requires --recover')
+    if args.include_global_agents and not args.recover:
+        parser.error('--include-global-agents requires --recover')
     if args.destination and not args.recover:
         parser.error('--destination requires --recover')
     if args.recover:
@@ -593,7 +616,8 @@ def main(argv=None):
             parser.error('--recover requires --destination')
         try:
             report = copy_recovery(args.backup, args.destination, args.apply_portable, args.manifest, args.mode,
-                                   args.max_member_bytes, args.max_expanded_bytes, args.convert_portable)
+                                   args.max_member_bytes, args.max_expanded_bytes, args.convert_portable,
+                                   args.include_global_agents)
         except (ValueError, OSError) as exc:
             print('BLOCKED: ' + str(exc), file=sys.stderr)
             return 2
