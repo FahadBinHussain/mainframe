@@ -13,6 +13,7 @@ from zipfile import ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import linux_restore as lr
+import linux_real as lrreal
 
 
 class LinuxRestoreTests(unittest.TestCase):
@@ -116,6 +117,61 @@ class LinuxRestoreTests(unittest.TestCase):
         report = self.recover(True)
         self.assertTrue(all(e['category'] == 'blocked' for e in report['entries']))
         self.assertFalse(any((self.dest / 'home-staging').iterdir()))
+
+    def test_opt_in_restores_only_exact_top_level_global_agents_file(self):
+        exact = b'# user instructions\r\nkeep these bytes exactly\r\n'
+        self.archive([('AGENTS.md', exact),
+                      ('UserProfile/.ssh/id_fixture', b'synthetic key fixture'),
+                      ('UserProfile/AGENTS.md', b'nested instructions'),
+                      ('.agents/skills/example/SKILL.md', b'skill bytes')])
+        home = self.root / 'linux-home'
+        home.mkdir()
+        (home / 'AGENTS.md').write_bytes(b'pre-existing instructions')
+        work_root = self.root / 'work-root'
+
+        with patch.object(lrreal.Path, 'home', return_value=home):
+            result = lrreal.run_restore(self.backup, work_root, yes=False,
+                                        restore_global_agents=True)
+
+        self.assertEqual((home / 'AGENTS.md').read_bytes(), exact)
+        self.assertEqual(
+            (Path(result['activation']['backup_dir']) / 'AGENTS.md').read_bytes(),
+            b'pre-existing instructions')
+        self.assertFalse((home / 'UserProfile/AGENTS.md').exists())
+        self.assertFalse((home / '.ssh/id_fixture').exists())
+        self.assertFalse((home / '.agents/skills/example/SKILL.md').exists())
+        self.assertIn('AGENTS.md', result['activation']['activated'])
+        self.assertIn('other candidate(s) remain staged', result['note'])
+        self.assertEqual(
+            (Path(result['staging']) / 'home-staging/AGENTS.md').read_bytes(), exact)
+
+    def test_global_agents_opt_in_fails_before_output_when_source_missing(self):
+        self.archive([('UserProfile/AGENTS.md', b'nested only')])
+        with self.assertRaisesRegex(ValueError, 'does not contain exactly one safe top-level AGENTS.md'):
+            lr.copy_recovery(self.backup, self.dest, mode='quick',
+                             include_global_agents=True)
+        self.assertFalse(self.dest.exists())
+
+    def test_activate_selected_global_agents_backs_up_and_verifies_exact_bytes(self):
+        exact = b'# exact source\r\nno normalization\r\n'
+        staging = self.root / 'staging'
+        (staging / 'home-staging').mkdir(parents=True)
+        (staging / 'home-staging/AGENTS.md').write_bytes(exact)
+        (staging / 'home-staging/.ssh').mkdir()
+        (staging / 'home-staging/.ssh/id_fixture').write_bytes(b'not selected')
+        home = self.root / 'linux-home'
+        home.mkdir()
+        (home / 'AGENTS.md').write_bytes(b'old instructions')
+
+        result = lrreal.activate(staging, home, self.root / 'work-root',
+                                 only_paths={'AGENTS.md'})
+
+        self.assertEqual((home / 'AGENTS.md').read_bytes(), exact)
+        self.assertEqual(
+            (Path(result['backup_dir']) / 'AGENTS.md').read_bytes(),
+            b'old instructions')
+        self.assertFalse((home / '.ssh/id_fixture').exists())
+        self.assertEqual(result['activated'], ['AGENTS.md'])
 
     def test_quick_full_and_missing_inputs(self):
         self.archive([('quick-persist/ditto/settings', b'q')])
@@ -377,6 +433,8 @@ class LinuxRestoreTests(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertEqual(json.loads(result.stdout)['operational_status'], 'incomplete')
         result = subprocess.run(command + ['--apply-portable'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        result = subprocess.run(command + ['--include-global-agents'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 2)
         self.assertFalse(self.dest.exists())
 
