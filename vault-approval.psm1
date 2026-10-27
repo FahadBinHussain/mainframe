@@ -28,19 +28,14 @@ function Get-CallerIdentity {
     if (-not $Agent) {
         if ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
             $Agent = 'antigravity'
-            if (-not $Model -and $env:ANTIGRAVITY_MODEL) { $Model = $env:ANTIGRAVITY_MODEL }
         } elseif ($env:OPENCODE -or $env:OPENCODE_SESSION -or $env:OPENCODE_DISABLE_CHANNEL_DB) {
             $Agent = 'opencode'
-            if (-not $Model -and $env:OPENCODE_MODEL) { $Model = $env:OPENCODE_MODEL }
         } elseif ($env:CLAUDE_CODE -or $env:CLAUDE_PROJECT_DIR) {
             $Agent = 'claude-code'
-            if (-not $Model -and $env:ANTHROPIC_MODEL) { $Model = $env:ANTHROPIC_MODEL }
         } elseif ($env:CODEX -or $env:CODEX_MODEL) {
             $Agent = 'codex'
-            if (-not $Model -and $env:CODEX_MODEL) { $Model = $env:CODEX_MODEL }
         } elseif ($env:AIDER_MODEL) {
             $Agent = 'aider'
-            if (-not $Model) { $Model = $env:AIDER_MODEL }
         } else {
             # Check process ancestry
             try {
@@ -61,6 +56,52 @@ function Get-CallerIdentity {
 
     if (-not $Agent) {
         $Agent = 'terminal'
+    }
+
+    # Resolve Model via Ground-Truth Thread Inspection or Environment
+    if (-not $Model) {
+        $Model = $env:MAINFRAME_MODEL_NAME
+        if (-not $Model) { $Model = $env:MODEL_NAME }
+        if (-not $Model) { $Model = $env:AI_MODEL }
+    }
+
+    if (-not $Model) {
+        if ($Agent -eq 'antigravity' -and $env:ANTIGRAVITY_CONVERSATION_ID) {
+            # Ground-truth: inspect Antigravity conversation transcript on disk
+            $appData = if ($env:ANTIGRAVITY_APP_DATA_DIR) { $env:ANTIGRAVITY_APP_DATA_DIR } else { (Join-Path $HOME '.gemini\antigravity') }
+            $transcript = Join-Path $appData "brain\$($env:ANTIGRAVITY_CONVERSATION_ID)\.system_generated\logs\transcript.jsonl"
+            if (Test-Path -LiteralPath $transcript) {
+                # Check recent lines first for any mid-thread model switches
+                $recent = Get-Content -LiteralPath $transcript -Tail 100 -ErrorAction SilentlyContinue
+                if ($recent) {
+                    $matches = @($recent | Select-String -Pattern "Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need")
+                    if ($matches.Count -gt 0) {
+                        $Model = $matches[-1].Matches[0].Groups[1].Value.Trim()
+                    }
+                }
+                # Check initial lines (Step 0) if no recent change
+                if (-not $Model) {
+                    $head = Get-Content -LiteralPath $transcript -TotalCount 50 -ErrorAction SilentlyContinue
+                    if ($head) {
+                        $matches = @($head | Select-String -Pattern "Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need")
+                        if ($matches.Count -gt 0) {
+                            $Model = $matches[-1].Matches[0].Groups[1].Value.Trim()
+                        }
+                    }
+                }
+            }
+            if (-not $Model -and $env:ANTIGRAVITY_MODEL) {
+                $Model = $env:ANTIGRAVITY_MODEL
+            }
+        } elseif ($Agent -eq 'opencode') {
+            if ($env:OPENCODE_MODEL) { $Model = $env:OPENCODE_MODEL }
+        } elseif ($Agent -eq 'claude-code') {
+            if ($env:ANTHROPIC_MODEL) { $Model = $env:ANTHROPIC_MODEL }
+        } elseif ($Agent -eq 'codex') {
+            if ($env:CODEX_MODEL) { $Model = $env:CODEX_MODEL }
+        } elseif ($Agent -eq 'aider') {
+            if ($env:AIDER_MODEL) { $Model = $env:AIDER_MODEL }
+        }
     }
 
     return [PSCustomObject]@{

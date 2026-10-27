@@ -274,27 +274,21 @@ def get_ntfy_topic(checkout: Path | None = None, explicit: str | None = None) ->
 
 
 def detect_caller_identity(explicit_agent: str | None = None, explicit_model: str | None = None) -> tuple[str, str | None]:
-    """Detect agent/harness and model identity from explicit args, env vars, or process ancestry."""
+    """Detect agent/harness and model identity from explicit args, env vars, or ground-truth transcript inspection."""
     agent = explicit_agent or os.environ.get("MAINFRAME_AGENT_NAME") or os.environ.get("AGENT_NAME") or os.environ.get("AI_AGENT")
     model = explicit_model or os.environ.get("MAINFRAME_MODEL_NAME") or os.environ.get("MODEL_NAME") or os.environ.get("AI_MODEL")
 
     if not agent:
         if os.environ.get("ANTIGRAVITY_AGENT") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID"):
             agent = "antigravity"
-            if not model and os.environ.get("ANTIGRAVITY_MODEL"):
-                model = os.environ.get("ANTIGRAVITY_MODEL")
         elif os.environ.get("OPENCODE") or os.environ.get("OPENCODE_SESSION") or os.environ.get("OPENCODE_DISABLE_CHANNEL_DB"):
             agent = "opencode"
-            if not model and os.environ.get("OPENCODE_MODEL"):
-                model = os.environ.get("OPENCODE_MODEL")
         elif os.environ.get("CLAUDE_CODE") or os.environ.get("CLAUDE_PROJECT_DIR"):
             agent = "claude-code"
-            if not model and os.environ.get("ANTHROPIC_MODEL"):
-                model = os.environ.get("ANTHROPIC_MODEL")
         elif os.environ.get("CODEX") or os.environ.get("CODEX_MODEL"):
             agent = "codex"
-            if not model and os.environ.get("CODEX_MODEL"):
-                model = os.environ.get("CODEX_MODEL")
+        elif os.environ.get("AIDER_MODEL"):
+            agent = "aider"
         else:
             try:
                 ppid = os.getppid()
@@ -310,6 +304,49 @@ def detect_caller_identity(explicit_agent: str | None = None, explicit_model: st
 
     if not agent:
         agent = "terminal"
+
+    # Resolve Model via Ground-Truth Thread Inspection or Environment
+    if not model:
+        if agent == "antigravity" and os.environ.get("ANTIGRAVITY_CONVERSATION_ID"):
+            convo_id = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
+            app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or str(Path.home() / ".gemini" / "antigravity")
+            transcript = Path(app_data) / "brain" / convo_id / ".system_generated" / "logs" / "transcript.jsonl"
+            if transcript.exists():
+                try:
+                    file_size = transcript.stat().st_size
+                    read_size = min(file_size, 100000)
+                    with transcript.open("rb") as f:
+                        f.seek(file_size - read_size)
+                        tail_chunk = f.read().decode("utf-8", errors="ignore")
+                    matches = list(re.finditer(r"Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need", tail_chunk))
+                    if matches:
+                        model = matches[-1].group(1).strip()
+                    else:
+                        with transcript.open("r", encoding="utf-8", errors="ignore") as f:
+                            for _ in range(50):
+                                line = f.readline()
+                                if not line:
+                                    break
+                                m = re.search(r"Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need", line)
+                                if m:
+                                    model = m.group(1).strip()
+                                    break
+                except Exception:
+                    pass
+            if not model and os.environ.get("ANTIGRAVITY_MODEL"):
+                model = os.environ.get("ANTIGRAVITY_MODEL")
+        elif agent == "opencode":
+            if os.environ.get("OPENCODE_MODEL"):
+                model = os.environ.get("OPENCODE_MODEL")
+        elif agent == "claude-code":
+            if os.environ.get("ANTHROPIC_MODEL"):
+                model = os.environ.get("ANTHROPIC_MODEL")
+        elif agent == "codex":
+            if os.environ.get("CODEX_MODEL"):
+                model = os.environ.get("CODEX_MODEL")
+        elif agent == "aider":
+            if os.environ.get("AIDER_MODEL"):
+                model = os.environ.get("AIDER_MODEL")
 
     return agent, model
 
