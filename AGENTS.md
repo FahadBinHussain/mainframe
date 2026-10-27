@@ -1701,7 +1701,9 @@ than `Add-Content`, which writes platform CRLF.
 - `linux_real.py` uses mobile approval push: configured via `ntfyTopic` in `mainframe.config.json`, `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`.
 - Remote runner generates an ephemeral RSA-2048 keypair (`vault-tab.key`) and single-use session topic (`mf-vault-<token>`).
 - Runner dispatches an urgent push notification via `ntfy.sh` with actionable click link to `https://fahadbinhussain.github.io/mainframe/docs/vault-tab.html#k=<pubkey>&sid=<session_topic>`.
-- Client-side encryption: public key and session ID stay in the URL fragment (`#`), never sent to GitHub Pages servers. The user enters master password on mobile browser; WebCrypto encrypts via RSA-OAEP (SHA-256) and POSTs base64 ciphertext to `https://ntfy.sh/<session_topic>`.
+- Client-side zero-knowledge encryption & 1-tap biometric approval: public key and session ID stay in the URL fragment (`#`), never sent to GitHub Pages servers.
+- `docs/vault-tab.html` supports WebAuthn platform biometrics (fingerprint/face): users enroll once by saving their master password to local device keystore (AES-256-GCM derived via PBKDF2), after which future headless restore requests present a 1-tap "Approve with Fingerprint" button.
+- Tapping approve verifies biometrics via `navigator.credentials.get()`, decrypts the local credential, encrypts with the runner's ephemeral RSA-OAEP (SHA-256) public key, and transmits ciphertext to `https://ntfy.sh/<session_topic>`. No typing master passwords on every restore.
 - Relay server (`ntfy.sh`) sees only ciphertext; without the private key on the remote runner, the relay cannot decrypt secrets.
 - Remote runner polls `https://ntfy.sh/<session_topic>/raw?poll=1` (and `~/Downloads/mainframe-vault-pass.enc` fallback for local runs), decrypts using openssl `pkeyutl -decrypt`, unlinks the private key immediately, and unseals vault secrets unattended.
 - If no ntfy topic is configured or push fails, logs visible warning and keeps the manual tab URL + local Downloads polling active. Zero silent degradation per fail-loud contract.
