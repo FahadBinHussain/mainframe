@@ -148,7 +148,10 @@ def sha256_file(path: Path) -> str:
 
 
 def github_json(url: str, token: str | None = None) -> dict:
-    headers = {"Accept": "application/vnd.github+json"}
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "mainframe-real/1.0",
+    }
     if token:
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, headers=headers)
@@ -490,14 +493,23 @@ def vault_session(work_root: Path, checkout: Path,
         items = []
     gh_token = ""
     secrets_password = ""
+    repo_owner = RELEASE_REPO.split("/")[0].lower()
     for item in items:
-        name = (item.get("name") or "")
-        notes = ((item.get("notes") or ""))
+        name = (item.get("name") or "").lower()
+        notes = (item.get("notes") or "")
         match = GH_TOKEN_RE.search(notes)
-        if "github" in name.lower() and match and not gh_token:
+        if "github" in name and repo_owner in name and match and not gh_token:
             gh_token = match.group(0)
-        if "mainframe-production" in name.lower() and not secrets_password:
+        if "mainframe-production" in name and not secrets_password:
             secrets_password = notes.strip()
+    if not gh_token:
+        for item in items:
+            name = (item.get("name") or "").lower()
+            notes = (item.get("notes") or "")
+            match = GH_TOKEN_RE.search(notes)
+            if "github" in name and match and not gh_token:
+                gh_token = match.group(0)
+                break
     log(f"vault: github token {'found' if gh_token else 'MISSING'}, "
         f"secrets password {'found' if secrets_password else 'MISSING'}")
     if not gh_token:
@@ -522,7 +534,7 @@ def download_release(work_root: Path, token: str) -> Path:
                 log("quick zip already downloaded, reusing it")
             else:
                 log("downloading mainframe-quick.zip ...")
-                download(asset["browser_download_url"], quick,
+                download(asset.get("url") or asset["browser_download_url"], quick,
                          headers={"Authorization": f"Bearer {token}",
                                   "Accept": "application/octet-stream"})
             break
