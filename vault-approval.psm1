@@ -11,7 +11,9 @@ function Get-VaultApprovalUrl {
     param(
         [Parameter(Mandatory = $true)]
         [System.Security.Cryptography.RSA]$Rsa,
-        [string]$ToolRepo = 'FahadBinHussain/mainframe'
+        [string]$ToolRepo = 'FahadBinHussain/mainframe',
+        [string]$PromptContext = 'vault access',
+        [string]$HostName = $env:COMPUTERNAME
     )
 
     $derBytes = $Rsa.ExportSubjectPublicKeyInfo()
@@ -22,12 +24,21 @@ function Get-VaultApprovalUrl {
     $sidHex = -join ($sidBytes | ForEach-Object { $_.ToString('x2') })
     $sid = "mf-vault-$sidHex"
 
+    # Cryptographic random 2-digit verification code for Number Matching
+    $codeBytes = New-Object byte[] 1
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($codeBytes)
+    $code = (10 + ($codeBytes[0] % 90)).ToString()
+
+    $escapedCtx = [Uri]::EscapeDataString($PromptContext)
+    $escapedHost = [Uri]::EscapeDataString($HostName)
+
     $owner = ($ToolRepo -split '/')[0]
-    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid"
+    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx"
 
     return [PSCustomObject]@{
-        Url = $url
-        Sid = $sid
+        Url  = $url
+        Sid  = $sid
+        Code = $code
     }
 }
 
@@ -37,18 +48,22 @@ function Send-VaultApprovalNotification {
         [string]$Topic,
         [Parameter(Mandatory = $true)]
         [string]$Url,
-        [string]$HostName = $env:COMPUTERNAME
+        [string]$HostName = $env:COMPUTERNAME,
+        [string]$Code = $null,
+        [string]$PromptContext = "vault access"
     )
 
     try {
+        $title = if ($Code) { "Vault Unlock: Code [$Code] ($HostName)" } else { "Vault Unlock ($HostName)" }
+        $actionTitle = if ($Code) { "Unlock [$Code]" } else { "Unlock Vault" }
         $headers = @{
-            'Title'   = "Mainframe Restore: Vault Unlock ($HostName)"
+            'Title'   = $title
             'Priority'= 'urgent'
             'Tags'    = 'lock,key'
             'Click'   = $Url
-            'Actions' = "view, Unlock Vault, $Url, clear=true"
+            'Actions' = "view, $actionTitle, $Url, clear=true"
         }
-        $body = "Restore on $HostName requires Bitwarden vault unlock.`nTap to approve with fingerprint."
+        $body = "Request from $HostName for $PromptContext.`nVerification Code: [$Code]`nTap to verify matching number on terminal and approve."
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $null = Invoke-RestMethod -Uri "https://ntfy.sh/$Topic" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
@@ -167,18 +182,22 @@ function Get-VaultMasterPassword {
         $NtfyTopic = 'fahad-vault-restore'
     }
 
-    Write-Host "`n==> 1-tap mobile approval for $PromptContext..." -ForegroundColor Cyan
-
     $rsa = [System.Security.Cryptography.RSA]::Create(2048)
     try {
-        $session = Get-VaultApprovalUrl -Rsa $rsa
+        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext
         $url = $session.Url
         $sid = $session.Sid
+        $code = $session.Code
 
+        Write-Host "`n==> 1-tap mobile approval for $PromptContext" -ForegroundColor Cyan
+        Write-Host "==================================================" -ForegroundColor Green
+        Write-Host "  VERIFICATION CODE: [ $code ]" -ForegroundColor Green
+        Write-Host "  (Ensure the number on your phone matches $code)" -ForegroundColor Yellow
+        Write-Host "==================================================" -ForegroundColor Green
         Write-Host "approval url: $url" -ForegroundColor Gray
 
         if ($NtfyTopic) {
-            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url
+            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext
             if ($sent) {
                 Write-Host "push notification sent to ntfy topic: $NtfyTopic" -ForegroundColor Green
             }

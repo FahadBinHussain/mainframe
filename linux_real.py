@@ -273,7 +273,7 @@ def get_ntfy_topic(checkout: Path | None = None, explicit: str | None = None) ->
     return None
 
 
-def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None) -> bool:
+def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None, code: str | None = None) -> bool:
     """Send phone approval push notification via ntfy with clickable link."""
     host = hostname
     if not host:
@@ -282,14 +282,17 @@ def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None)
         except Exception:
             host = "linux-machine"
     endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{DEFAULT_NTFY_SERVER}/{ntfy_topic}"
-    body = (f"Headless restore on '{host}' requires Bitwarden vault unlock.\n"
-            f"Tap to approve and transmit encrypted password.")
+    body = (f"Restore on '{host}' requires Bitwarden vault unlock.\n"
+            f"Verification Code: [{code}]\n"
+            f"Tap to verify matching number on terminal and approve.")
+    title = f"Vault Unlock: Code [{code}] ({host})" if code else f"Mainframe Restore: Vault Unlock ({host})"
+    action_title = f"Unlock [{code}]" if code else "Unlock Vault"
     headers = {
-        "Title": f"Mainframe Restore: Vault Unlock ({host})",
+        "Title": title,
         "Priority": "urgent",
         "Tags": "lock,key",
         "Click": url,
-        "Actions": f"view, Unlock Vault, {url}, clear=true",
+        "Actions": f"view, {action_title}, {url}, clear=true",
     }
     req = urllib.request.Request(endpoint, data=body.encode("utf-8"), headers=headers, method="POST")
     try:
@@ -311,8 +314,8 @@ def _pages_base() -> str:
 
 
 def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
-                     enable_relay: bool = True) -> tuple[str, Path, str | None]:
-    """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic)."""
+                     enable_relay: bool = True, context: str = "restore") -> tuple[str, Path, str | None, str]:
+    """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic, code)."""
     tmp = work_root / "tmp"
     mkdirs(tmp)
     priv = tmp / "vault-tab.key"
@@ -332,10 +335,16 @@ def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
         raise RuntimeError("openssl public key export failed")
     pub = base64.urlsafe_b64encode(proc.stdout).decode().rstrip("=")
     sid = reply_topic if reply_topic else (f"mf-vault-{secrets.token_hex(12)}" if enable_relay else None)
-    fragment = f"k={pub}"
+    code = str(10 + secrets.randbelow(90))
+    host = ""
+    try:
+        host = os.uname().nodename
+    except Exception:
+        host = os.environ.get("HOSTNAME") or "linux-machine"
+    fragment = f"k={pub}&code={code}&host={urllib.parse.quote(host)}&ctx={urllib.parse.quote(context)}"
     if sid:
         fragment += f"&sid={sid}"
-    return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid
+    return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid, code
 
 
 def try_open_phone_adb(url: str) -> bool:
@@ -437,8 +446,12 @@ def obtain_master_password(work_root: Path, checkout: Path,
     """Obtain Bitwarden master password via 1-tap mobile biometric approval (Google-prompt style),
     falling back loudly to terminal input only if phone approval fails or times out."""
     resolved_topic = ntfy_topic or resolve_ntfy_topic(checkout) or DEFAULT_NTFY_TOPIC
-    url, priv, reply_topic = generate_tab_key(work_root)
+    url, priv, reply_topic, code = generate_tab_key(work_root, context="vault restore")
     try:
+        log("==================================================")
+        log(f"  VERIFICATION CODE: [ {code} ]")
+        log(f"  (Ensure the number on your phone matches {code})")
+        log("==================================================")
         log(f"==> 1-tap mobile approval for vault unlock: {url}")
         (work_root / "vault-tab.url").write_text(url)
 
@@ -448,7 +461,7 @@ def obtain_master_password(work_root: Path, checkout: Path,
         # 2. Dispatch urgent push notification via ntfy
         if resolved_topic:
             log(f"dispatching phone approval notification to ntfy topic: {resolved_topic}")
-            sent = dispatch_ntfy_unlock(resolved_topic, url)
+            sent = dispatch_ntfy_unlock(resolved_topic, url, code=code)
             if sent:
                 log("push notification dispatched to phone successfully.")
             else:
