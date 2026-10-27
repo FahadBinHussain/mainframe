@@ -338,6 +338,25 @@ def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
     return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid
 
 
+def try_open_phone_adb(url: str) -> bool:
+    """If an Android phone is attached via ADB, wake screen and launch full-screen approval prompt."""
+    adb = shutil.which("adb")
+    if not adb:
+        return False
+    try:
+        proc = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=5)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        has_device = any(line.endswith("device") and not line.startswith("List") for line in lines)
+        if has_device:
+            log("phone attached via adb - popping up full-screen prompt on phone...")
+            subprocess.run([adb, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=5)
+            subprocess.run([adb, "shell", f"am start -a android.intent.action.VIEW -d '{url}'"], capture_output=True, timeout=5)
+            return True
+    except Exception as exc:
+        log(f"adb phone wakeup attempt failed: {exc}")
+    return False
+
+
 def _try_open_tab(url: str) -> None:
     """Best effort: open the tab in a desktop browser. Agent runs ignore
     failure here because the agent opens the printed URL itself."""
@@ -415,31 +434,44 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None) -> str:
 
 def obtain_master_password(work_root: Path, checkout: Path,
                            ntfy_topic: str | None = None) -> str:
-    """Return the master password: terminal prompt for a human at a tty,
-    browser tab / phone approval push otherwise."""
-    if sys.stdin.isatty():
-        return getpass.getpass("Bitwarden master password (unlocks the "
-                               "sealed email, then the vault): ")
+    """Obtain Bitwarden master password via 1-tap mobile biometric approval (Google-prompt style),
+    falling back loudly to terminal input only if phone approval fails or times out."""
+    resolved_topic = ntfy_topic or resolve_ntfy_topic(checkout) or DEFAULT_NTFY_TOPIC
     url, priv, reply_topic = generate_tab_key(work_root)
     try:
-        log(f"password tab: {url}")
+        log(f"==> 1-tap mobile approval for vault unlock: {url}")
         (work_root / "vault-tab.url").write_text(url)
-        _try_open_tab(url)
-        if ntfy_topic:
-            log(f"dispatching phone approval notification to ntfy topic: {ntfy_topic}")
-            sent = dispatch_ntfy_unlock(ntfy_topic, url)
+
+        # 1. If phone is attached via ADB, wake and launch full screen immediately
+        opened_adb = try_open_phone_adb(url)
+
+        # 2. Dispatch urgent push notification via ntfy
+        if resolved_topic:
+            log(f"dispatching phone approval notification to ntfy topic: {resolved_topic}")
+            sent = dispatch_ntfy_unlock(resolved_topic, url)
             if sent:
                 log("push notification dispatched to phone successfully.")
             else:
                 log("push notification dispatch failed; check topic or open the printed URL manually.")
+
+        # 3. Best-effort open local desktop browser if present
+        _try_open_tab(url)
+
+        # 4. Await decrypted password from phone relay or local download
         try:
             return wait_for_tab_password(priv, reply_topic=reply_topic)
-        except RuntimeError:
-            # A human piping the one-liner may still have /dev/tty.
+        except RuntimeError as exc:
+            # Rule 8: surface fallback loudly
+            log(f"WARNING: 1-tap mobile approval failed ({exc}). Falling back to MANUAL PASSWORD ENTRY.")
+            if sys.stdin.isatty():
+                return getpass.getpass("Bitwarden master password (unlocks the "
+                                       "sealed email, then the vault): ")
             try:
-                return getpass.getpass("Bitwarden master password: ")
+                # A human piping the one-liner may still have /dev/tty
+                with open("/dev/tty") as tty:
+                    return getpass.getpass("Bitwarden master password: ", stream=tty)
             except Exception:
-                raise
+                raise RuntimeError("1-tap mobile approval failed and no interactive terminal available") from exc
     finally:
         priv.unlink(missing_ok=True)
 
