@@ -111,7 +111,7 @@ Set-Location $MainframeDir
 
 $approvalModule = Join-Path $MainframeDir 'vault-approval.psm1'
 if (Test-Path -LiteralPath $approvalModule) {
-    Import-Module $approvalModule -Force
+    Import-Module $approvalModule -Force -DisableNameChecking
 }
 
 # --- sealed bw email (bw-email.enc.json) ---
