@@ -462,8 +462,12 @@ def vault_session(work_root: Path, checkout: Path,
         bw = str(dest / "bw")
     else:
         log(f"using existing bw at {bw}")
-    run([bw, "config", "server", BW_SERVER])
     status = json.loads(run([bw, "status"]).stdout)
+    if status.get("serverUrl") != BW_SERVER:
+        if status.get("status") != "unauthenticated":
+            run([bw, "logout"], check=False)
+        run([bw, "config", "server", BW_SERVER])
+        status = json.loads(run([bw, "status"]).stdout)
     email = None
     blob = checkout / "bw-email.enc.json"
     if blob.exists():
