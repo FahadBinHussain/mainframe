@@ -161,9 +161,84 @@ function Get-WacliVssInputs {
         ProfileRoot = $profileRoot
         Roots = $indexed
         MetadataFiles = @($metadataFiles)
-        # The supported metadata has no contract proving that SQLite-only media
-        # references are fully represented by the enumerated roots.
-        MediaReferenceCoverage = 'unproven'
+        # Profile metadata alone cannot list media referenced only from SQLite rows,
+        # so coverage is established after the copy, from the held-VSS payload.
+        MediaReferenceCoverage = 'enumerated-after-copy'
+    }
+}
+
+function Resolve-WacliSqliteTool {
+    [CmdletBinding()]
+    param()
+
+    $sqlite = Get-Command sqlite3 -ErrorAction SilentlyContinue
+    if (-not $sqlite) {
+        throw 'WACLI media-reference enumeration requires sqlite3 on PATH; the WACLI payload was not produced and no live-copy fallback exists.'
+    }
+    return $sqlite.Source
+}
+
+function Get-WacliMediaReferences {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$PayloadRoot)
+
+    $sqlite = Resolve-WacliSqliteTool
+    $databases = @(Get-ChildItem -LiteralPath $PayloadRoot -File -Recurse -Force -ErrorAction Stop |
+        Where-Object { $_.Extension -in @('.db', '.sqlite', '.sqlite3') })
+    if ($databases.Count -eq 0) {
+        throw 'WACLI payload holds no SQLite database, so media coverage cannot be established; nothing was exported.'
+    }
+
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $tableCount = 0
+    $supportedTables = [System.Collections.Generic.List[string]]::new()
+    foreach ($database in $databases) {
+        # Enumerate path-bearing columns from the schema itself instead of a
+        # hardcoded table list: local_path is the only supported local media
+        # column, direct_path is a WhatsApp CDN route, anything else is schema
+        # drift that would silently drop coverage.
+        #
+        # Per-table PRAGMA is deliberate: a single pragma_table_info join walks
+        # every table including FTS5 virtual tables, and a sqlite3 build without
+        # the fts5 module then dies with "no such module: fts5" even though the
+        # ordinary tables are perfectly readable.
+        $tableList = @(& $sqlite '-readonly' $database.FullName "SELECT name FROM sqlite_master WHERE type = 'table' AND (sql IS NULL OR sql NOT LIKE 'CREATE VIRTUAL TABLE%') ORDER BY 1;" 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "WACLI database '$($database.Name)' could not be read for media references (exit $LASTEXITCODE); no payload is exported from an unproven database set."
+        }
+        foreach ($table in $tableList) {
+            if ([string]::IsNullOrWhiteSpace($table)) { continue }
+            $escapedTable = $table -replace "'", "''"
+            $columns = @(& $sqlite '-readonly' $database.FullName "PRAGMA table_info('$escapedTable');" 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "WACLI database '$($database.Name)' table '$table' could not be inspected for media references (exit $LASTEXITCODE); media coverage cannot be proven and no payload is exported."
+            }
+            $pathColumns = @($columns | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { ($_ -split '\|')[1] } | Where-Object { $_ -like '*path*' })
+            $unsupported = @($pathColumns | Where-Object { $_ -ne 'local_path' -and $_ -ne 'direct_path' })
+            if ($unsupported.Count -gt 0) {
+                throw "WACLI database '$($database.Name)' table '$table' exposes unsupported media path column(s): $($unsupported -join ', '). The supported schema is local_path + direct_path only, so media coverage cannot be proven and no payload is exported."
+            }
+            if ($pathColumns -notcontains 'local_path') { continue }
+            $tableCount++
+            $supportedTables.Add("$($database.Name).$table")
+            $rows = @(& $sqlite '-readonly' $database.FullName "SELECT DISTINCT local_path FROM '$escapedTable' WHERE local_path IS NOT NULL AND local_path <> '';" 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "WACLI media reference query failed on '$($database.Name)'.$table (exit $LASTEXITCODE)."
+            }
+            foreach ($row in $rows) {
+                if (-not [string]::IsNullOrWhiteSpace($row)) { $paths.Add($row.Trim()) }
+            }
+        }
+    }
+    if ($tableCount -eq 0) {
+        throw "WACLI payload exposes no local_path media column in $($databases.Count) SQLite database(s); the schema is not the supported shape, so coverage cannot be proven and no payload is exported."
+    }
+
+    return [pscustomobject]@{
+        Databases = $databases.Count
+        Tables = $tableCount
+        TablesScanned = @($supportedTables)
+        References = @($paths | Sort-Object -Unique)
     }
 }
 
@@ -177,7 +252,27 @@ function Get-WacliVssBackupExecutable {
     }
     $source = Join-Path $RepositoryRoot 'wacli-vss-client'
     $build = Join-Path $env:TEMP 'mainframe-wacli-vss-build'
-    & $cmake.Source -S $source -B $build | Out-Host
+
+    # This machine has no MSVC; the supported toolchain is MinGW Makefiles with
+    # g++ and make. Fail loudly instead of letting CMake pick the Visual Studio
+    # generator and die with a confusing "no usable generator" error.
+    $generator = 'MinGW Makefiles'
+    $make = Get-Command make -ErrorAction SilentlyContinue
+    $compiler = Get-Command g++ -ErrorAction SilentlyContinue
+    if (-not $make -or -not $compiler) {
+        throw 'WACLI state exists but the native build toolchain is incomplete: the MinGW Makefiles generator needs both make and g++ on PATH (MSVC is not installed on this machine). Held-VSS copy cannot run and no live-copy fallback is allowed.'
+    }
+
+    $cacheFile = Join-Path $build 'CMakeCache.txt'
+    if (Test-Path -LiteralPath $cacheFile -PathType Leaf) {
+        $cachedGenerator = (Select-String -LiteralPath $cacheFile -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1)
+        if ($cachedGenerator -and $cachedGenerator.Matches[0].Groups[1].Value -ne $generator) {
+            Write-Warning "WACLI native VSS helper build cache used generator '$($cachedGenerator.Matches[0].Groups[1].Value)'; recreating it with '$generator'."
+            Remove-Item -LiteralPath $build -Recurse -Force -ErrorAction Stop
+        }
+    }
+
+    & $cmake.Source -S $source -B $build -G $generator "-DCMAKE_MAKE_PROGRAM=$($make.Source)" | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "WACLI native VSS helper configuration failed (exit $LASTEXITCODE)." }
     & $cmake.Source --build $build --config Release --target wacli_vss_backup --parallel 2 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "WACLI native VSS helper build failed (exit $LASTEXITCODE)." }
@@ -201,10 +296,10 @@ function Invoke-WacliVssCopy {
     if (-not $Inputs.HasState -or @($Inputs.Roots).Count -eq 0) {
         throw 'WACLI VSS copy was requested without any enumerated source roots.'
     }
-    $coverageProperty = $Inputs.PSObject.Properties['MediaReferenceCoverage']
-    if (-not $coverageProperty -or [string]$coverageProperty.Value -ne 'proven-complete') {
-        throw 'WACLI VSS backup is blocked: external-media completeness is unproven. Supported profile metadata cannot enumerate every media path referenced only inside SQLite, and database inspection is unsupported; no WACLI payload will be produced.'
-    }
+    # Media coverage is no longer assumed from profile metadata: it is resolved
+    # from the held-VSS payload right after the copy (see below), where every
+    # SQLite media reference is either inside an enumerated root, copied into
+    # the payload, or recorded as already missing on this machine.
     if (Test-Path -LiteralPath $DestinationRoot) {
         throw 'WACLI VSS destination already exists; refusing to overwrite it.'
     }
@@ -245,14 +340,81 @@ function Invoke-WacliVssCopy {
             }
         }
 
+        $media = Get-WacliMediaReferences -PayloadRoot $payload
+        $mediaRoot = Join-Path $DestinationRoot 'media'
+        $mediaMap = [System.Collections.Generic.List[object]]::new()
+        $externalCount = 0
+        foreach ($reference in $media.References) {
+            $fullReference = [System.IO.Path]::GetFullPath($reference)
+            $coveringRoot = @($Inputs.Roots | Where-Object { Test-WacliPathWithin -Parent $_.Path -Child $fullReference } | Sort-Object { $_.Path.Length } | Select-Object -First 1)
+            if ($coveringRoot.Count -eq 1) {
+                $mediaMap.Add([pscustomobject]@{
+                    sourcePath = $fullReference
+                    status = 'inside-root'
+                    rootId = [string]$coveringRoot[0].Id
+                    relativePath = [System.IO.Path]::GetRelativePath([string]$coveringRoot[0].Path, $fullReference)
+                })
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $fullReference -PathType Leaf)) {
+                $mediaMap.Add([pscustomobject]@{ sourcePath = $fullReference; status = 'missing-at-backup-time' })
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $mediaRoot -PathType Container)) {
+                New-Item -ItemType Directory -Path $mediaRoot -Force -ErrorAction Stop | Out-Null
+            }
+            $externalCount++
+            $mediaName = '{0:D3}-{1}' -f $externalCount, [System.IO.Path]::GetFileName($fullReference)
+            $mediaTarget = Join-Path $mediaRoot $mediaName
+            $sourceHash = (Get-FileHash -LiteralPath $fullReference -Algorithm SHA256 -ErrorAction Stop).Hash
+            Copy-Item -LiteralPath $fullReference -Destination $mediaTarget -Force -ErrorAction Stop
+            $copiedHash = (Get-FileHash -LiteralPath $mediaTarget -Algorithm SHA256 -ErrorAction Stop).Hash
+            if ($sourceHash -ne $copiedHash) {
+                throw "External WACLI media copy failed verification for '$fullReference'."
+            }
+            $mediaMap.Add([pscustomobject]@{
+                sourcePath = $fullReference
+                status = 'copied-external'
+                payloadPath = "media/$mediaName"
+                sha256 = $sourceHash
+                length = (Get-Item -LiteralPath $fullReference -ErrorAction Stop).Length
+            })
+        }
+
+        $mediaSummary = [pscustomobject]@{
+            databases = $media.Databases
+            tables = $media.Tables
+            references = @($media.References).Count
+            insideRoots = @($mediaMap | Where-Object { $_.status -eq 'inside-root' }).Count
+            copiedExternal = @($mediaMap | Where-Object { $_.status -eq 'copied-external' }).Count
+            missingAtBackupTime = @($mediaMap | Where-Object { $_.status -eq 'missing-at-backup-time' }).Count
+        }
+        if (@($media.References).Count -gt 0) {
+            $mediaMap | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $DestinationRoot 'media-map.json') -Encoding UTF8
+            if (-not (Test-Path -LiteralPath (Join-Path $DestinationRoot 'media-map.json') -PathType Leaf)) {
+                throw 'WACLI media map could not be written.'
+            }
+        }
+        if ($mediaSummary.missingAtBackupTime -gt 0) {
+            $missingList = ($mediaMap | Where-Object { $_.status -eq 'missing-at-backup-time' } | Select-Object -First 5 -ExpandProperty sourcePath) -join '; '
+            Write-Warning "WACLI media map: $($mediaSummary.missingAtBackupTime) referenced file(s) no longer exist on this machine (recorded as missing-at-backup-time): $missingList"
+        }
+        if ($mediaSummary.copiedExternal -gt 0) {
+            Write-Host "WACLI media: copied $($mediaSummary.copiedExternal) external referenced file(s) into payload\media with SHA256 verification."
+        }
+
         $manifest = [pscustomobject]@{
-            format = 'mainframe-wacli-vss-roots-v1'
+            format = 'mainframe-wacli-vss-roots-v2'
             consistency = 'crash-consistent'
             applicationConsistent = $false
             windowsRuntimeValidated = $false
             restoreActivation = 'not-performed'
             sourcePayloadsReadFrom = 'verified-held-vss-shadow-set'
             sqliteSidecars = 'included-byte-for-byte-no-filename-exclusions'
+            mediaReferenceCoverage = 'proven-complete'
+            mediaReferenceSource = 'held-vss-payload-sqlite-enumeration'
+            externalMediaSource = 'live-file-copy-sha256-verified'
+            mediaReferences = $mediaSummary
             roots = @($Inputs.Roots | ForEach-Object {
                 [pscustomobject]@{ id = $_.Id; archivePath = "payload/$($_.Id)"; sourceRoot = $_.Path; roles = @($_.Roles) }
             })
@@ -276,4 +438,4 @@ function Invoke-WacliVssCopy {
     }
 }
 
-Export-ModuleMember -Function Get-WacliVssInputs, Get-WacliVssBackupExecutable, Invoke-WacliVssCopy, Test-WacliPathWithin
+Export-ModuleMember -Function Get-WacliVssInputs, Get-WacliVssBackupExecutable, Get-WacliMediaReferences, Resolve-WacliSqliteTool, Invoke-WacliVssCopy, Test-WacliPathWithin

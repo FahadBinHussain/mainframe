@@ -172,6 +172,22 @@ $hostname = $env:COMPUTERNAME
 $tag = '{0}-{1}' -f (Get-Date -Format 'yyyy-MM-dd-HHmm'), $hostname
 $quickMB = '{0:N0}' -f ((Get-Item -LiteralPath $QuickZip).Length / 1MB)
 $persistMB = '{0:N0}' -f ((Get-Item -LiteralPath $PersistZip).Length / 1MB)
+
+# GitHub caps ONE release asset at 2 GiB (2147483648 bytes) - not a plan limit,
+# a hard API limit. gh reports it as HTTP 422 "size must be less than 2147483648"
+# AFTER the release was created, which is how 2026-10-27's publish died with a
+# mainframe-persist.zip just over the line. Fail here instead, before any upload,
+# and name the asset + the fix so nobody has to decode a 422 again.
+$assetLimitBytes = 2147483648L
+foreach ($asset in @($QuickZip, $PersistZip)) {
+    $length = (Get-Item -LiteralPath $asset).Length
+    if ($length -ge $assetLimitBytes) {
+        $message = '{0} is {1:N1} MB ({2} bytes), over GitHub''s 2 GiB per-asset limit ({3} bytes). Nothing was uploaded. Shrink the payload: add the responsible scoop persist dir to $excludeDirs in backup.ps1 (regenerable caches like gradle/pnpm/rustup do not belong in a backup) and re-run.' -f `
+            (Split-Path -Leaf $asset), ($length / 1MB), $length, $assetLimitBytes
+        throw $message
+    }
+}
+
 $releaseNotes = "auto-published by backup.ps1 -Publish (quick $quickMB MB incl. secrets $secretsMB MB encrypted + persist $persistMB MB)"
 if ($bwEmail) { $releaseNotes += "`nbw-email: $bwEmail" }
 gh release create $tag $QuickZip $PersistZip --repo $Repo --title "machine state $hostname $tag" --notes $releaseNotes
