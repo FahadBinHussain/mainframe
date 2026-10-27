@@ -111,8 +111,11 @@ function Test-VaultSession {
 
 function Ensure-VaultSession {
     param(
+        [int]$TimeoutSeconds = 120,
         [switch]$NoPrompt,
-        [int]$TimeoutSeconds = 120
+        [string]$Agent,
+        [string]$Model,
+        [string]$PromptContext = 'vault access'
     )
 
     if (Test-VaultSession) {
@@ -131,7 +134,7 @@ function Ensure-VaultSession {
     if (Get-Command Get-VaultMasterPassword -ErrorAction SilentlyContinue) {
         Write-Host "`n==> vault session is locked or expired (1-hour TTL)." -ForegroundColor Yellow
         Write-Host "triggering 1-tap mobile approval prompt on phone..." -ForegroundColor Cyan
-        $pw = Get-VaultMasterPassword -PromptContext 'vault access' -TimeoutSeconds $TimeoutSeconds
+        $pw = Get-VaultMasterPassword -PromptContext $PromptContext -TimeoutSeconds $TimeoutSeconds -Agent $Agent -Model $Model
         if ($pw) {
             [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $pw)
             try {

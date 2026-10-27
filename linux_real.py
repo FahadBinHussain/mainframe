@@ -273,7 +273,49 @@ def get_ntfy_topic(checkout: Path | None = None, explicit: str | None = None) ->
     return None
 
 
-def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None, code: str | None = None) -> bool:
+def detect_caller_identity(explicit_agent: str | None = None, explicit_model: str | None = None) -> tuple[str, str | None]:
+    """Detect agent/harness and model identity from explicit args, env vars, or process ancestry."""
+    agent = explicit_agent or os.environ.get("MAINFRAME_AGENT_NAME") or os.environ.get("AGENT_NAME") or os.environ.get("AI_AGENT")
+    model = explicit_model or os.environ.get("MAINFRAME_MODEL_NAME") or os.environ.get("MODEL_NAME") or os.environ.get("AI_MODEL")
+
+    if not agent:
+        if os.environ.get("ANTIGRAVITY_AGENT") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID"):
+            agent = "antigravity"
+            if not model and os.environ.get("ANTIGRAVITY_MODEL"):
+                model = os.environ.get("ANTIGRAVITY_MODEL")
+        elif os.environ.get("OPENCODE") or os.environ.get("OPENCODE_SESSION") or os.environ.get("OPENCODE_DISABLE_CHANNEL_DB"):
+            agent = "opencode"
+            if not model and os.environ.get("OPENCODE_MODEL"):
+                model = os.environ.get("OPENCODE_MODEL")
+        elif os.environ.get("CLAUDE_CODE") or os.environ.get("CLAUDE_PROJECT_DIR"):
+            agent = "claude-code"
+            if not model and os.environ.get("ANTHROPIC_MODEL"):
+                model = os.environ.get("ANTHROPIC_MODEL")
+        elif os.environ.get("CODEX") or os.environ.get("CODEX_MODEL"):
+            agent = "codex"
+            if not model and os.environ.get("CODEX_MODEL"):
+                model = os.environ.get("CODEX_MODEL")
+        else:
+            try:
+                ppid = os.getppid()
+                comm_path = Path(f"/proc/{ppid}/comm")
+                if comm_path.exists():
+                    comm = comm_path.read_text().strip().lower()
+                    for known in ("antigravity", "opencode", "claude", "codex", "cursor", "windsurf", "aider"):
+                        if known in comm:
+                            agent = known if known != "claude" else "claude-code"
+                            break
+            except Exception:
+                pass
+
+    if not agent:
+        agent = "terminal"
+
+    return agent, model
+
+
+def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None, code: str | None = None,
+                         agent: str | None = None, model: str | None = None) -> bool:
     """Send phone approval push notification via ntfy with clickable link."""
     host = hostname
     if not host:
@@ -282,11 +324,20 @@ def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None,
         except Exception:
             host = "linux-machine"
     endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{DEFAULT_NTFY_SERVER}/{ntfy_topic}"
-    body = (f"Restore on '{host}' requires Bitwarden vault unlock.\n"
-            f"Verification Code: [{code}]\n"
-            f"Tap to verify matching number on terminal and approve.")
-    title = f"Vault Unlock: Code [{code}] ({host})" if code else f"Mainframe Restore: Vault Unlock ({host})"
+    caller_tag = f"{host} • {agent}" if agent else host
+    title = f"Vault Unlock: Code [{code}] ({caller_tag})" if code else f"Vault Unlock ({caller_tag})"
     action_title = f"Unlock [{code}]" if code else "Unlock Vault"
+    body_lines = [f"Request from {host}"]
+    if agent:
+        body_lines.append(f"Agent: {agent}")
+    if model:
+        body_lines.append(f"Model: {model}")
+    body_lines.extend([
+        "Action: vault restore",
+        f"Verification Code: [{code}]",
+        "Tap to verify matching number on terminal and approve."
+    ])
+    body = "\n".join(body_lines)
     headers = {
         "Title": title,
         "Priority": "urgent",
@@ -314,8 +365,10 @@ def _pages_base() -> str:
 
 
 def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
-                     enable_relay: bool = True, context: str = "restore") -> tuple[str, Path, str | None, str]:
-    """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic, code)."""
+                     enable_relay: bool = True, context: str = "restore",
+                     agent: str | None = None, model: str | None = None) -> tuple[str, Path, str | None, str, str, str | None]:
+    """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic, code, agent, model)."""
+    resolved_agent, resolved_model = detect_caller_identity(agent, model)
     tmp = work_root / "tmp"
     mkdirs(tmp)
     priv = tmp / "vault-tab.key"
@@ -341,10 +394,12 @@ def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
         host = os.uname().nodename
     except Exception:
         host = os.environ.get("HOSTNAME") or "linux-machine"
-    fragment = f"k={pub}&code={code}&host={urllib.parse.quote(host)}&ctx={urllib.parse.quote(context)}"
+    fragment = f"k={pub}&code={code}&host={urllib.parse.quote(host)}&ctx={urllib.parse.quote(context)}&agent={urllib.parse.quote(resolved_agent)}"
+    if resolved_model:
+        fragment += f"&model={urllib.parse.quote(resolved_model)}"
     if sid:
         fragment += f"&sid={sid}"
-    return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid, code
+    return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid, code, resolved_agent, resolved_model
 
 
 def try_open_phone_adb(url: str) -> bool:
@@ -442,14 +497,27 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None) -> str:
 
 
 def obtain_master_password(work_root: Path, checkout: Path,
-                           ntfy_topic: str | None = None) -> str:
+                           ntfy_topic: str | None = None,
+                           agent: str | None = None,
+                           model: str | None = None) -> str:
     """Obtain Bitwarden master password via 1-tap mobile biometric approval (Google-prompt style),
     falling back loudly to terminal input only if phone approval fails or times out."""
     resolved_topic = ntfy_topic or resolve_ntfy_topic(checkout) or DEFAULT_NTFY_TOPIC
-    url, priv, reply_topic, code = generate_tab_key(work_root, context="vault restore")
+    url, priv, reply_topic, code, resolved_agent, resolved_model = generate_tab_key(
+        work_root, context="vault restore", agent=agent, model=model
+    )
+    host = ""
+    try:
+        host = os.uname().nodename
+    except Exception:
+        host = os.environ.get("HOSTNAME") or "linux-machine"
+    caller_display = f"{resolved_agent} ({resolved_model}) @ {host}" if resolved_model else f"{resolved_agent} @ {host}"
+
     try:
         log("==================================================")
         log(f"  VERIFICATION CODE: [ {code} ]")
+        log(f"  Caller: {caller_display}")
+        log("  Context: vault restore")
         log(f"  (Ensure the number on your phone matches {code})")
         log("==================================================")
         log(f"==> 1-tap mobile approval for vault unlock: {url}")
@@ -461,7 +529,10 @@ def obtain_master_password(work_root: Path, checkout: Path,
         # 2. Dispatch urgent push notification via ntfy
         if resolved_topic:
             log(f"dispatching phone approval notification to ntfy topic: {resolved_topic}")
-            sent = dispatch_ntfy_unlock(resolved_topic, url, code=code)
+            sent = dispatch_ntfy_unlock(
+                resolved_topic, url, hostname=host, code=code,
+                agent=resolved_agent, model=resolved_model
+            )
             if sent:
                 log("push notification dispatched to phone successfully.")
             else:
