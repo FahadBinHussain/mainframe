@@ -476,10 +476,11 @@ def vault_session(work_root: Path, checkout: Path,
         password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic)
     if status.get("status") == "unauthenticated":
         log("bw login ...")
-        run([bw, "login", email], env={"BW_PASSWORD": password})
+        run([bw, "login", email, "--passwordenv", "BW_PASSWORD"],
+            env={"BW_PASSWORD": password})
         run([bw, "lock"])
     log("bw unlock ...")
-    session = run([bw, "unlock", "--raw"],
+    session = run([bw, "unlock", "--raw", "--passwordenv", "BW_PASSWORD"],
                   env={"BW_PASSWORD": password}).stdout.strip()
     if not session:
         raise RuntimeError("bw unlock produced no session key")
