@@ -189,7 +189,38 @@
     border: 1px solid var(--border);
     display: inline-flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 0.35rem;
+  }
+  .meta-tag .tag-icon {
+    display: inline-block;
+  }
+  .icon-host {
+    animation: host-sway 2.5s ease-in-out infinite alternate;
+  }
+  @keyframes host-sway {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(-2px); }
+  }
+  .icon-agent {
+    animation: agent-bob 2.8s ease-in-out infinite alternate;
+  }
+  @keyframes agent-bob {
+    0% { transform: rotate(0deg) scale(1); }
+    100% { transform: rotate(8deg) scale(1.12); }
+  }
+  .icon-model {
+    animation: model-pulse 2.2s ease-in-out infinite alternate;
+  }
+  @keyframes model-pulse {
+    0% { transform: scale(1); opacity: 0.85; }
+    100% { transform: scale(1.15); opacity: 1; }
+  }
+  .icon-ctx {
+    animation: ctx-spark 1.8s ease-in-out infinite alternate;
+  }
+  @keyframes ctx-spark {
+    0% { transform: translateY(0) scale(1); }
+    100% { transform: translateY(-1.5px) scale(1.15); }
   }
   button:disabled {
     background: #484f58;
@@ -278,8 +309,22 @@
     <div class="verify-number" id="verify-code">--</div>
     <div class="verify-sub">Confirm this number matches your terminal screen</div>
     <div class="verify-meta" id="verify-meta">
-      <span class="meta-tag" id="meta-host" style="display:none"></span>
-      <span class="meta-tag" id="meta-ctx" style="display:none"></span>
+      <span class="meta-tag" id="meta-host" style="display:none">
+        <span class="tag-icon icon-host">💻</span>
+        <span class="tag-text"></span>
+      </span>
+      <span class="meta-tag" id="meta-agent" style="display:none">
+        <span class="tag-icon icon-agent">🤖</span>
+        <span class="tag-text"></span>
+      </span>
+      <span class="meta-tag" id="meta-model" style="display:none">
+        <span class="tag-icon icon-model">🧠</span>
+        <span class="tag-text"></span>
+      </span>
+      <span class="meta-tag" id="meta-ctx" style="display:none">
+        <span class="tag-icon icon-ctx">⚡</span>
+        <span class="tag-text"></span>
+      </span>
     </div>
   </div>
 
@@ -358,12 +403,16 @@ function getParams() {
   const code = params.get('code') || (hash.match(/(?:^|&)code=([0-9]+)/) || [])[1];
   const host = params.get('host') || (hash.match(/(?:^|&)host=([^&]+)/) || [])[1];
   const ctx = params.get('ctx') || (hash.match(/(?:^|&)ctx=([^&]+)/) || [])[1];
+  const agent = params.get('agent') || (hash.match(/(?:^|&)agent=([^&]+)/) || [])[1];
+  const model = params.get('model') || (hash.match(/(?:^|&)model=([^&]+)/) || [])[1];
   return {
     k,
     sid,
     code,
     host: host ? decodeURIComponent(host) : null,
-    ctx: ctx ? decodeURIComponent(ctx) : null
+    ctx: ctx ? decodeURIComponent(ctx) : null,
+    agent: agent ? decodeURIComponent(agent) : null,
+    model: model ? decodeURIComponent(model) : null
   };
 }
 
@@ -505,7 +554,7 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  const { k, sid, code, host, ctx } = getParams();
+  const { k, sid, code, host, ctx, agent, model } = getParams();
   if (!k || k.length < 50) {
     show('Invalid or missing public key in URL link. Request a fresh link from runner.', 'error');
     document.getElementById('icon-container').className = 'icon-wrap error';
@@ -517,15 +566,39 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('verify-code').textContent = code;
     if (host) {
       const el = document.getElementById('meta-host');
-      el.textContent = '💻 ' + host;
+      el.querySelector('.tag-text').textContent = host;
       el.style.display = 'inline-flex';
-      const badge = document.getElementById('host-badge');
-      if (badge) badge.textContent = host;
+    }
+    if (agent) {
+      const el = document.getElementById('meta-agent');
+      el.querySelector('.tag-text').textContent = agent;
+      el.style.display = 'inline-flex';
+    }
+    if (model) {
+      const el = document.getElementById('meta-model');
+      el.querySelector('.tag-text').textContent = model;
+      el.style.display = 'inline-flex';
     }
     if (ctx) {
       const el = document.getElementById('meta-ctx');
-      el.textContent = '⚡ ' + ctx;
+      el.querySelector('.tag-text').textContent = ctx;
       el.style.display = 'inline-flex';
+    }
+    const badge = document.getElementById('host-badge');
+    if (badge) {
+      if (agent && host) {
+        badge.textContent = `${agent} @ ${host}`;
+      } else if (host) {
+        badge.textContent = host;
+      } else if (agent) {
+        badge.textContent = agent;
+      }
+    }
+    const desc = document.getElementById('desc');
+    if (desc) {
+      const caller = agent ? agent : 'Runner';
+      const onHost = host ? ` on ${host}` : '';
+      desc.textContent = `${caller}${onHost} is waiting for authorization to unlock Bitwarden secrets.`;
     }
   }
 

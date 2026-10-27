@@ -7,14 +7,82 @@
     and listens on the single-use relay topic for client-side encrypted master password.
 #>
 
+function Get-CallerIdentity {
+    param(
+        [string]$Agent,
+        [string]$Model
+    )
+
+    if (-not $Agent) {
+        $Agent = $env:MAINFRAME_AGENT_NAME
+        if (-not $Agent) { $Agent = $env:AGENT_NAME }
+        if (-not $Agent) { $Agent = $env:AI_AGENT }
+        if (-not $Agent) { $Agent = $env:HARNESS_NAME }
+    }
+    if (-not $Model) {
+        $Model = $env:MAINFRAME_MODEL_NAME
+        if (-not $Model) { $Model = $env:MODEL_NAME }
+        if (-not $Model) { $Model = $env:AI_MODEL }
+    }
+
+    if (-not $Agent) {
+        if ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
+            $Agent = 'antigravity'
+            if (-not $Model -and $env:ANTIGRAVITY_MODEL) { $Model = $env:ANTIGRAVITY_MODEL }
+        } elseif ($env:OPENCODE -or $env:OPENCODE_SESSION -or $env:OPENCODE_DISABLE_CHANNEL_DB) {
+            $Agent = 'opencode'
+            if (-not $Model -and $env:OPENCODE_MODEL) { $Model = $env:OPENCODE_MODEL }
+        } elseif ($env:CLAUDE_CODE -or $env:CLAUDE_PROJECT_DIR) {
+            $Agent = 'claude-code'
+            if (-not $Model -and $env:ANTHROPIC_MODEL) { $Model = $env:ANTHROPIC_MODEL }
+        } elseif ($env:CODEX -or $env:CODEX_MODEL) {
+            $Agent = 'codex'
+            if (-not $Model -and $env:CODEX_MODEL) { $Model = $env:CODEX_MODEL }
+        } elseif ($env:AIDER_MODEL) {
+            $Agent = 'aider'
+            if (-not $Model) { $Model = $env:AIDER_MODEL }
+        } else {
+            # Check process ancestry
+            try {
+                $p = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
+                while ($p) {
+                    $name = $p.ProcessName.ToLower()
+                    if ($name -match 'antigravity') { $Agent = 'antigravity'; break }
+                    if ($name -match 'opencode') { $Agent = 'opencode'; break }
+                    if ($name -match 'claude') { $Agent = 'claude-code'; break }
+                    if ($name -match 'codex') { $Agent = 'codex'; break }
+                    if ($name -match 'cursor') { $Agent = 'cursor'; break }
+                    if ($name -match 'windsurf') { $Agent = 'windsurf'; break }
+                    $p = $p.Parent
+                }
+            } catch {}
+        }
+    }
+
+    if (-not $Agent) {
+        $Agent = 'terminal'
+    }
+
+    return [PSCustomObject]@{
+        Agent = $Agent
+        Model = $Model
+    }
+}
+
 function Get-VaultApprovalUrl {
     param(
         [Parameter(Mandatory = $true)]
         [System.Security.Cryptography.RSA]$Rsa,
         [string]$ToolRepo = 'FahadBinHussain/mainframe',
         [string]$PromptContext = 'vault access',
-        [string]$HostName = $env:COMPUTERNAME
+        [string]$HostName = $env:COMPUTERNAME,
+        [string]$Agent = $null,
+        [string]$Model = $null
     )
+
+    $identity = Get-CallerIdentity -Agent $Agent -Model $Model
+    $resolvedAgent = $identity.Agent
+    $resolvedModel = $identity.Model
 
     $derBytes = $Rsa.ExportSubjectPublicKeyInfo()
     $k = [Convert]::ToBase64String($derBytes).Replace('+', '-').Replace('/', '_').TrimEnd('=')
@@ -31,14 +99,18 @@ function Get-VaultApprovalUrl {
 
     $escapedCtx = [Uri]::EscapeDataString($PromptContext)
     $escapedHost = [Uri]::EscapeDataString($HostName)
+    $escapedAgent = [Uri]::EscapeDataString($resolvedAgent)
+    $modelParam = if ($resolvedModel) { "&model=" + [Uri]::EscapeDataString($resolvedModel) } else { "" }
 
     $owner = ($ToolRepo -split '/')[0]
-    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx"
+    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam"
 
     return [PSCustomObject]@{
-        Url  = $url
-        Sid  = $sid
-        Code = $code
+        Url   = $url
+        Sid   = $sid
+        Code  = $code
+        Agent = $resolvedAgent
+        Model = $resolvedModel
     }
 }
 
@@ -50,11 +122,14 @@ function Send-VaultApprovalNotification {
         [string]$Url,
         [string]$HostName = $env:COMPUTERNAME,
         [string]$Code = $null,
-        [string]$PromptContext = "vault access"
+        [string]$PromptContext = "vault access",
+        [string]$Agent = $null,
+        [string]$Model = $null
     )
 
     try {
-        $title = if ($Code) { "Vault Unlock: Code [$Code] ($HostName)" } else { "Vault Unlock ($HostName)" }
+        $callerTag = if ($Agent) { "$HostName • $Agent" } else { $HostName }
+        $title = if ($Code) { "Vault Unlock: Code [$Code] ($callerTag)" } else { "Vault Unlock ($callerTag)" }
         $actionTitle = if ($Code) { "Unlock [$Code]" } else { "Unlock Vault" }
         $headers = @{
             'Title'   = $title
@@ -63,7 +138,13 @@ function Send-VaultApprovalNotification {
             'Click'   = $Url
             'Actions' = "view, $actionTitle, $Url, clear=true"
         }
-        $body = "Request from $HostName for $PromptContext.`nVerification Code: [$Code]`nTap to verify matching number on terminal and approve."
+        $bodyParts = @("Request from $HostName")
+        if ($Agent) { $bodyParts += "Agent: $Agent" }
+        if ($Model) { $bodyParts += "Model: $Model" }
+        $bodyParts += "Action: $PromptContext"
+        $bodyParts += "Verification Code: [$Code]"
+        $bodyParts += "Tap to verify matching number on terminal and approve."
+        $body = $bodyParts -join "`n"
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $null = Invoke-RestMethod -Uri "https://ntfy.sh/$Topic" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
@@ -152,8 +233,11 @@ function Decrypt-VaultApprovalCiphertext {
 function Get-VaultMasterPassword {
     param(
         [string]$NtfyTopic = $null,
-        [string]$PromptContext = "vault restore",
-        [int]$TimeoutSeconds = 300
+        [string]$PromptContext = "vault access",
+        [int]$TimeoutSeconds = 300,
+        [string]$Agent = $null,
+        [string]$Model = $null,
+        [string]$HostName = $env:COMPUTERNAME
     )
 
     # Resolve ntfy topic
@@ -184,20 +268,26 @@ function Get-VaultMasterPassword {
 
     $rsa = [System.Security.Cryptography.RSA]::Create(2048)
     try {
-        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext
+        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext -HostName $HostName -Agent $Agent -Model $Model
         $url = $session.Url
         $sid = $session.Sid
         $code = $session.Code
+        $resolvedAgent = $session.Agent
+        $resolvedModel = $session.Model
+
+        $callerDisplay = if ($resolvedModel) { "$resolvedAgent ($resolvedModel) @ $HostName" } else { "$resolvedAgent @ $HostName" }
 
         Write-Host "`n==> 1-tap mobile approval for $PromptContext" -ForegroundColor Cyan
         Write-Host "==================================================" -ForegroundColor Green
         Write-Host "  VERIFICATION CODE: [ $code ]" -ForegroundColor Green
+        Write-Host "  Caller: $callerDisplay" -ForegroundColor White
+        Write-Host "  Context: $PromptContext" -ForegroundColor Gray
         Write-Host "  (Ensure the number on your phone matches $code)" -ForegroundColor Yellow
         Write-Host "==================================================" -ForegroundColor Green
         Write-Host "approval url: $url" -ForegroundColor Gray
 
         if ($NtfyTopic) {
-            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext
+            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel
             if ($sent) {
                 Write-Host "push notification sent to ntfy topic: $NtfyTopic" -ForegroundColor Green
             }
@@ -222,6 +312,7 @@ function Get-VaultMasterPassword {
 }
 
 Export-ModuleMember -Function `
+    Get-CallerIdentity, `
     Get-VaultApprovalUrl, `
     Send-VaultApprovalNotification, `
     Open-VaultApprovalOnPhone, `
