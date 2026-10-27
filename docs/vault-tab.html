@@ -256,7 +256,8 @@ function show(text, type='') {
 }
 
 function b64urlToBytes(s) {
-  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  if (!s) return new Uint8Array(0);
+  s = s.replace(/[^A-Za-z0-9\-_]/g, '').replace(/-/g, '+').replace(/_/g, '/');
   while (s.length % 4) s += '=';
   const bin = atob(s);
   const b = new Uint8Array(bin.length);
@@ -344,7 +345,7 @@ async function enrollBiometric(password) {
   const cred = await navigator.credentials.create({
     publicKey: {
       challenge: challenge,
-      rp: { name: 'Mainframe Vault' },
+      rp: { name: 'Mainframe Vault', id: window.location.hostname },
       user: {
         id: crypto.getRandomValues(new Uint8Array(16)),
         name: 'owner',
