@@ -3,91 +3,258 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>mainframe password tab</title>
+<title>mainframe vault approval</title>
 <style>
+  :root {
+    --bg: #0d1117;
+    --card-bg: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --text-muted: #8b949e;
+    --accent: #238636;
+    --accent-hover: #2ea043;
+    --accent-blue: #1f6feb;
+    --danger: #f85149;
+    --focus: #388bfd;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fa;
+      --card-bg: #ffffff;
+      --border: #d0d7de;
+      --text: #24292f;
+      --text-muted: #57606a;
+      --accent: #2da44e;
+      --accent-hover: #2c974b;
+      --accent-blue: #0969da;
+      --danger: #cf222e;
+      --focus: #0969da;
+    }
+  }
+  * { box-sizing: border-box; }
   body {
-    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    max-width: 620px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 520px;
     margin: 2rem auto;
     padding: 0 1rem;
     line-height: 1.5;
-    color: #24292f;
-    background: #ffffff;
+    color: var(--text);
+    background: var(--bg);
   }
-  h2 { margin-top: 0; }
-  p { color: #57609a; }
-  input[type="password"] {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 0.75rem;
-    font-size: 1rem;
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.75rem;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+  }
+  .header {
+    text-align: center;
+    margin-bottom: 1.5rem;
+  }
+  /* Rule 10: motion icons always */
+  .icon-wrap {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: rgba(35, 134, 54, 0.15);
     margin-bottom: 0.75rem;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
+    animation: icon-float 3s ease-in-out infinite alternate;
+  }
+  .icon-wrap.waiting {
+    background: rgba(31, 111, 235, 0.15);
+    animation: icon-pulse 2s ease-in-out infinite;
+  }
+  .icon-wrap.error {
+    background: rgba(248, 81, 73, 0.15);
+    animation: icon-shake 0.5s ease-in-out;
+  }
+  @keyframes icon-float {
+    0% { transform: translateY(0px) scale(1); }
+    100% { transform: translateY(-6px) scale(1.05); }
+  }
+  @keyframes icon-pulse {
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(31, 111, 235, 0.4); }
+    70% { transform: scale(1.06); box-shadow: 0 0 0 14px rgba(31, 111, 235, 0); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(31, 111, 235, 0); }
+  }
+  @keyframes icon-shake {
+    0%, 100% { transform: translateX(0); }
+    20%, 60% { transform: translateX(-6px); }
+    40%, 80% { transform: translateX(6px); }
+  }
+  .icon-svg {
+    width: 32px;
+    height: 32px;
+    fill: currentColor;
+    color: var(--accent);
+  }
+  .icon-wrap.waiting .icon-svg { color: var(--accent-blue); }
+  .icon-wrap.error .icon-svg { color: var(--danger); }
+  h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.4rem;
+    font-weight: 600;
+  }
+  p {
+    margin: 0 0 1rem;
+    color: var(--text-muted);
+    font-size: 0.95rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 20px;
+    background: rgba(35, 134, 54, 0.2);
+    color: var(--accent);
+    margin-bottom: 0.75rem;
   }
   button {
     width: 100%;
-    padding: 0.75rem 1rem;
-    font-size: 1rem;
+    padding: 0.85rem 1rem;
+    font-size: 1.05rem;
     font-weight: 600;
-    border-radius: 6px;
+    border-radius: 8px;
     border: none;
-    background: #0969da;
+    background: var(--accent);
     color: #ffffff;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    transition: background 0.2s, transform 0.1s;
   }
+  button:hover { background: var(--accent-hover); }
+  button:active { transform: scale(0.98); }
   button:disabled {
-    background: #8c959f;
+    background: #484f58;
     cursor: not-allowed;
+    transform: none;
+  }
+  .btn-blue { background: var(--accent-blue); }
+  .btn-blue:hover { background: #388bfd; }
+  .btn-secondary {
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: normal;
+    padding: 0.5rem;
+    margin-top: 0.75rem;
+    text-decoration: underline;
+  }
+  .btn-secondary:hover { color: var(--text); background: transparent; }
+  input[type="password"] {
+    width: 100%;
+    padding: 0.75rem;
+    font-size: 1rem;
+    margin-bottom: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0,0,0,0.1);
+    color: var(--text);
+  }
+  input[type="password"]:focus {
+    outline: 2px solid var(--focus);
+    border-color: var(--focus);
+  }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    font-size: 0.9rem;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .checkbox-row input { cursor: pointer; }
+  #msg {
+    margin-top: 1rem;
+    font-weight: 500;
+    font-size: 0.95rem;
+    word-break: break-word;
+    text-align: center;
+  }
+  #msg.success { color: var(--accent); }
+  #msg.error { color: var(--danger); font-weight: 600; }
+  #fb {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
   }
   textarea {
     width: 100%;
-    box-sizing: border-box;
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     padding: 0.5rem;
-    border: 1px solid #d0d7de;
+    border: 1px solid var(--border);
     border-radius: 6px;
-  }
-  #msg {
-    font-weight: 600;
-    margin-top: 1rem;
-    word-break: break-word;
-    color: #24292f;
-  }
-  @media (prefers-color-scheme: dark) {
-    body { background: #0d1117; color: #c9d1d9; }
-    p { color: #8b949e; }
-    input[type="password"], textarea {
-      background: #161b22;
-      color: #c9d1d9;
-      border-color: #30363d;
-    }
-    button { background: #238636; }
-    #msg { color: #c9d1d9; }
+    background: rgba(0,0,0,0.15);
+    color: var(--text);
   }
 </style>
 </head>
 <body>
-<h2>mainframe password tab</h2>
-<p>Type the Bitwarden master password. This page encrypts it in your
-browser with a one-time RSA key. If opened via phone approval, the
-encrypted ciphertext is sent securely to the remote runner via relay
-(the relay only sees ciphertext and cannot decrypt it). For local desktop
-runs, the encrypted file is downloaded to your machine. The password itself
-is never sent unencrypted anywhere.</p>
-<form id="f">
-<input id="pw" type="password" autocomplete="off" spellcheck="false"
-  placeholder="Bitwarden master password">
-<button id="go" type="submit">Send encrypted password</button>
-</form>
-<p id="msg"></p>
-<div id="fb" style="display:none">
-<p>if the script didn't pick up the relay or file, copy this ciphertext and paste it to the runner:</p>
-<textarea id="ct" readonly rows="4"></textarea>
+<div class="card">
+  <div class="header">
+    <div id="icon-container" class="icon-wrap waiting">
+      <!-- Animated Lock SVG -->
+      <svg class="icon-svg" viewBox="0 0 24 24">
+        <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
+      </svg>
+    </div>
+    <div id="badge-wrap"><span class="badge">Headless Restore</span></div>
+    <h2 id="title">Vault Approval Request</h2>
+    <p id="desc">Runner is waiting for authorization to unlock Bitwarden secrets.</p>
+  </div>
+
+  <!-- 1-Tap Biometric Approval Section (Visible when enrolled) -->
+  <div id="bio-section" style="display:none">
+    <button id="bio-btn" type="button">
+      <svg style="width:20px;height:20px;fill:currentColor" viewBox="0 0 24 24">
+        <path d="M17.81 4.47c-.08 0-.16-.02-.23-.06C15.66 3.42 14 3 12.01 3c-1.98 0-3.86.47-5.57 1.41-.24.13-.54.04-.68-.2-.13-.24-.04-.55.2-.68C7.82 2.52 9.86 2 12.01 2c2.13 0 3.99.47 5.92 1.5.24.13.33.43.2.67-.09.18-.21.3-.32.3zm2.59 4.19c-.1-.01-.19-.04-.27-.09-.23-.14-.3-.44-.16-.67.9-1.46 1.39-3.14 1.39-4.88 0-.27.22-.5.5-.5s.5.23.5.5c0 1.9-.53 3.74-1.52 5.33-.11.19-.29.31-.44.31zm-15.6.73c-.09 0-.18-.03-.26-.08-.98-1.59-1.52-3.43-1.52-5.33 0-.27.22-.5.5-.5s.5.23.5.5c0 1.74.49 3.42 1.39 4.88.14.23.07.53-.16.67-.14.09-.3.14-.45.14zm12.44 3.78c-.24 0-.46-.17-.49-.42-.25-2.02-.99-3.9-2.14-5.46-.17-.22-.12-.54.1-.71.22-.17.54-.12.71.1 1.25 1.7 2.06 3.75 2.33 5.96.03.27-.15.52-.42.55-.03 0-.06-.02-.09-.02zm-10.48 0c-.03 0-.06.01-.09.02-.28-.03-.45-.28-.42-.55.27-2.21 1.08-4.26 2.33-5.96.17-.22.49-.27.71-.1.22.17.27.49.1.71-1.15 1.56-1.89 3.44-2.14 5.46-.03.25-.25.42-.49.42zm7.74 3.96c-.19 0-.37-.11-.45-.29-.68-1.55-1.74-2.88-3.07-3.84-.22-.16-.27-.48-.11-.7.16-.22.47-.27.7-.11 1.45 1.05 2.62 2.5 3.36 4.2.11.25-.01.55-.26.66-.06.05-.12.08-.17.08zm-5.01 0c-.05 0-.11-.03-.17-.08-.25-.11-.37-.41-.26-.66.74-1.7 1.91-3.15 3.36-4.2.23-.16.54-.11.7.11.16.22.11.54-.11.7-1.33.96-2.39 2.29-3.07 3.84-.08.18-.26.29-.45.29zm2.46 4.87c-1.4 0-2.73-.39-3.88-1.12-.23-.15-.3-.45-.15-.68.15-.23.46-.3.69-.15.98.63 2.12.96 3.34.96 1.48 0 2.85-.48 3.96-1.38.21-.18.53-.14.71.07.18.21.14.53-.07.71-1.31 1.06-2.93 1.59-4.6 1.59z"/>
+      </svg>
+      Approve with Fingerprint
+    </button>
+    <button id="switch-manual" class="btn-secondary" type="button">Use master password manually</button>
+  </div>
+
+  <!-- Manual Entry & Enrollment Form -->
+  <form id="f" style="display:none">
+    <input id="pw" type="password" autocomplete="off" spellcheck="false"
+      placeholder="Bitwarden master password">
+    <label class="checkbox-row" id="save-row">
+      <input type="checkbox" id="save-bio" checked>
+      <span>Save for 1-tap fingerprint approval on this device</span>
+    </label>
+    <button id="go" type="submit">Send encrypted password</button>
+    <button id="clear-bio" class="btn-secondary" type="button" style="display:none">Reset biometric enrollment</button>
+  </form>
+
+  <p id="msg"></p>
+  <div id="fb" style="display:none">
+    <p>If the script didn't pick up the relay automatically, copy this ciphertext:</p>
+    <textarea id="ct" readonly rows="3"></textarea>
+  </div>
 </div>
+
 <script>
-function show(t) { document.getElementById('msg').textContent = t; }
+const STORE_KEY_ENC = 'mf_vault_enc';
+const STORE_KEY_SALT = 'mf_vault_salt';
+const STORE_KEY_IV = 'mf_vault_iv';
+const STORE_KEY_CRED = 'mf_bio_cred';
+
+function show(text, type='') {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  el.className = type;
+}
+
 function b64urlToBytes(s) {
   s = s.replace(/-/g, '+').replace(/_/g, '/');
   while (s.length % 4) s += '=';
@@ -96,60 +263,66 @@ function b64urlToBytes(s) {
   for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
   return b;
 }
+
 function bytesToB64(b) {
   let s = '';
   for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
   return btoa(s);
 }
-document.getElementById('f').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  if (!window.crypto || !crypto.subtle) {
-    show('this page needs a secure (https) context to encrypt.');
-    return;
-  }
+
+function getParams() {
   const hash = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
   const params = new URLSearchParams(hash);
   const k = params.get('k') || (hash.match(/(?:^|&)k=([A-Za-z0-9_-]+)/) || [])[1];
   const sid = params.get('sid') || (hash.match(/(?:^|&)sid=([A-Za-z0-9_-]+)/) || [])[1];
-  if (!k) { show('bad link — ask for a fresh tab link.'); return; }
-  let key;
-  try {
-    key = await crypto.subtle.importKey('spki', b64urlToBytes(k),
-      { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
-  } catch (err) {
-    show('bad key — ask for a fresh tab link.');
-    return;
-  }
-  const field = document.getElementById('pw');
-  const pw = field.value;
-  if (!pw) { show('type the password first.'); return; }
-  let ct;
-  try {
-    ct = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key,
-      new TextEncoder().encode(pw));
-  } catch (err) {
-    show('encryption failed (password may be too long for one key).');
-    return;
-  }
-  field.value = '';
-  const b64 = bytesToB64(new Uint8Array(ct));
+  return { k, sid };
+}
+
+// AES-GCM Key derivation for local encrypted storage
+async function deriveLocalKey(salt) {
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey(
+    'raw', enc.encode('mainframe-local-keystore-v1'), 'PBKDF2', false, ['deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: salt, iterations: 100000, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function encryptForRunner(plaintext, spkiPubBase64) {
+  const key = await crypto.subtle.importKey(
+    'spki',
+    b64urlToBytes(spkiPubBase64),
+    { name: 'RSA-OAEP', hash: 'SHA-256' },
+    false,
+    ['encrypt']
+  );
+  const ct = await crypto.subtle.encrypt(
+    { name: 'RSA-OAEP' },
+    key,
+    new TextEncoder().encode(plaintext)
+  );
+  return bytesToB64(new Uint8Array(ct));
+}
+
+async function transmitCiphertext(b64, sid) {
   document.getElementById('ct').value = b64;
   document.getElementById('fb').style.display = 'block';
-  document.getElementById('go').disabled = true;
 
   if (sid) {
-    try {
-      show('sending encrypted password via relay...');
-      const res = await fetch(`https://ntfy.sh/${encodeURIComponent(sid)}`, {
-        method: 'POST',
-        headers: { 'Title': 'Vault Ciphertext' },
-        body: b64
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      show('encrypted and sent to remote runner via relay! you can close this tab.');
-    } catch (err) {
-      show(`relay dispatch failed (${err.message}) — copy and paste the encrypted text below.`);
-    }
+    show('transmitting encrypted password via relay...', 'waiting');
+    const res = await fetch(`https://ntfy.sh/${encodeURIComponent(sid)}`, {
+      method: 'POST',
+      headers: { 'Title': 'Vault Ciphertext' },
+      body: b64
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    show('Approved! Unlocking vault unattended. You can close this tab.', 'success');
+    document.getElementById('icon-container').className = 'icon-wrap';
   } else {
     const blob = new Blob([b64], { type: 'text/plain' });
     const a = document.createElement('a');
@@ -158,8 +331,172 @@ document.getElementById('f').addEventListener('submit', async (e) => {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    show('encrypted — the script will pick up the file. if it doesn\'t, paste the text below.');
+    show('Encrypted file downloaded. Restoring unattended.', 'success');
   }
+}
+
+// Biometric enrollment
+async function enrollBiometric(password) {
+  if (!window.PublicKeyCredential) {
+    throw new Error('Biometrics not supported in this browser.');
+  }
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      challenge: challenge,
+      rp: { name: 'Mainframe Vault' },
+      user: {
+        id: crypto.getRandomValues(new Uint8Array(16)),
+        name: 'owner',
+        displayName: 'Device Owner'
+      },
+      pubKeyCredParams: [{ alg: -7, type: 'public-key' }, { alg: -257, type: 'public-key' }],
+      authenticatorSelection: {
+        authenticatorAttachment: 'platform',
+        userVerification: 'required'
+      },
+      timeout: 60000
+    }
+  });
+
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const aesKey = await deriveLocalKey(salt);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: iv },
+    aesKey,
+    new TextEncoder().encode(password)
+  );
+
+  localStorage.setItem(STORE_KEY_CRED, cred.id);
+  localStorage.setItem(STORE_KEY_SALT, bytesToB64(salt));
+  localStorage.setItem(STORE_KEY_IV, bytesToB64(iv));
+  localStorage.setItem(STORE_KEY_ENC, bytesToB64(new Uint8Array(encrypted)));
+}
+
+// Biometric unlock
+async function approveWithBiometrics() {
+  const credId = localStorage.getItem(STORE_KEY_CRED);
+  const encB64 = localStorage.getItem(STORE_KEY_ENC);
+  const saltB64 = localStorage.getItem(STORE_KEY_SALT);
+  const ivB64 = localStorage.getItem(STORE_KEY_IV);
+
+  if (!credId || !encB64 || !saltB64 || !ivB64) {
+    throw new Error('No biometric credential enrolled.');
+  }
+
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const assertion = await navigator.credentials.get({
+    publicKey: {
+      challenge: challenge,
+      allowCredentials: [{ id: b64urlToBytes(credId), type: 'public-key' }],
+      userVerification: 'required',
+      timeout: 60000
+    }
+  });
+
+  if (!assertion) throw new Error('Biometric verification cancelled.');
+
+  const salt = b64urlToBytes(saltB64);
+  const iv = b64urlToBytes(ivB64);
+  const ct = b64urlToBytes(encB64);
+  const aesKey = await deriveLocalKey(salt);
+  const decryptedBuf = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: iv },
+    aesKey,
+    ct
+  );
+  return new TextDecoder().decode(decryptedBuf);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const { k, sid } = getParams();
+  if (!k) {
+    show('Missing public key in URL link. Request a fresh link from runner.', 'error');
+    document.getElementById('icon-container').className = 'icon-wrap error';
+    return;
+  }
+
+  const isEnrolled = !!localStorage.getItem(STORE_KEY_ENC);
+  const bioSection = document.getElementById('bio-section');
+  const formSection = document.getElementById('f');
+  const clearBtn = document.getElementById('clear-bio');
+
+  if (isEnrolled && window.PublicKeyCredential) {
+    bioSection.style.display = 'block';
+    formSection.style.display = 'none';
+  } else {
+    bioSection.style.display = 'none';
+    formSection.style.display = 'block';
+    if (!window.PublicKeyCredential) {
+      document.getElementById('save-row').style.display = 'none';
+    }
+  }
+
+  if (isEnrolled) {
+    clearBtn.style.display = 'inline-block';
+  }
+
+  document.getElementById('switch-manual').addEventListener('click', () => {
+    bioSection.style.display = 'none';
+    formSection.style.display = 'block';
+  });
+
+  clearBtn.addEventListener('click', () => {
+    localStorage.removeItem(STORE_KEY_CRED);
+    localStorage.removeItem(STORE_KEY_SALT);
+    localStorage.removeItem(STORE_KEY_IV);
+    localStorage.removeItem(STORE_KEY_ENC);
+    show('Biometric enrollment cleared.', 'success');
+    setTimeout(() => location.reload(), 800);
+  });
+
+  // Biometric button click
+  document.getElementById('bio-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('bio-btn');
+    btn.disabled = true;
+    show('Verifying fingerprint...', 'waiting');
+    try {
+      const password = await approveWithBiometrics();
+      const b64Cipher = await encryptForRunner(password, k);
+      await transmitCiphertext(b64Cipher, sid);
+    } catch (err) {
+      show(`Biometric approval failed: ${err.message}`, 'error');
+      document.getElementById('icon-container').className = 'icon-wrap error';
+      btn.disabled = false;
+    }
+  });
+
+  // Manual submit & enroll
+  formSection.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const pw = document.getElementById('pw').value;
+    if (!pw) {
+      show('Please enter your Bitwarden master password.', 'error');
+      return;
+    }
+    const goBtn = document.getElementById('go');
+    goBtn.disabled = true;
+    show('Encrypting and sending...', 'waiting');
+
+    try {
+      const shouldSave = document.getElementById('save-bio').checked;
+      if (shouldSave && window.PublicKeyCredential) {
+        try {
+          await enrollBiometric(pw);
+        } catch (bioErr) {
+          console.warn('Biometric enrollment skipped:', bioErr);
+        }
+      }
+      const b64Cipher = await encryptForRunner(pw, k);
+      await transmitCiphertext(b64Cipher, sid);
+      document.getElementById('pw').value = '';
+    } catch (err) {
+      show(`Submission failed: ${err.message}`, 'error');
+      document.getElementById('icon-container').className = 'icon-wrap error';
+      goBtn.disabled = false;
+    }
+  });
 });
 </script>
 </body>
