@@ -128,7 +128,7 @@ function Send-VaultApprovalNotification {
     )
 
     try {
-        $callerTag = if ($Agent) { "$HostName • $Agent" } else { $HostName }
+        $callerTag = if ($Agent) { "$HostName - $Agent" } else { $HostName }
         $title = if ($Code) { "Vault Unlock: Code [$Code] ($callerTag)" } else { "Vault Unlock ($callerTag)" }
         $actionTitle = if ($Code) { "Unlock [$Code]" } else { "Unlock Vault" }
         $headers = @{
