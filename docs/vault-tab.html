@@ -132,6 +132,14 @@
   }
   button:hover { background: var(--accent-hover); }
   button:active { transform: scale(0.98); }
+  #bio-btn svg {
+    margin-right: 0.5rem;
+    animation: bio-pulse 2.5s ease-in-out infinite alternate;
+  }
+  @keyframes bio-pulse {
+    0% { transform: scale(1); opacity: 0.85; }
+    100% { transform: scale(1.18); opacity: 1; }
+  }
   button:disabled {
     background: #484f58;
     cursor: not-allowed;
@@ -208,7 +216,7 @@
         <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
       </svg>
     </div>
-    <div id="badge-wrap"><span class="badge">Headless Restore</span></div>
+    <div id="badge-wrap"><span class="badge">Mainframe Restore</span></div>
     <h2 id="title">Vault Approval Request</h2>
     <p id="desc">Runner is waiting for authorization to unlock Bitwarden secrets.</p>
   </div>
@@ -421,10 +429,14 @@ async function approveWithBiometrics() {
   return new TextDecoder().decode(decryptedBuf);
 }
 
+window.addEventListener('hashchange', () => {
+  location.reload();
+});
+
 document.addEventListener('DOMContentLoaded', () => {
   const { k, sid } = getParams();
-  if (!k) {
-    show('Missing public key in URL link. Request a fresh link from runner.', 'error');
+  if (!k || k.length < 50) {
+    show('Invalid or missing public key in URL link. Request a fresh link from runner.', 'error');
     document.getElementById('icon-container').className = 'icon-wrap error';
     return;
   }
@@ -474,7 +486,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const b64Cipher = await encryptForRunner(password, k);
       await transmitCiphertext(b64Cipher, sid);
     } catch (err) {
-      show(`Biometric approval failed: ${err.message}`, 'error');
+      const errDetail = (err && (err.message || err.name || String(err))) || 'unknown error';
+      show(`Biometric approval failed: ${errDetail}`, 'error');
       document.getElementById('icon-container').className = 'icon-wrap error';
       btn.disabled = false;
       document.getElementById('switch-manual').style.display = 'inline-block';
@@ -506,7 +519,8 @@ document.addEventListener('DOMContentLoaded', () => {
       await transmitCiphertext(b64Cipher, sid);
       document.getElementById('pw').value = '';
     } catch (err) {
-      show(`Submission failed: ${err.message}`, 'error');
+      const errDetail = (err && (err.message || err.name || String(err))) || 'unknown error';
+      show(`Submission failed: ${errDetail}`, 'error');
       document.getElementById('icon-container').className = 'icon-wrap error';
       goBtn.disabled = false;
     }

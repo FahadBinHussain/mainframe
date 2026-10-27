@@ -109,6 +109,11 @@ if (Test-Path $MainframeDir) { Set-Location $MainframeDir; git pull --rebase 2>$
 else { git clone "https://github.com/$Repo.git" $MainframeDir | Out-Null; if ($LASTEXITCODE -ne 0) { Die "git clone failed (no network? github blocked?)" } }
 Set-Location $MainframeDir
 
+$approvalModule = Join-Path $MainframeDir 'vault-approval.psm1'
+if (Test-Path -LiteralPath $approvalModule) {
+    Import-Module $approvalModule -Force
+}
+
 # --- sealed bw email (bw-email.enc.json) ---
 # publish-backup.ps1 / seal-bw-email.ps1 seal the vault account email with a
 # key derived from the master password (PBKDF2-HMAC-SHA256, 600k iterations,
@@ -158,14 +163,29 @@ function Unseal-BwEmail {
     } catch { return $null }
 }
 
-# --- 2. bitwarden unlock (the ONE password you type) ---
+# --- 2. bitwarden unlock (1-tap mobile approval or master password) ---
 Step 'unlocking bitwarden vault'
 # The account lives on a self-hosted Vaultwarden, not bitwarden.com: a
 # fresh machine's bw CLI has no server configured and would log in
 # against the wrong service. Point it at the right server first
-# (idempotent on machines already configured).
-& bw config server $BwServer | Out-Null
+# (idempotent on machines already configured; avoids "Logout required" error).
 $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
+if ($bwStatus.serverUrl -ne $BwServer) {
+    if ($bwStatus.status -ne 'unauthenticated') {
+        & bw logout 2>$null | Out-Null
+    }
+    & bw config server $BwServer | Out-Null
+    $bwStatus = & bw status --raw 2>$null | ConvertFrom-Json
+}
+
+$obtainedMasterPw = $null
+if ($bwStatus.status -ne 'unlocked') {
+    # 1-tap mobile biometric approval (Google-prompt style full-screen intent / ntfy push)
+    if (Get-Command Get-VaultMasterPassword -ErrorAction SilentlyContinue) {
+        $obtainedMasterPw = Get-VaultMasterPassword -PromptContext 'vault restore'
+    }
+}
+
 if ($bwStatus.status -eq 'unauthenticated') {
     # Fresh machine: the bw CLI has never been logged in here, so
     # 'bw unlock' fails instantly with 'You are not logged in.' and never
@@ -211,22 +231,31 @@ if ($bwStatus.status -eq 'unauthenticated') {
         $gitEmail = & git config --global user.email 2>$null
         if ($gitEmail -and ($gitEmail -match '^[^@\s]+@[^@\s]+\.[^@\s]+$')) { $bwEmail = ([string]$gitEmail).Trim() }
     }
-    $sealedMasterPw = $null
     if (-not $bwEmail) {
         $blobCandidates = @()
         if ($PSScriptRoot) { $blobCandidates += Join-Path $PSScriptRoot 'bw-email.enc.json' }
         $blobCandidates += Join-Path $MainframeDir 'bw-email.enc.json'
         $blobPath = $blobCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
         if ($blobPath) {
-            for ($sealAttempt = 1; $sealAttempt -le 3 -and -not $bwEmail; $sealAttempt++) {
-                $candidatePw = Read-Host "type your bitwarden MASTER PASSWORD (unseals your login email; attempt $sealAttempt of 3)" -AsSecureString
-                $unsealed = Unseal-BwEmail -BlobPath $blobPath -Password $candidatePw
+            if ($obtainedMasterPw) {
+                $secPw = ConvertTo-SecureString $obtainedMasterPw -AsPlainText -Force
+                $unsealed = Unseal-BwEmail -BlobPath $blobPath -Password $secPw
                 if ($unsealed) {
                     $bwEmail = $unsealed
-                    $sealedMasterPw = $candidatePw
-                    Write-Host "email unsealed from bw-email.enc.json - logging in as $bwEmail"
-                } elseif ($sealAttempt -lt 3) {
-                    Write-Warning 'that password did not unseal the email blob - wrong master password?'
+                    Write-Host "email unsealed from bw-email.enc.json - logging in as $bwEmail" -ForegroundColor Green
+                }
+            }
+            if (-not $bwEmail) {
+                for ($sealAttempt = 1; $sealAttempt -le 3 -and -not $bwEmail; $sealAttempt++) {
+                    $candidatePw = Read-Host "type your bitwarden MASTER PASSWORD (unseals your login email; attempt $sealAttempt of 3)" -AsSecureString
+                    $unsealed = Unseal-BwEmail -BlobPath $blobPath -Password $candidatePw
+                    if ($unsealed) {
+                        $bwEmail = $unsealed
+                        $obtainedMasterPw = [System.Net.NetworkCredential]::new('', $candidatePw).Password
+                        Write-Host "email unsealed from bw-email.enc.json - logging in as $bwEmail"
+                    } elseif ($sealAttempt -lt 3) {
+                        Write-Warning 'that password did not unseal the email blob - wrong master password?'
+                    }
                 }
             }
             if (-not $bwEmail) { Write-Warning 'could not unseal bw-email.enc.json - falling back to typing the email once' }
@@ -239,11 +268,9 @@ if ($bwStatus.status -eq 'unauthenticated') {
         Write-Host "bitwarden CLI is not logged in on this machine - logging in as $bwEmail (one-time):"
     }
     $loginOk = $false
-    if ($sealedMasterPw) {
-        $loginPw = [System.Net.NetworkCredential]::new('', $sealedMasterPw).Password
-        # Set via the .NET API (same store as $env:BW_PASSWORD) - a literal env
-        # assignment of this value got mangled by tooling once; see git history.
-        [System.Environment]::SetEnvironmentVariable('BW' + '_PASSWORD', $loginPw)
+    if ($obtainedMasterPw) {
+        # Set via the .NET API (same store as $env:BW_PASSWORD)
+        [System.Environment]::SetEnvironmentVariable('BW' + '_PASSWORD', $obtainedMasterPw)
         & bw login $bwEmail --passwordenv BW_PASSWORD
         if ($LASTEXITCODE -eq 0) { $loginOk = $true }
         else {
@@ -254,11 +281,11 @@ if ($bwStatus.status -eq 'unauthenticated') {
     if (-not $loginOk) {
         & bw login $bwEmail
         if ($LASTEXITCODE -ne 0) {
-        Write-Warning "login as $bwEmail failed."
-        $bwEmail = Read-Host 'bitwarden EMAIL'
-        & bw login $bwEmail
-        if ($LASTEXITCODE -ne 0) { Die 'bitwarden login failed - re-run boot.ps1 and complete the login prompts.' }
-    }
+            Write-Warning "login as $bwEmail failed."
+            $bwEmail = Read-Host 'bitwarden EMAIL'
+            & bw login $bwEmail
+            if ($LASTEXITCODE -ne 0) { Die 'bitwarden login failed - re-run boot.ps1 and complete the login prompts.' }
+        }
     }
     New-Item -ItemType Directory -Force -Path (Split-Path $bwEmailFile) | Out-Null
     Set-Content -LiteralPath $bwEmailFile -Value $bwEmail -Encoding UTF8
@@ -285,30 +312,45 @@ if ($bwStatus.status -ne 'unlocked') {
         return $unlockSession
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($env:BW_PASSWORD)) {
+    if ($obtainedMasterPw) {
+        [System.Environment]::SetEnvironmentVariable('BW' + '_PASSWORD', $obtainedMasterPw)
+        try {
+            $session = & $invokeBwUnlock -UsePasswordEnv
+        } finally {
+            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+        }
+        if ($session) {
+            Write-Host 'vault unlocked successfully via 1-tap mobile approval' -ForegroundColor Green
+        }
+    }
+
+    if (-not $session -and -not [string]::IsNullOrWhiteSpace($env:BW_PASSWORD)) {
         $session = & $invokeBwUnlock -UsePasswordEnv
         if (-not $session) {
             Write-Warning 'BW_PASSWORD was rejected. Falling back to interactive unlock.'
         }
     }
 
-    $attempt = 0
-    while (-not $session -and $attempt -lt 3) {
-        $attempt++
-        # Prompt here instead of relying on 'bw unlock' prompting: when the
-        # unlock output is captured (as $invokeBwUnlock does), bw's own
-        # interactive prompt never reaches the user. A secure prompt plus
-        # --passwordenv keeps the password env-scoped, in memory only, and
-        # never written to disk.
-        $securePw = Read-Host "type your bitwarden MASTER PASSWORD (attempt $attempt of 3)" -AsSecureString
-        $env:BW_PASSWORD = [Net.NetworkCredential]::new('', $securePw).Password
-        try {
-            $session = & $invokeBwUnlock -UsePasswordEnv
-        } finally {
-            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
-        }
-        if (-not $session -and $attempt -lt 3) {
-            Write-Warning 'Bitwarden rejected that password. Please try again.'
+    if (-not $session) {
+        Write-Warning '1-tap mobile approval not available or rejected. Falling back to MANUAL PASSWORD ENTRY.'
+        $attempt = 0
+        while (-not $session -and $attempt -lt 3) {
+            $attempt++
+            # Prompt here instead of relying on 'bw unlock' prompting: when the
+            # unlock output is captured (as $invokeBwUnlock does), bw's own
+            # interactive prompt never reaches the user. A secure prompt plus
+            # --passwordenv keeps the password env-scoped, in memory only, and
+            # never written to disk.
+            $securePw = Read-Host "type your bitwarden MASTER PASSWORD (attempt $attempt of 3)" -AsSecureString
+            $env:BW_PASSWORD = [Net.NetworkCredential]::new('', $securePw).Password
+            try {
+                $session = & $invokeBwUnlock -UsePasswordEnv
+            } finally {
+                Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+            }
+            if (-not $session -and $attempt -lt 3) {
+                Write-Warning 'Bitwarden rejected that password. Please try again.'
+            }
         }
     }
     if (-not $session) {
@@ -316,6 +358,7 @@ if ($bwStatus.status -ne 'unlocked') {
     }
     $env:BW_SESSION = $session
     Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+    $obtainedMasterPw = $null
     # persist for the restore helpers that read session.key
     $sk = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
     New-Item -ItemType Directory -Force -Path (Split-Path $sk) | Out-Null
