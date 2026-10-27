@@ -324,7 +324,7 @@ def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None,
         except Exception:
             host = "linux-machine"
     endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{DEFAULT_NTFY_SERVER}/{ntfy_topic}"
-    caller_tag = f"{host} • {agent}" if agent else host
+    caller_tag = f"{host} - {agent}" if agent else host
     title = f"Vault Unlock: Code [{code}] ({caller_tag})" if code else f"Vault Unlock ({caller_tag})"
     action_title = f"Unlock [{code}]" if code else "Unlock Vault"
     body_lines = [f"Request from {host}"]
