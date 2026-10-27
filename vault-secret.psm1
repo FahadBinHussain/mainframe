@@ -10,8 +10,10 @@
 # in the mainframe profile dir.
 #
 # Session: read from %APPDATA%\mainframe\accounts\bitwarden\session.key (written
-# by automata-private\bitwarden.com\unlock.ps1) or $env:BW_SESSION. If the vault is locked,
-# calls fail with a clear message asking the user to unlock first.
+# by automata-private\bitwarden.com\unlock.ps1 or 1-tap mobile approval) or $env:BW_SESSION.
+# Sessions expire after 1 hour (configurable via MAINFRAME_VAULT_TTL_MINUTES or
+# mainframe.config.json vaultTtlMinutes); expired sessions auto-lock and prompt
+# for 1-tap mobile approval on phone via vault-approval.psm1.
 #
 # Performance: Get-VaultItems caches bw list items per session so the vault is
 # queried at most once per process. Write operations (Update-VaultItemNotes,
@@ -21,15 +23,62 @@
 $script:VaultItemsCache = $null
 $script:VaultItemsCacheSession = $null
 $script:VaultSessionOkSession = $null
+$script:DefaultSessionTtlMinutes = 60
 
-function Get-VaultSession {
-    if ($env:BW_SESSION) {
-        return [string]$env:BW_SESSION
+function Get-VaultSessionTtlMinutes {
+    if ($env:MAINFRAME_VAULT_TTL_MINUTES) {
+        try { return [int]$env:MAINFRAME_VAULT_TTL_MINUTES } catch {}
     }
+    $cfgCandidates = @(
+        (Join-Path $PSScriptRoot 'mainframe.config.json'),
+        (Join-Path (Get-Location) 'mainframe.config.json'),
+        (Join-Path $HOME '.config\mainframe\mainframe.config.json')
+    )
+    foreach ($cfgPath in $cfgCandidates) {
+        if (Test-Path -LiteralPath $cfgPath) {
+            try {
+                $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
+                if ($cfg.vaultTtlMinutes) { return [int]$cfg.vaultTtlMinutes }
+                if ($cfg.sessionTtlMinutes) { return [int]$cfg.sessionTtlMinutes }
+            } catch {}
+        }
+    }
+    return $script:DefaultSessionTtlMinutes
+}
 
+function Lock-VaultSession {
     $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
     if (Test-Path -LiteralPath $sessionFile) {
+        Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
+    Clear-VaultSessionCache
+    Clear-VaultItemsCache
+    & bw lock 2>$null | Out-Null
+    Write-Host "Bitwarden vault locked." -ForegroundColor Green
+}
+
+function Get-VaultSession {
+    param([switch]$AllowExpired)
+
+    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+    $ttlMinutes = Get-VaultSessionTtlMinutes
+
+    if (Test-Path -LiteralPath $sessionFile) {
+        $fileInfo = Get-Item -LiteralPath $sessionFile
+        $age = (Get-Date) - $fileInfo.LastWriteTime
+
+        if (-not $AllowExpired -and $ttlMinutes -gt 0 -and $age.TotalMinutes -ge $ttlMinutes) {
+            Write-Host "vault session expired ($([math]::Round($age.TotalMinutes))m >= ${ttlMinutes}m TTL) - locking vault" -ForegroundColor Yellow
+            Lock-VaultSession
+            return $null
+        }
+
         return (Get-Content -LiteralPath $sessionFile -Raw).Trim()
+    }
+
+    if ($env:BW_SESSION) {
+        return [string]$env:BW_SESSION
     }
 
     return $null
@@ -60,13 +109,63 @@ function Test-VaultSession {
     }
 }
 
+function Ensure-VaultSession {
+    param(
+        [switch]$NoPrompt,
+        [int]$TimeoutSeconds = 120
+    )
+
+    if (Test-VaultSession) {
+        return $true
+    }
+
+    if ($NoPrompt) {
+        return $false
+    }
+
+    $approvalModule = Join-Path $PSScriptRoot 'vault-approval.psm1'
+    if (-not (Get-Command Get-VaultMasterPassword -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $approvalModule)) {
+        Import-Module $approvalModule -Force -DisableNameChecking
+    }
+
+    if (Get-Command Get-VaultMasterPassword -ErrorAction SilentlyContinue) {
+        Write-Host "`n==> vault session is locked or expired (1-hour TTL)." -ForegroundColor Yellow
+        Write-Host "triggering 1-tap mobile approval prompt on phone..." -ForegroundColor Cyan
+        $pw = Get-VaultMasterPassword -PromptContext 'vault access' -TimeoutSeconds $TimeoutSeconds
+        if ($pw) {
+            [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $pw)
+            try {
+                $unlockOut = @(& bw unlock --raw --passwordenv BW_PASSWORD 2>&1)
+                $rawKey = $unlockOut | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z0-9+/=]{20,}$' } | Select-Object -Last 1
+                if ($rawKey) {
+                    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+                    New-Item -ItemType Directory -Force -Path (Split-Path $sessionFile) | Out-Null
+                    Set-Content -LiteralPath $sessionFile -Value $rawKey.Trim() -Encoding UTF8 -NoNewline
+                    $env:BW_SESSION = $rawKey.Trim()
+                    Clear-VaultSessionCache
+                    Clear-VaultItemsCache
+                    Write-Host "vault unlocked successfully with fresh 1-hour session" -ForegroundColor Green
+                    return $true
+                } else {
+                    Write-Warning "bw unlock did not return a valid session key: $($unlockOut -join ' ')"
+                }
+            } finally {
+                Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+                $pw = $null
+            }
+        }
+    }
+
+    return $false
+}
+
 function Clear-VaultSessionCache {
     $script:VaultSessionOkSession = $null
 }
 
 function Get-VaultItems {
-    if (-not (Test-VaultSession)) {
-        throw 'Bitwarden vault is locked or no session found. Run automata-private\bitwarden.com\unlock.ps1 first, or set $env:BW_SESSION.'
+    if (-not (Ensure-VaultSession)) {
+        throw 'Bitwarden vault is locked or approval was not completed. Use 1-tap mobile approval or run automata-private\bitwarden.com\unlock.ps1.'
     }
 
     $session = Get-VaultSession
@@ -157,8 +256,8 @@ function Update-VaultItemNotes {
         [AllowNull()][string]$NewNotes
     )
 
-    if (-not (Test-VaultSession)) {
-        throw 'Bitwarden vault is locked. Run automata-private\bitwarden.com\unlock.ps1 first.'
+    if (-not (Ensure-VaultSession)) {
+        throw 'Bitwarden vault is locked or approval was not completed. Run automata-private\bitwarden.com\unlock.ps1, or set $env:BW_SESSION.'
     }
 
     $item = bw get item $ItemId --session $env:BW_SESSION 2>$null | ConvertFrom-Json
@@ -185,8 +284,8 @@ function New-VaultItem {
         [AllowNull()][string]$Notes
     )
 
-    if (-not (Test-VaultSession)) {
-        throw 'Bitwarden vault is locked. Run automata-private\bitwarden.com\unlock.ps1 first.'
+    if (-not (Ensure-VaultSession)) {
+        throw 'Bitwarden vault is locked or approval was not completed. Run automata-private\bitwarden.com\unlock.ps1, or set $env:BW_SESSION.'
     }
 
     $login = @{ username = $Username; password = $null }
@@ -262,4 +361,4 @@ function Write-VaultSecretToExisting {
     return $item.id
 }
 
-Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache
+Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache
