@@ -203,7 +203,7 @@
 <div class="card">
   <div class="header">
     <div id="icon-container" class="icon-wrap waiting">
-      <!-- Animated Lock SVG -->
+      <!-- Animated Lock SVG (Rule 10) -->
       <svg class="icon-svg" viewBox="0 0 24 24">
         <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>
       </svg>
@@ -213,7 +213,7 @@
     <p id="desc">Runner is waiting for authorization to unlock Bitwarden secrets.</p>
   </div>
 
-  <!-- 1-Tap Biometric Approval Section (Visible when enrolled) -->
+  <!-- 1-Tap Biometric Approval Section -->
   <div id="bio-section" style="display:none">
     <button id="bio-btn" type="button">
       <svg style="width:20px;height:20px;fill:currentColor" viewBox="0 0 24 24">
@@ -255,20 +255,29 @@ function show(text, type='') {
   el.className = type;
 }
 
-function b64urlToBytes(s) {
-  if (!s) return new Uint8Array(0);
-  s = s.replace(/[^A-Za-z0-9\-_]/g, '').replace(/-/g, '+').replace(/_/g, '/');
-  while (s.length % 4) s += '=';
-  const bin = atob(s);
-  const b = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
-  return b;
+function bytesToB64(bytes) {
+  let bin = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    bin += String.fromCharCode(bytes[i]);
+  }
+  return btoa(bin);
 }
 
-function bytesToB64(b) {
-  let s = '';
-  for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]);
-  return btoa(s);
+function b64ToBytes(s) {
+  if (!s) return new Uint8Array(0);
+  let clean = s.trim().replace(/-/g, '+').replace(/_/g, '/');
+  clean = clean.replace(/[^A-Za-z0-9+/]/g, '');
+  const pad = clean.length % 4;
+  if (pad === 2) clean += '==';
+  else if (pad === 3) clean += '=';
+  else if (pad === 1) clean = clean.slice(0, -1);
+  const bin = atob(clean);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
 }
 
 function getParams() {
@@ -279,7 +288,6 @@ function getParams() {
   return { k, sid };
 }
 
-// AES-GCM Key derivation for local encrypted storage
 async function deriveLocalKey(salt) {
   const enc = new TextEncoder();
   const baseKey = await crypto.subtle.importKey(
@@ -295,9 +303,10 @@ async function deriveLocalKey(salt) {
 }
 
 async function encryptForRunner(plaintext, spkiPubBase64) {
+  const keyBytes = b64ToBytes(spkiPubBase64);
   const key = await crypto.subtle.importKey(
     'spki',
-    b64urlToBytes(spkiPubBase64),
+    keyBytes,
     { name: 'RSA-OAEP', hash: 'SHA-256' },
     false,
     ['encrypt']
@@ -315,7 +324,7 @@ async function transmitCiphertext(b64, sid) {
   document.getElementById('fb').style.display = 'block';
 
   if (sid) {
-    show('transmitting encrypted password via relay...', 'waiting');
+    show('Transmitting encrypted password via relay...', 'waiting');
     const res = await fetch(`https://ntfy.sh/${encodeURIComponent(sid)}`, {
       method: 'POST',
       headers: { 'Title': 'Vault Ciphertext' },
@@ -369,7 +378,8 @@ async function enrollBiometric(password) {
     new TextEncoder().encode(password)
   );
 
-  localStorage.setItem(STORE_KEY_CRED, cred.id);
+  const rawIdBytes = cred.rawId ? new Uint8Array(cred.rawId) : b64ToBytes(cred.id);
+  localStorage.setItem(STORE_KEY_CRED, bytesToB64(rawIdBytes));
   localStorage.setItem(STORE_KEY_SALT, bytesToB64(salt));
   localStorage.setItem(STORE_KEY_IV, bytesToB64(iv));
   localStorage.setItem(STORE_KEY_ENC, bytesToB64(new Uint8Array(encrypted)));
@@ -377,20 +387,21 @@ async function enrollBiometric(password) {
 
 // Biometric unlock
 async function approveWithBiometrics() {
-  const credId = localStorage.getItem(STORE_KEY_CRED);
+  const credB64 = localStorage.getItem(STORE_KEY_CRED);
   const encB64 = localStorage.getItem(STORE_KEY_ENC);
   const saltB64 = localStorage.getItem(STORE_KEY_SALT);
   const ivB64 = localStorage.getItem(STORE_KEY_IV);
 
-  if (!credId || !encB64 || !saltB64 || !ivB64) {
+  if (!credB64 || !encB64 || !saltB64 || !ivB64) {
     throw new Error('No biometric credential enrolled.');
   }
 
+  const credBytes = b64ToBytes(credB64);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
   const assertion = await navigator.credentials.get({
     publicKey: {
       challenge: challenge,
-      allowCredentials: [{ id: b64urlToBytes(credId), type: 'public-key' }],
+      allowCredentials: [{ id: credBytes, type: 'public-key' }],
       userVerification: 'required',
       timeout: 60000
     }
@@ -398,9 +409,9 @@ async function approveWithBiometrics() {
 
   if (!assertion) throw new Error('Biometric verification cancelled.');
 
-  const salt = b64urlToBytes(saltB64);
-  const iv = b64urlToBytes(ivB64);
-  const ct = b64urlToBytes(encB64);
+  const salt = b64ToBytes(saltB64);
+  const iv = b64ToBytes(ivB64);
+  const ct = b64ToBytes(encB64);
   const aesKey = await deriveLocalKey(salt);
   const decryptedBuf = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: iv },
@@ -448,8 +459,9 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.removeItem(STORE_KEY_SALT);
     localStorage.removeItem(STORE_KEY_IV);
     localStorage.removeItem(STORE_KEY_ENC);
-    show('Biometric enrollment cleared.', 'success');
-    setTimeout(() => location.reload(), 800);
+    show('Biometric enrollment cleared. Enter master password below to re-enroll.', 'success');
+    bioSection.style.display = 'none';
+    formSection.style.display = 'block';
   });
 
   // Biometric button click
@@ -465,6 +477,7 @@ document.addEventListener('DOMContentLoaded', () => {
       show(`Biometric approval failed: ${err.message}`, 'error');
       document.getElementById('icon-container').className = 'icon-wrap error';
       btn.disabled = false;
+      document.getElementById('switch-manual').style.display = 'inline-block';
     }
   });
 
