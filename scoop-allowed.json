@@ -61,6 +61,11 @@
     "uv",
     "vcredist-aio",
     "vlc",
+    {
+      "name": "vscode",
+      "disabled": true,
+      "note": "disabled for now"
+    },
     "wget",
     "which",
     "windows-terminal",

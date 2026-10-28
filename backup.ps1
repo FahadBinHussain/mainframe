@@ -96,6 +96,31 @@ if (-not $SecretsManifestPath) {
     $SecretsManifestPath = Join-Path $PSScriptRoot 'tool-secrets.manifest.json'
 }
 
+function Get-ActiveAllowlistItems {
+    param(
+        [Parameter(Mandatory=$true)]$Config,
+        [Parameter(Mandatory=$true)][string]$ItemsProperty,
+        [string]$IdProperty = 'name'
+    )
+    $disabledList = @($Config.disabled) + @($Config."disabled_$ItemsProperty")
+    $rawItems = @($Config.$ItemsProperty)
+    $result = @()
+    foreach ($item in $rawItems) {
+        if ($null -eq $item) { continue }
+        if ($item -is [string]) {
+            $id = $item.Trim()
+            if (-not $id -or $id -in $disabledList) { continue }
+            $result += $id
+        } elseif ($item -is [PSCustomObject] -or $item -is [hashtable]) {
+            if ($item.disabled -eq $true) { continue }
+            $id = if ($item.$IdProperty) { $item.$IdProperty } elseif ($item.id) { $item.id } elseif ($item.path) { $item.path } elseif ($item.name) { $item.name } else { $null }
+            if ($id -and $id -in $disabledList) { continue }
+            $result += $item
+        }
+    }
+    return $result
+}
+
 function Get-ScoopCommand {
     $cmd = Get-Command scoop -ErrorAction SilentlyContinue
     if ($cmd) {
@@ -376,7 +401,10 @@ if (-not (Test-Path -LiteralPath $AllowedAppsFile)) {
     throw "Missing required allowlist: $AllowedAppsFile"
 }
 
-$allowed = (Get-Content -LiteralPath $AllowedAppsFile -Raw | ConvertFrom-Json).apps
+$rawScoop = Get-Content -LiteralPath $AllowedAppsFile -Raw | ConvertFrom-Json
+$allowed = @(Get-ActiveAllowlistItems -Config $rawScoop -ItemsProperty 'apps' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
 $filtered = @($export.apps | Where-Object { $allowed -contains $_.Name })
 $export.apps = $filtered
 $export | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $scoopfile -Encoding UTF8
@@ -528,7 +556,8 @@ if (-not $SkipPersist) {
 $wingetAllowedPersistFile = Join-Path $PSScriptRoot 'winget-allowed.json'
 if (Test-Path -LiteralPath $wingetAllowedPersistFile) {
     $wingetAllowedCfg = Get-Content -LiteralPath $wingetAllowedPersistFile -Raw | ConvertFrom-Json
-    $wingetAppsForPersist = @($wingetAllowedCfg.packages | Where-Object { $_.persist } | ForEach-Object {
+    $activeWingetPkgs = Get-ActiveAllowlistItems -Config $wingetAllowedCfg -ItemsProperty 'packages' -IdProperty 'id'
+    $wingetAppsForPersist = @($activeWingetPkgs | Where-Object { $_.persist } | ForEach-Object {
         [PSCustomObject]@{ Name = $_.id; Persist = $_.persist; ServiceName = $null }
     })
     if ($wingetAppsForPersist.Count -gt 0) {
@@ -556,7 +585,10 @@ if (-not (Test-Path -LiteralPath $uvAllowedFile)) {
     throw "Missing required allowlist: $uvAllowedFile"
 }
 
-$allowed = (Get-Content -LiteralPath $uvAllowedFile -Raw | ConvertFrom-Json).packages
+$rawUv = Get-Content -LiteralPath $uvAllowedFile -Raw | ConvertFrom-Json
+$allowed = @(Get-ActiveAllowlistItems -Config $rawUv -ItemsProperty 'packages' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
 $allTools = @()
 $toolListOutput = & uv tool list 2>$null
 foreach ($line in $toolListOutput) {
@@ -578,7 +610,10 @@ if (-not (Test-Path -LiteralPath $pnpmAllowedFile)) {
     throw "Missing required allowlist: $pnpmAllowedFile"
 }
 
-$allowed = (Get-Content -LiteralPath $pnpmAllowedFile -Raw | ConvertFrom-Json).packages
+$rawPnpm = Get-Content -LiteralPath $pnpmAllowedFile -Raw | ConvertFrom-Json
+$allowed = @(Get-ActiveAllowlistItems -Config $rawPnpm -ItemsProperty 'packages' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
 @{ packages = @($allowed) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $pnpmGlobalsFile -Encoding UTF8
 Write-Host "Exported $($allowed.Count) pnpm global packages from allowlist"
 

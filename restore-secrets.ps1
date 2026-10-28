@@ -122,7 +122,8 @@ if (-not (Test-Path -LiteralPath $ArchivePath)) {
 Report-WacliPayloadPreserved -ArchivePath $ArchivePath
 
 $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-$enabled = @($manifest.items | Where-Object { -not $_.Disabled })
+$disabledSecrets = @($manifest.disabled) + @($manifest.disabled_items)
+$enabled = @($manifest.items | Where-Object { (-not $_.Disabled) -and ($_.Name -notin $disabledSecrets) })
 if ($enabled.Count -eq 0) {
     throw "No enabled secret paths found in $ManifestPath"
 }
