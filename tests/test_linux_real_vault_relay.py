@@ -60,7 +60,7 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 1)
         req = mock_urlopen.call_args[0][0]
         self.assertEqual(req.full_url, "https://ntfy.sh/my-phone-topic")
-        self.assertEqual(req.headers.get("Title"), "Mainframe Restore: Vault Unlock (test-box)")
+        self.assertEqual(req.headers.get("Title"), "Vault Unlock (test-box)")
         self.assertEqual(req.headers.get("Priority"), "urgent")
         self.assertEqual(req.headers.get("Click"), url)
         self.assertIn("view, Unlock Vault", req.headers.get("Actions"))
@@ -91,12 +91,13 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         mock_run.side_effect = fake_run
 
         work_root = self.root / "work"
-        url, priv, reply_topic = lr.generate_tab_key(work_root, reply_topic="mf-vault-fixed123")
+        url, priv, reply_topic, code, agent, model = lr.generate_tab_key(work_root, reply_topic="mf-vault-fixed123")
 
         self.assertEqual(priv.name, "vault-tab.key")
         self.assertEqual(reply_topic, "mf-vault-fixed123")
         self.assertIn("#k=", url)
         self.assertIn("&sid=mf-vault-fixed123", url)
+        self.assertTrue(code.isdigit())
 
     @patch("os.chmod")
     @patch("subprocess.run")
@@ -110,7 +111,7 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         mock_run.side_effect = fake_run
 
         work_root = self.root / "work"
-        url, priv, reply_topic = lr.generate_tab_key(work_root, enable_relay=False)
+        url, priv, reply_topic, code, agent, model = lr.generate_tab_key(work_root, enable_relay=False)
         self.assertIsNone(reply_topic)
         self.assertIn("#k=", url)
         self.assertNotIn("&sid=", url)
