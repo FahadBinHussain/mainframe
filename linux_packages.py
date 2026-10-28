@@ -217,6 +217,23 @@ def _manifest(repo: Path, filename: str, blockers: list[str]) -> dict[str, Any]:
         return {}
     return value
 
+def _active_items(config: dict[str, Any], key: str, id_field: str = "name") -> list[Any]:
+    disabled = set(config.get("disabled", []) + config.get(f"disabled_{key}", []))
+    items = config.get(key, [])
+    active = []
+    for item in items:
+        if isinstance(item, dict) and item.get("disabled") is True:
+            continue
+        ident = None
+        if isinstance(item, str):
+            ident = item.strip()
+        elif isinstance(item, dict):
+            ident = item.get(id_field) or item.get("id") or item.get("path") or item.get("name")
+        if ident and ident in disabled:
+            continue
+        active.append(item)
+    return active
+
 def _blocked(kind: str, name: str, reason: str, source: str) -> Action:
     return Action(kind, name, status="blocked", reason=reason, source=source)
 
@@ -258,7 +275,8 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
     pnpm = _manifest(repo, "pnpm-allowed.json", blockers)
     uv = _manifest(repo, "uv-allowed.json", blockers)
     go = _manifest(repo, "go-allowed.json", blockers)
-    for name in scoop.get("apps", []):
+    for raw_name in _active_items(scoop, "apps"):
+        name = raw_name.get("name") if isinstance(raw_name, dict) else raw_name
         if not _safe_arg(name):
             reason = f"Invalid Scoop package name: {name!r}"; blockers.append(reason); actions.append(_blocked("apt", str(name), reason, "scoop"))
         elif name in PACKAGE_COVERAGE:
@@ -395,7 +413,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                 packages.append('python3.12-venv')
             if name == 'go':
                 packages.extend(['build-essential', 'libsqlite3-dev'])
-            elevate = [] if os.geteuid() == 0 else ["sudo", "-n"]
+            elevate = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
             actions.append(Action("apt", name, [*elevate, "apt-get", "install", "-y", *packages], source="scoop"))
         else:
             reason = f"No explicit native equivalent for Scoop package: {name}"; blockers.append(reason); actions.append(_blocked("apt", name, reason, "scoop"))
@@ -403,9 +421,9 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
     # existing one regardless of declaration order, never install the helper.
     for target in dict.fromkeys(a.covered_by for a in actions if a.status == "covered"):
         if not any(a.name == target for a in actions):
-            elevate = [] if os.geteuid() == 0 else ["sudo", "-n"]
+            elevate = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
             actions.append(Action("apt", target, [*elevate, "apt-get", "install", "-y", APT_MAP[target]], source="package-coverage"))
-    for pkg in winget.get("packages", []):
+    for pkg in _active_items(winget, "packages", "id"):
         ident = pkg.get("id", "") if isinstance(pkg, dict) else pkg
         if not isinstance(ident, str) or not ident.strip():
             reason = f"Invalid WinGet package ID: {ident!r}"
@@ -457,7 +475,8 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                       f"Windows WinGet declaration has no validated native package/state adapter: {ident}")
             blockers.append(reason)
             actions.append(_blocked("winget", ident, reason, "winget"))
-    for name in pnpm.get("packages", []):
+    for raw_name in _active_items(pnpm, "packages"):
+        name = raw_name.get("name") if isinstance(raw_name, dict) else raw_name
         reason = f"Invalid pnpm package name: {name!r}"
         if not _safe_arg(name): blockers.append(reason); actions.append(_blocked("pnpm", str(name), reason, "pnpm"))
         elif name == "@googleworkspace/cli":
@@ -511,7 +530,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                           "no package-manager execution or live-home global install.")
             blockers.append(reason)
             actions.append(Action("pnpm", name, ["pnpm", "add", "--global", "--", name], status="blocked", reason=reason, source="pnpm"))
-    for item in uv.get("packages", []):
+    for item in _active_items(uv, "packages"):
         name = item.get("name") if isinstance(item, dict) else item
         version = item.get("version") if isinstance(item, dict) else None
         spec = f"{name}=={version}" if version else name
@@ -533,7 +552,7 @@ def build_plan(repo: Path, backup_root: Path | None = None, distro: str | None =
                       "see docs/linux-uv-tool-review.md.")
             blockers.append(reason)
             actions.append(Action("uv", name, ["uv", "tool", "install", "--", spec], version=version, status="blocked", reason=reason, source="uv"))
-    for item in go.get("packages", []):
+    for item in _active_items(go, "packages", "path"):
         if isinstance(item, dict): path, version, tags = item.get("path", ""), item.get("version") or 'latest', item.get("tags", []) or []
         else: path, version, tags = item, 'latest', []
         if not _safe_arg(path) or (version is not None and not _safe_arg(version)) or not isinstance(tags, list) or not all(_safe_arg(x) for x in tags):

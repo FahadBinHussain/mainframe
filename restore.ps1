@@ -95,6 +95,31 @@ function Get-MainframeConfigPath {
     throw "Missing required mainframe allowlist: $candidate"
 }
 
+function Get-ActiveAllowlistItems {
+    param(
+        [Parameter(Mandatory=$true)]$Config,
+        [Parameter(Mandatory=$true)][string]$ItemsProperty,
+        [string]$IdProperty = 'name'
+    )
+    $disabledList = @($Config.disabled) + @($Config."disabled_$ItemsProperty")
+    $rawItems = @($Config.$ItemsProperty)
+    $result = @()
+    foreach ($item in $rawItems) {
+        if ($null -eq $item) { continue }
+        if ($item -is [string]) {
+            $id = $item.Trim()
+            if (-not $id -or $id -in $disabledList) { continue }
+            $result += $id
+        } elseif ($item -is [PSCustomObject] -or $item -is [hashtable]) {
+            if ($item.disabled -eq $true) { continue }
+            $id = if ($item.$IdProperty) { $item.$IdProperty } elseif ($item.id) { $item.id } elseif ($item.path) { $item.path } elseif ($item.name) { $item.name } else { $null }
+            if ($id -and $id -in $disabledList) { continue }
+            $result += $item
+        }
+    }
+    return $result
+}
+
 function Get-ScoopCommand {
     $cmd = Get-Command scoop -ErrorAction SilentlyContinue
     if ($cmd) {
@@ -334,7 +359,8 @@ function Restore-ToolSecretsArchive {
         Report-WacliPayloadPreserved -Path $secretsDir
         Write-Host "Restoring secrets from embedded backup..."
         $manifest = Get-Content -LiteralPath $SecretsManifestPath -Raw | ConvertFrom-Json
-        $manifestItems = @($manifest.items | Where-Object { -not $_.Disabled })
+        $disabledSecrets = @($manifest.disabled) + @($manifest.disabled_items)
+        $manifestItems = @($manifest.items | Where-Object { (-not $_.Disabled) -and ($_.Name -notin $disabledSecrets) })
         if ($ItemNames.Count -gt 0) {
             $manifestItems = @($manifestItems | Where-Object {
                 $name = $_.Name
@@ -1108,7 +1134,10 @@ foreach ($item in @($import.apps)) {
 }
 
 $allowedAppsFile = Get-MainframeConfigPath -FileName 'scoop-allowed.json'
-$allowedApps = @((Get-Content -LiteralPath $allowedAppsFile -Raw | ConvertFrom-Json).apps | Where-Object { $_ })
+$rawScoop = Get-Content -LiteralPath $allowedAppsFile -Raw | ConvertFrom-Json
+$allowedApps = @(Get-ActiveAllowlistItems -Config $rawScoop -ItemsProperty 'apps' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
 $restoreApps = @($allowedApps | ForEach-Object {
     if ($importAppsByName.ContainsKey($_)) {
         $importAppsByName[$_]
@@ -1215,7 +1244,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "pnpm config set global-bin-dir failed with exit code $LASTEXITCODE"
 }
 
-$pnpmPackages = @((Get-Content -LiteralPath $pnpmAllowedFile -Raw | ConvertFrom-Json).packages | Where-Object { $_ })
+$rawPnpm = Get-Content -LiteralPath $pnpmAllowedFile -Raw | ConvertFrom-Json
+$pnpmPackages = @(Get-ActiveAllowlistItems -Config $rawPnpm -ItemsProperty 'packages' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
 Write-Host "Using pnpm allowlist: $pnpmAllowedFile ($($pnpmPackages.Count) packages)"
 foreach ($pkg in $pnpmPackages) {
     Write-Host "Installing pnpm global: $pkg"
@@ -1253,7 +1285,10 @@ $uvCmd = Get-Command uv -ErrorAction SilentlyContinue
 if (-not $uvCmd) {
     throw 'uv command was not found after Scoop restore.'
 }
-$uvPackages = @((Get-Content -LiteralPath $uvAllowedFile -Raw | ConvertFrom-Json).packages | Where-Object { $_ })
+$rawUv = Get-Content -LiteralPath $uvAllowedFile -Raw | ConvertFrom-Json
+$uvPackages = @(Get-ActiveAllowlistItems -Config $rawUv -ItemsProperty 'packages' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
 Write-Host "Using uv allowlist: $uvAllowedFile ($($uvPackages.Count) tools)"
 foreach ($pkg in $uvPackages) {
     Write-Host "Installing uv tool: $pkg"
@@ -1388,8 +1423,9 @@ if (-not $goCmd) {
 }
 $goAllowedFile = Get-MainframeConfigPath -FileName 'go-allowed.json'
 $goPkgImport = Get-Content -LiteralPath $goAllowedFile -Raw | ConvertFrom-Json
-Write-Host "Using Go allowlist: $goAllowedFile ($(@($goPkgImport.packages).Count) packages)"
-foreach ($pkg in @($goPkgImport.packages)) {
+$activeGoPackages = @(Get-ActiveAllowlistItems -Config $goPkgImport -ItemsProperty 'packages' -IdProperty 'path')
+Write-Host "Using Go allowlist: $goAllowedFile ($($activeGoPackages.Count) packages)"
+foreach ($pkg in $activeGoPackages) {
     $pkgPath = if ($pkg -is [string]) { $pkg } else { $pkg.path }
     $tags = if ($pkg -is [string]) { @() } else { @($pkg.tags) }
     $version = if ($pkg -is [string]) { 'latest' } else { if ($pkg.version) { $pkg.version } else { 'latest' } }
@@ -1431,10 +1467,11 @@ if (-not $wingetCmd) {
 } else {
     $wingetAllowedFile = Get-MainframeConfigPath -FileName 'winget-allowed.json'
     $wingetImport = Get-Content -LiteralPath $wingetAllowedFile -Raw | ConvertFrom-Json
-    Write-Host "Using winget allowlist: $wingetAllowedFile ($(@($wingetImport.packages).Count) packages)"
+    $activeWingetPackages = @(Get-ActiveAllowlistItems -Config $wingetImport -ItemsProperty 'packages' -IdProperty 'id')
+    Write-Host "Using winget allowlist: $wingetAllowedFile ($($activeWingetPackages.Count) packages)"
     $installed_count = 0
     $skipped = 0
-    foreach ($pkg in @($wingetImport.packages)) {
+    foreach ($pkg in $activeWingetPackages) {
         $pkgId = if ($pkg -is [string]) { $pkg } else { $pkg.id }
         # Check if already installed
         $savedEap = $ErrorActionPreference
@@ -1474,7 +1511,7 @@ if (-not $wingetCmd) {
 
     # Restore persist data for winget packages that have it (AnyDesk, Directory Opus, etc.).
     # Backup wrote these under <BackupRoot>\native\<archivePath> using the same Write-NativePersistArchive function.
-    $wingetPersistPkgs = @($wingetImport.packages | Where-Object { $_.persist })
+    $wingetPersistPkgs = @($activeWingetPackages | Where-Object { $_.persist })
     if ($wingetPersistPkgs.Count -gt 0 -and -not $SkipNativePersist) {
         foreach ($pkg in $wingetPersistPkgs) {
             Write-Host "Restoring persist for $($pkg.id)..."

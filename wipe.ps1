@@ -38,7 +38,8 @@ function Get-WipeTargets {
     $manifestPath = Join-Path $PSScriptRoot 'tool-secrets.manifest.json'
     if (Test-Path -LiteralPath $manifestPath) {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-        foreach ($item in @($manifest.items | Where-Object { -not $_.Disabled })) {
+        $disabledSecrets = @($manifest.disabled) + @($manifest.disabled_items)
+        foreach ($item in @($manifest.items | Where-Object { (-not $_.Disabled) -and ($_.Name -notin $disabledSecrets) })) {
             $p = Resolve-SecretPath -Value $item.Source
             if ($p) { $targets += $p }
         }
@@ -54,7 +55,11 @@ function Get-WipeTargets {
     $wingetAllowed = Join-Path $PSScriptRoot 'winget-allowed.json'
     if (Test-Path -LiteralPath $wingetAllowed) {
         $cfg = Get-Content -LiteralPath $wingetAllowed -Raw | ConvertFrom-Json
-        foreach ($pkg in @($cfg.packages)) {
+        $disabledWinget = @($cfg.disabled) + @($cfg.disabled_packages)
+        foreach ($pkg in @($cfg.packages | Where-Object {
+            $id = if ($_ -is [string]) { $_ } else { $_.id }
+            (-not $_.disabled) -and ($id -notin $disabledWinget)
+        })) {
             foreach ($entry in @($pkg.persist)) {
                 $p = Resolve-SecretPath -Value $entry.path
                 if ($p) { $targets += $p }

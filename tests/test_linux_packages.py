@@ -66,11 +66,77 @@ class LinuxPackagesTests(unittest.TestCase):
         executables.start()
         self.addCleanup(executables.stop)
 
+    def test_disabled_allowlist_entries_are_skipped(self):
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            repo = Path(d)
+            manifests = {
+                "scoop-allowed.json": {
+                    "apps": [
+                        "curl",
+                        {"name": "vscode", "disabled": True, "note": "disabled for now"},
+                        "git"
+                    ],
+                    "disabled": ["git"]
+                },
+                "winget-allowed.json": {
+                    "packages": [
+                        {"id": "Vendor.Active"},
+                        {"id": "Vendor.DisabledObj", "disabled": True},
+                        {"id": "Vendor.DisabledList"}
+                    ],
+                    "disabled": ["Vendor.DisabledList"]
+                },
+                "pnpm-allowed.json": {
+                    "packages": [
+                        "vercel",
+                        {"name": "disabled-pkg", "disabled": True}
+                    ],
+                    "disabled": ["vercel"]
+                },
+                "uv-allowed.json": {
+                    "packages": [
+                        {"name": "tool-active"},
+                        {"name": "tool-disabled", "disabled": True}
+                    ]
+                },
+                "go-allowed.json": {
+                    "packages": [
+                        {"path": "example.com/active"},
+                        {"path": "example.com/disabled", "disabled": True}
+                    ]
+                }
+            }
+            for filename, data in manifests.items():
+                (repo / filename).write_text(json.dumps(data))
+            plan = lp.build_plan(repo, distro="ubuntu", architecture="x86_64")
+            names = {a.name for a in plan.actions}
+            self.assertIn("curl", names)
+            self.assertNotIn("vscode", names)
+            self.assertNotIn("git", names)
+            self.assertIn("Vendor.Active", names)
+            self.assertNotIn("Vendor.DisabledObj", names)
+            self.assertNotIn("Vendor.DisabledList", names)
+            self.assertNotIn("disabled-pkg", names)
+            self.assertNotIn("vercel", names)
+            self.assertIn("tool-active", names)
+            self.assertNotIn("tool-disabled", names)
+            self.assertIn("example.com/active", names)
+            self.assertNotIn("example.com/disabled", names)
+
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
         names = {a.name for a in plan.actions}
-        scoop = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
-        winget = [x["id"] for x in json.loads((ROOT / "winget-allowed.json").read_text())["packages"]]
+        scoop_raw = json.loads((ROOT / "scoop-allowed.json").read_text())
+        scoop_disabled = set(scoop_raw.get("disabled", []) + scoop_raw.get("disabled_apps", []))
+        scoop = [x if isinstance(x, str) else x["name"] for x in scoop_raw["apps"]
+                 if ((isinstance(x, str) and x not in scoop_disabled) or
+                     (isinstance(x, dict) and not x.get("disabled") and x.get("name") not in scoop_disabled))]
+        winget_raw = json.loads((ROOT / "winget-allowed.json").read_text())
+        winget_disabled = set(winget_raw.get("disabled", []) + winget_raw.get("disabled_packages", []))
+        winget = [x["id"] for x in winget_raw["packages"]
+                  if ((isinstance(x, dict) and not x.get("disabled") and x.get("id") not in winget_disabled) or
+                      (isinstance(x, str) and x not in winget_disabled))]
         self.assertTrue(set(scoop) <= names); self.assertTrue(set(winget) <= names)
         self.assertTrue({"@googleworkspace/cli", "vercel"} <= names)
         self.assertIn("github.com/openclaw/wacli/cmd/wacli", names)
@@ -338,7 +404,7 @@ class LinuxPackagesTests(unittest.TestCase):
 
     def test_vscode_default_plan_never_resolves_metadata(self):
         with patch.object(lp.vscode_tools, "build_dry_plan") as dry_plan:
-            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
+            plan = self.helper_plan(["vscode"])
         action = next(item for item in plan.actions if item.name == "vscode")
         self.assertEqual(action.status, "blocked")
         self.assertIsNone(action.dry_plan)
@@ -356,7 +422,7 @@ class LinuxPackagesTests(unittest.TestCase):
             "executable": False,
         }
         with patch.object(lp.vscode_tools, "build_dry_plan", return_value=detail) as dry_plan:
-            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", vscode_metadata_plan=True)
+            plan = self.helper_plan(["vscode"], vscode_metadata_plan=True)
         dry_plan.assert_called_once_with("x86_64")
         action = next(item for item in plan.actions if item.name == "vscode")
         self.assertEqual(action.status, "blocked")
@@ -376,7 +442,7 @@ class LinuxPackagesTests(unittest.TestCase):
         marker = "synthetic-private-vscode-response-marker"
         failure = http.client.IncompleteRead(marker.encode(), 100)
         with patch.object(lp.vscode_tools, "build_dry_plan", side_effect=failure):
-            plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64", vscode_metadata_plan=True)
+            plan = self.helper_plan(["vscode"], vscode_metadata_plan=True)
         action = next(item for item in plan.actions if item.name == "vscode")
         self.assertEqual(action.status, "blocked")
         self.assertEqual(
@@ -402,21 +468,32 @@ class LinuxPackagesTests(unittest.TestCase):
             build.assert_not_called()
 
     def test_vscode_metadata_cli_forwards_option_as_blocked_dry_plan(self):
-        detail = {
-            "package": {"name": "vscode", "version": "1.2.3", "version_is_restore_pin": False},
-            "linux_archive_candidate": {"url": "https://vscode.download.prss.microsoft.com/synthetic.tar.gz"},
-            "executable": False,
-        }
-        output = io.StringIO()
-        with patch.object(lp.vscode_tools, "build_dry_plan", return_value=detail) as dry_plan, \
-             patch.object(lp, "execute") as execute, contextlib.redirect_stdout(output):
-            status = lp.main([
-                "--repo", str(ROOT), "--vscode-metadata-plan", "--distro", "ubuntu", "--arch", "x86_64",
-            ])
-        dry_plan.assert_called_once_with("x86_64")
-        execute.assert_not_called()
-        self.assertIn(status, (0, 3))
-        action = next(item for item in json.loads(output.getvalue())["actions"] if item["name"] == "vscode")
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as d:
+            repo = Path(d)
+            for filename, key, value in (
+                ("scoop-allowed.json", "apps", ["vscode"]),
+                ("winget-allowed.json", "packages", [{"id": "Vendor.Tool"}]),
+                ("pnpm-allowed.json", "packages", ["tool"]),
+                ("uv-allowed.json", "packages", ["tool"]),
+                ("go-allowed.json", "packages", ["example.com/tool"]),
+            ):
+                (repo / filename).write_text(json.dumps({key: value}))
+            detail = {
+                "package": {"name": "vscode", "version": "1.2.3", "version_is_restore_pin": False},
+                "linux_archive_candidate": {"url": "https://vscode.download.prss.microsoft.com/synthetic.tar.gz"},
+                "executable": False,
+            }
+            output = io.StringIO()
+            with patch.object(lp.vscode_tools, "build_dry_plan", return_value=detail) as dry_plan, \
+                 patch.object(lp, "execute") as execute, contextlib.redirect_stdout(output):
+                status = lp.main([
+                    "--repo", str(repo), "--vscode-metadata-plan", "--distro", "ubuntu", "--arch", "x86_64",
+                ])
+            dry_plan.assert_called_once_with("x86_64")
+            execute.assert_not_called()
+            self.assertIn(status, (0, 3))
+            action = next(item for item in json.loads(output.getvalue())["actions"] if item["name"] == "vscode")
         self.assertEqual(action["kind"], "vscode-metadata")
         self.assertEqual(action["status"], "blocked")
         self.assertIsNone(action["command"])
@@ -479,7 +556,8 @@ class LinuxPackagesTests(unittest.TestCase):
             build.assert_not_called()
 
     def test_autohotkey_removed_from_both_allowlists_and_dry_plan(self):
-        scoop = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
+        scoop_raw = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
+        scoop = [x if isinstance(x, str) else x["name"] for x in scoop_raw]
         winget = [x["id"] for x in json.loads((ROOT / "winget-allowed.json").read_text())["packages"]]
         self.assertNotIn("autohotkey", scoop)
         self.assertNotIn("AutoHotkey.AutoHotkey", winget)
@@ -493,7 +571,7 @@ class LinuxPackagesTests(unittest.TestCase):
             self.assertNotIn("autohotkey", json.dumps(action).lower())
         self.assertFalse(any("autohotkey" in reason.lower() for reason in plan["blockers"]))
 
-    def helper_plan(self, apps, winget=None):
+    def helper_plan(self, apps, winget=None, **kwargs):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
             root = Path(d)
@@ -505,7 +583,7 @@ class LinuxPackagesTests(unittest.TestCase):
                 ("go-allowed.json", "packages", ["example.com/tool"]),
             ):
                 (root / filename).write_text(json.dumps({key: value}))
-            return lp.build_plan(root)
+            return lp.build_plan(root, distro="ubuntu", architecture="x86_64", **kwargs)
 
     def test_anydesk_plans_official_package_and_covers_winget_duplicate(self):
         plan = lp.build_plan(ROOT)
@@ -861,13 +939,13 @@ class LinuxPackagesTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["timeout"], 30); self.assertEqual(calls[1][1]["timeout"], 300)
 
     def test_root_apt_action_does_not_require_sudo(self):
-        with patch.object(lp.os, "geteuid", return_value=0):
+        with patch.object(lp.os, "geteuid", return_value=0, create=True):
             plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
         action = next(a for a in plan.actions if a.kind == "apt" and a.status == "planned")
         self.assertEqual(action.command[:3], ["apt-get", "install", "-y"])
 
     def test_non_root_apt_action_uses_noninteractive_sudo(self):
-        with patch.object(lp.os, "geteuid", return_value=1000):
+        with patch.object(lp.os, "geteuid", return_value=1000, create=True):
             plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
         action = next(a for a in plan.actions if a.kind == "apt" and a.status == "planned")
         self.assertEqual(action.command[:3], ["sudo", "-n", "apt-get"])
