@@ -97,16 +97,24 @@ function Test-VaultSession {
     }
 
     $env:BW_SESSION = $session
-    try {
-        $status = bw status 2>$null | ConvertFrom-Json
-        if ($status.status -eq 'unlocked') {
-            $script:VaultSessionOkSession = $session
-            return $true
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $rawStatus = bw status --session $session 2>$null
+            if ($rawStatus) {
+                $status = $rawStatus | ConvertFrom-Json
+                if ($status.status -eq 'unlocked') {
+                    $script:VaultSessionOkSession = $session
+                    return $true
+                } elseif ($status.status -in @('locked', 'unauthenticated')) {
+                    return $false
+                }
+            }
+        } catch {}
+        if ($attempt -lt 2) {
+            Start-Sleep -Milliseconds 300
         }
-        return $false
-    } catch {
-        return $false
     }
+    return $false
 }
 
 function Ensure-VaultSession {
@@ -132,9 +140,19 @@ function Ensure-VaultSession {
     }
 
     if (Get-Command Get-VaultMasterPassword -ErrorAction SilentlyContinue) {
+        # Check again right before prompting in case another agent just unlocked
+        if (Test-VaultSession) {
+            return $true
+        }
+
+        $promptStartTimeUtc = [DateTime]::UtcNow
         Write-Host "`n==> vault session is locked or expired (1-hour TTL)." -ForegroundColor Yellow
         Write-Host "triggering 1-tap mobile approval prompt on phone..." -ForegroundColor Cyan
-        $pw = Get-VaultMasterPassword -PromptContext $PromptContext -TimeoutSeconds $TimeoutSeconds -Agent $Agent -Model $Model
+        $pw = Get-VaultMasterPassword -PromptContext $PromptContext -TimeoutSeconds $TimeoutSeconds -Agent $Agent -Model $Model -StartTimeUtc $promptStartTimeUtc
+        if ($pw -eq '__SESSION_ALREADY_UNLOCKED__') {
+            Write-Host "vault was unlocked by another agent - reusing fresh session" -ForegroundColor Green
+            return $true
+        }
         if ($pw) {
             [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $pw)
             try {

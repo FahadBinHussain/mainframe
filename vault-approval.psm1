@@ -223,16 +223,26 @@ function Wait-VaultApprovalCiphertext {
         [Parameter(Mandatory = $true)]
         [string]$Sid,
         [int]$TimeoutSeconds = 300,
-        [string]$LocalFileName = 'mainframe-vault-pass.enc'
+        [string]$LocalFileName = 'mainframe-vault-pass.enc',
+        [DateTime]$StartTimeUtc = [DateTime]::MinValue
     )
 
     $downloadPath = Join-Path $HOME "Downloads\$LocalFileName"
+    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds 2
 
-        # 1. Poll relay topic
+        # 1. Check if another agent completed the unlock while we were waiting
+        if ($StartTimeUtc -ne [DateTime]::MinValue -and (Test-Path -LiteralPath $sessionFile)) {
+            $fi = Get-Item -LiteralPath $sessionFile
+            if ($fi.LastWriteTimeUtc -ge $StartTimeUtc) {
+                return '__SESSION_ALREADY_UNLOCKED__'
+            }
+        }
+
+        # 2. Poll relay topic
         try {
             $resp = Invoke-RestMethod -Uri "https://ntfy.sh/$Sid/raw?poll=1" -Method Get -TimeoutSec 5 -ErrorAction Stop
             if ($resp -and [string]$resp -ne '') {
@@ -242,7 +252,7 @@ function Wait-VaultApprovalCiphertext {
             # timeout/no message yet
         }
 
-        # 2. Check local file
+        # 3. Check local file
         if (Test-Path -LiteralPath $downloadPath) {
             try {
                 $content = (Get-Content -LiteralPath $downloadPath -Raw).Trim()
@@ -278,7 +288,8 @@ function Get-VaultMasterPassword {
         [int]$TimeoutSeconds = 300,
         [string]$Agent = $null,
         [string]$Model = $null,
-        [string]$HostName = $env:COMPUTERNAME
+        [string]$HostName = $env:COMPUTERNAME,
+        [DateTime]$StartTimeUtc = [DateTime]::MinValue
     )
 
     # Resolve ntfy topic
@@ -337,7 +348,11 @@ function Get-VaultMasterPassword {
         $opened = Open-VaultApprovalOnPhone -Url $url
 
         Write-Host "waiting for 1-tap fingerprint approval on phone (or ~/Downloads/mainframe-vault-pass.enc) ..." -ForegroundColor Yellow
-        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds
+        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc
+
+        if ($ct -eq '__SESSION_ALREADY_UNLOCKED__') {
+            return '__SESSION_ALREADY_UNLOCKED__'
+        }
 
         if ($ct) {
             $pw = Decrypt-VaultApprovalCiphertext -Rsa $rsa -Ciphertext $ct
