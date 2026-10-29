@@ -1376,9 +1376,34 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   does not quota release assets, so this is repo housekeeping only) per hostname. after
   each publish it prunes to the newest 5 for that host with `gh release delete --cleanup-tag`.
 - **idempotent**: skips if `C:\tmp\daily-backup-lastdate.txt` already holds today's date
-  (task retriggers won't double-publish). throws loudly if the vault is locked (no `session.key`).
+  (task retriggers won't double-publish).
+- **vault preflight happens BEFORE any backup work (2026-10-29)**: the old code only checked that
+  `session.key` EXISTS. an expired 1-hour-TTL key passes that check and only reads as `locked`
+  when the secrets step touches the vault near the END of the run — the 2026-10-29 task died at
+  09:05 with `vault is locked or approval was not completed` after a 120s mobile-approval timeout,
+  throwing away 1.9 GB of just-built zips (release missing, marker stuck at the previous day).
+  `daily-backup-publish.ps1` now imports `vault-secret.psm1` and calls
+  `Ensure-VaultSession -TimeoutSeconds 600` right after the marker check, so the 1-tap push goes
+  out while nothing has been zipped yet and a missed approval fails fast with
+  `vault locked - 1-tap mobile approval not completed within 600s; backup not started`.
+  a valid session returns in ~4s with no prompt. a stale-but-present key is NOT a skip reason.
+- **a missed approval is recoverable, keep the marker honest**: the daily marker is only written
+  after a successful publish, so a manual rerun (`unlock.ps1` or another 1-tap approval, then
+  `pwsh -File daily-backup-publish.ps1`) picks the day back up. do NOT "fix" a failed run by
+  deleting WhatsApp state, skipping the secrets step, or writing the marker by hand.
 - **what's zipped**: scoop persist dirs (VSS + robocopy, skips `Cache`/`logs`) + core config + edge profile + skills. `persist\python312\Lib\site-packages` is **NOT** shipped (see below) — everything else in `python312` (incl. `Scripts`, which carries `pip.exe`) is. Edge `Default\Extensions` store packages are **NOT** shipped either (cut B, 2026-10-04) — Edge re-downloads them via the forcelist/registry loader (see edge section); unpacked dev-mode extensions ARE still copied via `edge-profile\unpacked-extensions\`. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
   or `C:\tmp` — cleaning those does not change what a backup captures.
+- **GitHub's 2 GiB per-asset cap, the `gradle` exclusion and the pre-upload guard (2026-10-27)**:
+  `mainframe-persist.zip` hovered at 2.093–2.098 GB from 2026-10-15 (65.9 MB on 2026-10-10) and the
+  2026-10-27 run finally crossed GitHub's HARD per-asset limit (2,147,483,648 B — a platform cap,
+  not a plan cap, reported only as `HTTP 422 ... size must be less than 2147483648` AFTER the
+  release row already existed, so the tag had to be cleaned up). the overwhelming contributor among
+  non-excluded dirs was `scoop\persist\gradle\.gradle\caches` (3.55 GB live, pure build cache), so
+  `gradle` joined `backup.ps1`'s persist `$excludeDirs` — measured effect: persist dropped to
+  205–215 MB. `publish-backup.ps1` now asserts every asset's size before `gh release create` and
+  throws naming the asset, its MB and the exact limit, so an oversized zip fails BEFORE any release
+  exists. when persist grows again, read the biggest `persist\*` dirs first and exclude a rebuildable
+  cache — never trim user data to fit.
 - **vault is never backed up** (decided 2026-09-12). the bitwarden vault lives server-side; we do not ship it:
   - `backup.ps1` persist `$excludeDirs` includes `bitwarden-cli` → the encrypted `bw-data\data.json` cache is not captured on any run (daily or full).
   - `tool-secrets.manifest.json` `mainframe tool auth profiles and tokens` item has `excludeDirs: ["bitwarden"]` → the full-run `secrets\` archive skips `accounts\bitwarden\` (`session.key` + profile).

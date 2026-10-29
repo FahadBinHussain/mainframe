@@ -77,7 +77,13 @@ try {
     Notify 'start' 'zipping + publishing machine state'
     # vault must be unlocked so publish can read the GitHub token; the vault itself is
     # NOT backed up (bw-data + session.key excluded in backup.ps1 / tool-secrets manifest).
-    if (-not (Test-Path "$env:APPDATA\mainframe\accounts\bitwarden\session.key")) { throw 'vault locked (no session.key) - unlock needed for publish' }
+    # a session.key PRESENCE check is not enough: an expired/1-hour-TTL key only reads as
+    # locked when the secrets step touches the vault, minutes into the run (2026-10-29
+    # 09:05 run died there after a 120s mobile-approval timeout, 1.9 GB of zips wasted).
+    # validate up front and give the 1-tap approval a wide window while nothing heavy ran.
+    Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force -DisableNameChecking
+    $vaultOk = Ensure-VaultSession -TimeoutSeconds 600 -PromptContext 'daily mainframe backup publish' -Agent 'mainframe-daily' -Model 'scheduled task'
+    if (-not $vaultOk) { throw 'vault locked - 1-tap mobile approval not completed within 600s; backup not started' }
     & .\backup.ps1 -ExcludeSecrets -Publish 2>&1 | ForEach-Object { Log "  $_" }
     if ($LASTEXITCODE -ne 0) { throw "backup.ps1 -Publish failed (exit $LASTEXITCODE)" }
     Set-Content -LiteralPath $marker -Value $today -Encoding UTF8
