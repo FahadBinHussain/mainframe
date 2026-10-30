@@ -403,7 +403,8 @@ def _pages_base() -> str:
 
 def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
                      enable_relay: bool = True, context: str = "restore",
-                     agent: str | None = None, model: str | None = None) -> tuple[str, Path, str | None, str, str, str | None]:
+                     agent: str | None = None, model: str | None = None,
+                     expires_in: int = 0) -> tuple[str, Path, str | None, str, str, str | None]:
     """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic, code, agent, model)."""
     resolved_agent, resolved_model = detect_caller_identity(agent, model)
     tmp = work_root / "tmp"
@@ -436,6 +437,10 @@ def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
         fragment += f"&model={urllib.parse.quote(resolved_model)}"
     if sid:
         fragment += f"&sid={sid}"
+    if expires_in > 0:
+        # how long this runner will keep waiting. the card stops offering a
+        # tap once this passes instead of sitting there looking approvable.
+        fragment += f"&exp={int(time.time()) + expires_in}"
     return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid, code, resolved_agent, resolved_model
 
 
@@ -470,7 +475,30 @@ def _try_open_tab(url: str) -> None:
             continue
 
 
-def wait_for_tab_password(priv: Path, reply_topic: str | None = None) -> str:
+def publish_request_expired(topic: str | None, *, host: str = "",
+                            code: str = "") -> bool:
+    """Tell the approval card the runner stopped waiting, so it goes stale.
+
+    Same marker shape the PowerShell module publishes: the card polls this
+    single-use topic and flips itself to "stale request" on seeing it."""
+    if not topic:
+        return False
+    body = json.dumps({"mf": "expired", "at": int(time.time()),
+                       "host": host, "code": code}, separators=(",", ":"))
+    req = urllib.request.Request(
+        f"{DEFAULT_NTFY_SERVER}/{topic}", data=body.encode("utf-8"),
+        headers={"Title": "Vault Request Expired", "Priority": "low",
+                 "Tags": "hourglass"})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception as exc:
+        log(f"could not publish the expired marker to '{topic}': {exc}")
+        return False
+
+
+def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
+                          host: str = "", code: str = "") -> str:
     """Poll for encrypted password from relay or ~/Downloads, decrypt, clean up."""
     target = Path.home() / "Downloads" / TAB_CIPHER_NAME
     if target.exists():
@@ -500,8 +528,14 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None) -> str:
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     if resp.status == 200:
                         body = resp.read().decode("utf-8").strip()
-                        if body:
-                            raw_b64 = body
+                        # raw returns every message, newline separated.
+                        # request-expired markers are status bodies,
+                        # never ciphertext.
+                        lines = [line.strip() for line in body.splitlines()
+                                 if line.strip()
+                                 and not re.match(r'^\{\s*"mf"\s*:', line.strip())]
+                        if lines:
+                            raw_b64 = lines[-1]
                             source = f"ntfy relay ({reply_topic})"
                             break
             except Exception:
@@ -509,6 +543,7 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None) -> str:
 
         time.sleep(2)
     else:
+        publish_request_expired(reply_topic, host=host, code=code)
         raise RuntimeError(
             "no password arrived in the browser tab within "
             f"{TAB_WAIT_SECONDS // 60} minutes")
@@ -541,7 +576,8 @@ def obtain_master_password(work_root: Path, checkout: Path,
     falling back loudly to terminal input only if phone approval fails or times out."""
     resolved_topic = ntfy_topic or resolve_ntfy_topic(checkout) or DEFAULT_NTFY_TOPIC
     url, priv, reply_topic, code, resolved_agent, resolved_model = generate_tab_key(
-        work_root, context="vault restore", agent=agent, model=model
+        work_root, context="vault restore", agent=agent, model=model,
+        expires_in=TAB_WAIT_SECONDS
     )
     host = ""
     try:
@@ -580,7 +616,8 @@ def obtain_master_password(work_root: Path, checkout: Path,
 
         # 4. Await decrypted password from phone relay or local download
         try:
-            return wait_for_tab_password(priv, reply_topic=reply_topic)
+            return wait_for_tab_password(priv, reply_topic=reply_topic,
+                                         host=host, code=code)
         except RuntimeError as exc:
             # Rule 8: surface fallback loudly
             log(f"WARNING: 1-tap mobile approval failed ({exc}). Falling back to MANUAL PASSWORD ENTRY.")

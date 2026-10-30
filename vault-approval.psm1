@@ -118,7 +118,10 @@ function Get-VaultApprovalUrl {
         [string]$PromptContext = 'vault access',
         [string]$HostName = $env:COMPUTERNAME,
         [string]$Agent = $null,
-        [string]$Model = $null
+        [string]$Model = $null,
+        # how long the runner will keep waiting. landing this in the link lets
+        # the phone page say "stale" instead of offering a tap nobody hears.
+        [int]$ExpiresInSeconds = 0
     )
 
     $identity = Get-CallerIdentity -Agent $Agent -Model $Model
@@ -142,9 +145,10 @@ function Get-VaultApprovalUrl {
     $escapedHost = [Uri]::EscapeDataString($HostName)
     $escapedAgent = [Uri]::EscapeDataString($resolvedAgent)
     $modelParam = if ($resolvedModel) { "&model=" + [Uri]::EscapeDataString($resolvedModel) } else { "" }
+    $expParam = if ($ExpiresInSeconds -gt 0) { "&exp=" + [DateTimeOffset]::UtcNow.AddSeconds($ExpiresInSeconds).ToUnixTimeSeconds() } else { "" }
 
     $owner = ($ToolRepo -split '/')[0]
-    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam"
+    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam$expParam"
 
     return [PSCustomObject]@{
         Url   = $url
@@ -191,6 +195,37 @@ function Send-VaultApprovalNotification {
         return $true
     } catch {
         Write-Warning "ntfy push dispatch to topic '$Topic' failed: $_"
+        return $false
+    }
+}
+
+function Send-VaultRequestExpired {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Sid,
+        [string]$HostName = $env:COMPUTERNAME,
+        [string]$Code = $null
+    )
+
+    # the runner stopped waiting, so the card must stop offering a tap nobody
+    # hears. the marker rides the same single-use topic the card already polls.
+    try {
+        $body = ConvertTo-Json -Compress -InputObject ([ordered]@{
+                mf   = 'expired'
+                at   = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+                host = $HostName
+                code = $Code
+            })
+        $headers = @{
+            'Title'    = 'Vault Request Expired'
+            'Priority' = 'low'
+            'Tags'     = 'hourglass'
+        }
+        $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+        $null = Invoke-RestMethod -Uri "https://ntfy.sh/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
+        return $true
+    } catch {
+        Write-Warning "could not publish the expired marker to '$Sid': $_"
         return $false
     }
 }
@@ -244,9 +279,23 @@ function Wait-VaultApprovalCiphertext {
 
         # 2. Poll relay topic
         try {
-            $resp = Invoke-RestMethod -Uri "https://ntfy.sh/$Sid/raw?poll=1" -Method Get -TimeoutSec 5 -ErrorAction Stop
-            if ($resp -and [string]$resp -ne '') {
-                return ([string]$resp).Trim()
+            # Invoke-RestMethod parses a JSON body into an object, which turns
+            # an expired marker into something no regex can recognise. the
+            # webrequest content stays text, so markers and ciphertext look
+            # the way they were posted.
+            $resp = Invoke-WebRequest -Uri "https://ntfy.sh/$Sid/raw?poll=1" -Method Get -TimeoutSec 5 -ErrorAction Stop
+            $body = [string]$resp.Content
+            if ($body) {
+                # raw returns every message on the topic, newline separated.
+                # request-expired markers are status bodies, not ciphertext.
+                $cipherLines = @(
+                    $body -split "`n" |
+                        ForEach-Object { $_.Trim() } |
+                        Where-Object { $_ -and $_ -notmatch '^\{\s*"mf"\s*:' }
+                )
+                if ($cipherLines.Count -gt 0) {
+                    return $cipherLines[-1]
+                }
             }
         } catch {
             # timeout/no message yet
@@ -320,7 +369,7 @@ function Get-VaultMasterPassword {
 
     $rsa = [System.Security.Cryptography.RSA]::Create(2048)
     try {
-        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext -HostName $HostName -Agent $Agent -Model $Model
+        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext -HostName $HostName -Agent $Agent -Model $Model -ExpiresInSeconds $TimeoutSeconds
         $url = $session.Url
         $sid = $session.Sid
         $code = $session.Code
@@ -351,6 +400,7 @@ function Get-VaultMasterPassword {
         $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc
 
         if ($ct -eq '__SESSION_ALREADY_UNLOCKED__') {
+            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code
             return '__SESSION_ALREADY_UNLOCKED__'
         }
 
@@ -359,6 +409,7 @@ function Get-VaultMasterPassword {
             Write-Host "password decrypted successfully via 1-tap biometric approval" -ForegroundColor Green
             return $pw
         } else {
+            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code
             Write-Warning "phone approval timed out after $TimeoutSeconds seconds."
             return $null
         }
@@ -371,6 +422,7 @@ Export-ModuleMember -Function `
     Get-CallerIdentity, `
     Get-VaultApprovalUrl, `
     Send-VaultApprovalNotification, `
+    Send-VaultRequestExpired, `
     Open-VaultApprovalOnPhone, `
     Wait-VaultApprovalCiphertext, `
     Decrypt-VaultApprovalCiphertext, `

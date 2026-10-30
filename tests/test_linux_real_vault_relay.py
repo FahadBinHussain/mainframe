@@ -116,6 +116,80 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         self.assertIn("#k=", url)
         self.assertNotIn("&sid=", url)
 
+    @patch("os.chmod")
+    @patch("subprocess.run")
+    def test_generate_tab_key_deadline(self, mock_run, mock_chmod):
+        def fake_run(cmd, capture_output=True):
+            if "-out" in cmd:
+                out_path = Path(cmd[cmd.index("-out") + 1])
+                out_path.write_text("fake private key")
+            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
+
+        mock_run.side_effect = fake_run
+
+        work_root = self.root / "work"
+        started = int(lr.time.time())
+        url, *_ = lr.generate_tab_key(work_root, enable_relay=False,
+                                      expires_in=lr.TAB_WAIT_SECONDS)
+        # the card needs the runner's own deadline in the link, otherwise it
+        # can only sit there looking approvable after the runner gave up.
+        exp = int(url.split("&exp=")[1].split("&")[0])
+        self.assertGreaterEqual(exp, started + lr.TAB_WAIT_SECONDS)
+        self.assertLessEqual(exp, started + lr.TAB_WAIT_SECONDS + 5)
+
+        url, *_ = lr.generate_tab_key(work_root, enable_relay=False)
+        self.assertNotIn("&exp=", url)
+
+    @patch("subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_wait_for_tab_password_ignores_expired_marker(self, mock_urlopen, mock_subproc):
+        cipher_bytes = b"encrypted_payload_bytes"
+        b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
+        marker = json.dumps({"mf": "expired", "at": 1700000000})
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = (marker + "\n" + b64_cipher + "\n").encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        mock_subproc.return_value = MagicMock(returncode=0, stdout=b"plaintext_master_pw")
+
+        priv_key = self.root / "vault-tab.key"
+        priv_key.write_text("dummy key")
+
+        pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
+        self.assertEqual(pw, "plaintext_master_pw")
+        self.assertEqual(mock_subproc.call_args[1]["input"], cipher_bytes)
+
+    @patch("pathlib.Path.home")
+    @patch("urllib.request.urlopen")
+    def test_wait_for_tab_password_timeout_publishes_expired_marker(self, mock_urlopen, mock_home):
+        mock_home.return_value = self.root / "fakehome"
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        priv_key = self.root / "vault-tab.key"
+        priv_key.write_text("dummy key")
+
+        with patch.object(lr, "TAB_WAIT_SECONDS", 0):
+            with self.assertRaises(RuntimeError):
+                lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999",
+                                         host="test-box", code="42")
+
+        self.assertEqual(mock_urlopen.call_count, 1)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "https://ntfy.sh/mf-vault-test999")
+        self.assertEqual(req.headers.get("Title"), "Vault Request Expired")
+        body = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(body["mf"], "expired")
+        self.assertEqual(body["host"], "test-box")
+        self.assertEqual(body["code"], "42")
+        self.assertIsInstance(body["at"], int)
+
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
     def test_wait_for_tab_password_from_relay(self, mock_urlopen, mock_subproc):
