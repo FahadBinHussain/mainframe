@@ -1755,3 +1755,34 @@ than `Add-Content`, which writes platform CRLF.
 - **Number matching & host provenance (2026-10-27)**: To protect against MFA fatigue, prompt bombing, and distinguishing legitimate agent requests from unauthorized triggers during the day, approval requests generate a cryptographic 2-digit verification code (`code`), requesting hostname (`host`), and context (`ctx`). The runner terminal outputs `VERIFICATION CODE: [ XX ]`, and `docs/vault-tab.html` renders a prominent glowing verification card showing that code, hostname, and action. Users only approve if the code on their phone screen matches the number printed on their terminal monitor.
 - **Agent, harness & model provenance (2026-10-27)**: Approval requests include full caller identity (`agent` and `model`) across terminal banners, ntfy push notifications, and the mobile approval card. Runners resolve identity via explicit `-Agent`/`-Model` args, environment overrides (`MAINFRAME_AGENT_NAME`, `MAINFRAME_MODEL_NAME`, `AGENT_NAME`, `MODEL_NAME`), or automatic ground-truth detection: for Antigravity, runners inspect the active thread's conversation transcript on disk (`<appDataDir>/brain/<convoId>/.system_generated/logs/transcript.jsonl`) for system-injected `Model Selection` settings changes (tail and head), extracting the exact active model (e.g. `Gemini 3.8 Flash (High)`) without hallucination or hardcoding; for OpenCode/Claude/Codex/Aider, runners inspect harness env vars or process ancestry, falling back to `terminal` for interactive human shells. `docs/vault-tab.html` renders animated tags (Rule 10) for host (`💻`), agent (`🤖`), model (`🧠`), and action context (`⚡`), and updates the header badge and description to clearly identify who is requesting vault access.
 - **cross-agent 1-hour session reuse & stampede mitigation (2026-10-28)**: vault unlock is shared across all agents on the box via `%APPDATA%\mainframe\accounts\bitwarden\session.key`. 1-tap mobile approval unlocks the vault once for 60 minutes for ALL agents (Antigravity, OpenCode, Claude Code, terminal). Previously, transient Node/Bitwarden CLI failures (concurrent execution locking `data.json`, stderr output breaking JSON parse) caused `Test-VaultSession` and external scripts (`get-session.ps1`, `unlock.ps1`) to mistakenly conclude the vault was locked or delete `session.key`, triggering duplicate approval prompts on phone within the same hour. `Test-VaultSession` now passes `--session` explicitly and retries once before declaring locked. `Wait-VaultApprovalCiphertext` in `vault-approval.psm1` polls disk for fresh `session.key` writes while waiting for approval, instantly unblocking concurrent agent runs without asking for duplicate approvals.
+
+### stale requests must say stale, not "approved" (2026-10-30)
+
+a notification that outlived its runner used to keep its Approve button and even
+report success after a tap nobody was listening for. the card now knows the
+runner's deadline, so an old request reads "Stale request" and refuses to send.
+
+- **the link carries the deadline.** both runners append `&exp=<unix seconds>`
+  to the fragment, derived from their own wait window: `TAB_WAIT_SECONDS` (600)
+  in `linux_real.py`, `-TimeoutSeconds` (300 default, 600 from
+  `Ensure-VaultSession`) in `vault-approval.psm1` via
+  `Get-VaultApprovalUrl -ExpiresInSeconds`. do not hardcode a separate number --
+  if the wait grows, `exp` grows with it.
+- **the runner also publishes a marker when it gives up.** `Send-VaultRequestExpired`
+  (PowerShell) and `publish_request_expired` (Python) post
+  `{"mf":"expired","at":<epoch>,"host":..,"code":..}` to the same session topic
+  before returning timeout (and when another agent unlocked first). the card
+  polls `https://ntfy.sh/<sid>/json?poll=1` every 5s and flips an already-open
+  tab to stale, which covers clock skew.
+- **the page fails closed.** on stale it drops the countdown, hides the code,
+  the form and the fingerprint button, and `transmitCiphertext` refuses with
+  "stale request — nothing was sent". success text says "it unlocks within a few
+  seconds", never a bare "approved".
+- **poll loops must skip marker bodies.** `raw?poll=1` returns every message on
+  the topic, so both runners filter lines matching `^\{\s*"mf"\s*:` before
+  treating a line as ciphertext. use `Invoke-WebRequest` and read `.Content`
+  here: `Invoke-RestMethod` parses a JSON body into an object, so a marker stops
+  looking like text and the filter silently misses it (found 2026-10-30).
+- legacy links without `exp` still work but the card says it cannot tell when
+  they expired -- honest, not a silent pass.
+

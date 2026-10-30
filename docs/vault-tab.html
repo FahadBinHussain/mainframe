@@ -272,6 +272,17 @@
   }
   #msg.success { color: var(--accent); }
   #msg.error { color: var(--danger); font-weight: 600; }
+  /* a request that outlived the runner's wait: visibly dead, not approvable */
+  .expiry-line {
+    margin: -0.5rem 0 1.25rem;
+    text-align: center;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+  }
+  .expiry-line.is-near { color: var(--danger); font-weight: 600; }
+  .card.stale { border-color: var(--danger); }
+  .card.stale button { display: none; }
   #fb {
     margin-top: 1.25rem;
     padding-top: 1rem;
@@ -328,9 +339,11 @@
     </div>
   </div>
 
+  <!-- how much of this request's wait window is left (empty for old links) -->
+  <div id="expiry-line" class="expiry-line" style="display:none"></div>
+
   <!-- 1-Tap Biometric Approval Section -->
-  <div id="bio-section" style="display:none">
-    <button id="bio-btn" type="button">
+  <div id="bio-section" style="display:none">    <button id="bio-btn" type="button">
       <svg style="width:20px;height:20px;fill:currentColor" viewBox="0 0 24 24">
         <path d="M17.81 4.47c-.08 0-.16-.02-.23-.06C15.66 3.42 14 3 12.01 3c-1.98 0-3.86.47-5.57 1.41-.24.13-.54.04-.68-.2-.13-.24-.04-.55.2-.68C7.82 2.52 9.86 2 12.01 2c2.13 0 3.99.47 5.92 1.5.24.13.33.43.2.67-.09.18-.21.3-.32.3zm2.59 4.19c-.1-.01-.19-.04-.27-.09-.23-.14-.3-.44-.16-.67.9-1.46 1.39-3.14 1.39-4.88 0-.27.22-.5.5-.5s.5.23.5.5c0 1.9-.53 3.74-1.52 5.33-.11.19-.29.31-.44.31zm-15.6.73c-.09 0-.18-.03-.26-.08-.98-1.59-1.52-3.43-1.52-5.33 0-.27.22-.5.5-.5s.5.23.5.5c0 1.74.49 3.42 1.39 4.88.14.23.07.53-.16.67-.14.09-.3.14-.45.14zm12.44 3.78c-.24 0-.46-.17-.49-.42-.25-2.02-.99-3.9-2.14-5.46-.17-.22-.12-.54.1-.71.22-.17.54-.12.71.1 1.25 1.7 2.06 3.75 2.33 5.96.03.27-.15.52-.42.55-.03 0-.06-.02-.09-.02zm-10.48 0c-.03 0-.06.01-.09.02-.28-.03-.45-.28-.42-.55.27-2.21 1.08-4.26 2.33-5.96.17-.22.49-.27.71-.1.22.17.27.49.1.71-1.15 1.56-1.89 3.44-2.14 5.46-.03.25-.25.42-.49.42zm7.74 3.96c-.19 0-.37-.11-.45-.29-.68-1.55-1.74-2.88-3.07-3.84-.22-.16-.27-.48-.11-.7.16-.22.47-.27.7-.11 1.45 1.05 2.62 2.5 3.36 4.2.11.25-.01.55-.26.66-.06.05-.12.08-.17.08zm-5.01 0c-.05 0-.11-.03-.17-.08-.25-.11-.37-.41-.26-.66.74-1.7 1.91-3.15 3.36-4.2.23-.16.54-.11.7.11.16.22.11.54-.11.7-1.33.96-2.39 2.29-3.07 3.84-.08.18-.26.29-.45.29zm2.46 4.87c-1.4 0-2.73-.39-3.88-1.12-.23-.15-.3-.45-.15-.68.15-.23.46-.3.69-.15.98.63 2.12.96 3.34.96 1.48 0 2.85-.48 3.96-1.38.21-.18.53-.14.71.07.18.21.14.53-.07.71-1.31 1.06-2.93 1.59-4.6 1.59z"/>
       </svg>
@@ -370,6 +383,112 @@ function show(text, type='') {
   el.className = type;
 }
 
+// ---- request freshness ------------------------------------------------------
+// a request only exists while the runner is still waiting for it. two signals
+// keep this page honest:
+//   - `exp` in the link (unix seconds) = the runner's own deadline, so an old
+//     notification says "stale" instead of offering a tap that can never land.
+//   - an `mf:expired` marker the runner publishes on the session topic when it
+//     gives up. that catches clock skew and flips a tab that is already open.
+// without this the page happily announced "approved" for requests nobody was
+// listening to any more.
+
+const NTFY_BASE = 'https://ntfy.sh';
+const REQUEST = { expiresAt: null, sid: null, host: null, stale: false, timer: null, markerTimer: null, relayDown: false };
+
+function fmtLeft(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  if (m < 60) return r ? `${m}m ${r}s` : `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function goStale(reason) {
+  if (REQUEST.stale) return;
+  REQUEST.stale = true;
+  clearInterval(REQUEST.timer);
+  clearInterval(REQUEST.markerTimer);
+  const card = document.querySelector('.card');
+  if (card) card.classList.add('stale');
+  const icon = document.getElementById('icon-container');
+  if (icon) icon.className = 'icon-wrap error';
+  const title = document.getElementById('title');
+  if (title) title.textContent = 'Stale request';
+  // never leave an expired code on screen with an approve button under it
+  const verify = document.getElementById('verify-box');
+  if (verify) verify.style.display = 'none';
+  for (const id of ['bio-btn', 'go']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  }
+  const desc = document.getElementById('desc');
+  if (desc) desc.textContent = reason;
+  // a dead request keeps no live countdown and no password field to type into
+  const line = document.getElementById('expiry-line');
+  if (line) {
+    line.className = 'expiry-line';
+    line.style.display = 'block';
+    line.textContent = 'request closed';
+  }
+  for (const id of ['f', 'bio-section']) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  }
+  show('stale request — ask the runner for a fresh push', 'error');
+}
+
+function updateExpiry() {
+  const line = document.getElementById('expiry-line');
+  if (!line) return;
+  line.style.display = 'block';
+  if (!REQUEST.expiresAt) {
+    line.className = 'expiry-line';
+    line.textContent = 'older runner link: no expiry in this link, so the page cannot tell when it went stale';
+    return;
+  }
+  const left = REQUEST.expiresAt - Date.now();
+  if (left <= 0) {
+    goStale(`This request expired at ${new Date(REQUEST.expiresAt).toLocaleTimeString()} — the runner stopped waiting, so nothing was unlocked.`);
+    return;
+  }
+  line.className = left < 15000 ? 'expiry-line is-near' : 'expiry-line';
+  line.textContent = `request valid for ${fmtLeft(left)} more` + (REQUEST.relayDown ? ' · relay unreachable, link expiry only' : '');
+}
+
+async function pollExpiredMarker() {
+  if (REQUEST.stale || !REQUEST.sid) return;
+  let res;
+  try {
+    res = await fetch(`${NTFY_BASE}/${encodeURIComponent(REQUEST.sid)}/json?poll=1`, { cache: 'no-store' });
+  } catch {
+    REQUEST.relayDown = true;
+    return;
+  }
+  if (!res.ok) {
+    REQUEST.relayDown = true;
+    return;
+  }
+  REQUEST.relayDown = false;
+  const text = await res.text();
+  for (const raw of text.split('\n')) {
+    const row = raw.trim();
+    if (!row) continue;
+    let msg;
+    try { msg = JSON.parse(row); } catch { continue; }
+    const body = typeof msg.message === 'string' ? msg.message.trim() : '';
+    if (!body.startsWith('{')) continue;
+    let inner;
+    try { inner = JSON.parse(body); } catch { continue; }
+    if (inner && inner.mf === 'expired') {
+      const at = inner.at ? new Date(inner.at * 1000).toLocaleTimeString() : null;
+      goStale(`The runner gave up on this request${at ? ` at ${at}` : ''} — nothing was unlocked. Ask it for a fresh push.`);
+      return;
+    }
+  }
+}
+
 function bytesToB64(bytes) {
   let bin = '';
   const len = bytes.byteLength;
@@ -405,10 +524,13 @@ function getParams() {
   const ctx = params.get('ctx') || (hash.match(/(?:^|&)ctx=([^&]+)/) || [])[1];
   const agent = params.get('agent') || (hash.match(/(?:^|&)agent=([^&]+)/) || [])[1];
   const model = params.get('model') || (hash.match(/(?:^|&)model=([^&]+)/) || [])[1];
+  const expRaw = params.get('exp') || (hash.match(/(?:^|&)exp=([0-9]+)/) || [])[1];
+  const exp = expRaw ? Number(expRaw) : null;
   return {
     k,
     sid,
     code,
+    exp: Number.isFinite(exp) && exp > 0 ? exp : null,
     host: host ? decodeURIComponent(host) : null,
     ctx: ctx ? decodeURIComponent(ctx) : null,
     agent: agent ? decodeURIComponent(agent) : null,
@@ -448,6 +570,17 @@ async function encryptForRunner(plaintext, spkiPubBase64) {
 }
 
 async function transmitCiphertext(b64, sid) {
+  // a tap can land exactly on the deadline; refusing here is the difference
+  // between "sent" and "sent into a topic nobody is reading"
+  if (REQUEST.stale) {
+    show('stale request — nothing was sent', 'error');
+    return;
+  }
+  if (REQUEST.expiresAt && Date.now() >= REQUEST.expiresAt) {
+    goStale('This request expired before the approval was sent — nothing was unlocked.');
+    return;
+  }
+
   document.getElementById('ct').value = b64;
   document.getElementById('fb').style.display = 'block';
 
@@ -459,8 +592,9 @@ async function transmitCiphertext(b64, sid) {
       body: b64
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    show('Approved! Unlocking vault unattended. You can close this tab.', 'success');
+    show(`Ciphertext sent to ${REQUEST.host || 'the runner'} — it unlocks within a few seconds. You can close this tab.`, 'success');
     document.getElementById('icon-container').className = 'icon-wrap';
+    document.getElementById('bio-btn').disabled = true;
   } else {
     const blob = new Blob([b64], { type: 'text/plain' });
     const a = document.createElement('a');
@@ -554,7 +688,7 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  const { k, sid, code, host, ctx, agent, model } = getParams();
+  const { k, sid, code, exp, host, ctx, agent, model } = getParams();
   if (!k || k.length < 50) {
     show('Invalid or missing public key in URL link. Request a fresh link from runner.', 'error');
     document.getElementById('icon-container').className = 'icon-wrap error';
@@ -600,6 +734,21 @@ document.addEventListener('DOMContentLoaded', () => {
       const onHost = host ? ` on ${host}` : '';
       desc.textContent = `${caller}${onHost} is waiting for authorization to unlock Bitwarden secrets.`;
     }
+  }
+
+  // freshness first: everything below wires up approval buttons, and an expired
+  // request must never reach them
+  REQUEST.expiresAt = exp ? exp * 1000 : null;
+  REQUEST.sid = sid || null;
+  REQUEST.host = host || null;
+  updateExpiry();
+  if (REQUEST.stale) return;
+  if (REQUEST.expiresAt) {
+    REQUEST.timer = setInterval(updateExpiry, 1000);
+  }
+  if (REQUEST.sid) {
+    void pollExpiredMarker();
+    REQUEST.markerTimer = setInterval(pollExpiredMarker, 5000);
   }
 
   const isEnrolled = !!localStorage.getItem(STORE_KEY_ENC);
