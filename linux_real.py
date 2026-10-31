@@ -9,7 +9,9 @@ tools next to it:
 * ``linux_packages.py`` without ``--execute`` only plans.
 * This driver runs the plan, installs the current Linux-native builds of
   the proven tools, downloads the latest mainframe-production release via
-  the vault, and ACTIVATES the portable conversions into live HOME.
+  the vault, syncs the private repo with that same vault token (the Linux
+  counterpart of the Windows ``Sync-AutomataPrivateRepo``), and ACTIVATES the
+  portable restore into live HOME.
 
 Philosophy difference, stated plainly: the plan pins restores to the exact
 Windows build versions, so most products stay "blocked" forever (no Linux
@@ -58,6 +60,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1130,6 +1133,121 @@ def activate(staging: Path, home: Path, work_root: Path,
             "backup_dir": str(backup_root) if backed_up else ""}
 
 
+# The private repo holds the per-domain scripts and the patchers. Windows
+# quick and full restore both sync it (restore.ps1 Sync-AutomataPrivateRepo)
+# and the Linux live flow does the same, so both platforms end up with the
+# same checkout in the same place: the Downloads root.
+PRIVATE_REPO = "FahadBinHussain/automata-private"
+PRIVATE_REPO_URL = f"https://github.com/{PRIVATE_REPO}.git"
+PRIVATE_REPO_NAME = "automata-private"
+
+CREDENTIAL_HELPER_SOURCE = """#!/usr/bin/env python3
+# git credential helper for the private repo clone (mainframe linux_real.py).
+#
+# The vault token is read from the environment, so it never lands in argv, in a
+# git config file, or on disk. git calls this with the credential operation as
+# the only argument; only "get" answers, "store" and "erase" are ignored so
+# nothing is persisted.
+import os
+import sys
+
+if sys.argv[1:2] == ["get"]:
+    token = os.environ.get("MF_GH_TOKEN", "")
+    if token:
+        sys.stdout.write("username=x-access-token\\npassword=%s\\n" % token)
+"""
+
+
+def private_repo_dir() -> Path:
+    """Same Downloads root the public checkout lands in (boot.sh clones
+    mainframe to ~/Downloads/mainframe)."""
+    return Path.home() / "Downloads" / PRIVATE_REPO_NAME
+
+
+def write_credential_helper(work_root: Path) -> Path:
+    """Write the private credential helper (no secret inside it)."""
+    helper = work_root / "private-git-credential.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text(CREDENTIAL_HELPER_SOURCE, encoding="utf-8")
+    helper.chmod(0o700)
+    return helper
+
+
+def git_credential_args(work_root: Path, token: str | None
+                         ) -> tuple[list[str], dict[str, str], str]:
+    """Credential source for the private clone, named out loud.
+
+    Mirrors the Windows restore: gh's own credential helper (the line
+    `gh auth setup-git` writes) scoped to the one command, with
+    `credential.helper=` first so no ambient helper can answer as another
+    account. A Linux box rarely has gh, so the same vault token is fed through
+    a private helper script instead - the token stays in the child's
+    environment, never in argv and never on disk.
+
+    Returns (git args, extra env, human name of the credential source).
+    """
+    if not token:
+        if os.environ.get("GH_TOKEN"):
+            log("no vault token in this run - using the GH_TOKEN already in this "
+                "machine's environment")
+            source = "the GH_TOKEN already in this machine's environment"
+        else:
+            log("no vault token in this run - using this machine's own git "
+                "credentials for the private repo")
+            source = "this machine's own git credentials"
+        return [], {}, source
+    if shutil.which("gh"):
+        log("authenticating with the GH_TOKEN github profile "
+            "(gh auth git-credential)")
+        return (["-c", "credential.helper=",
+                 "-c", "credential.helper=!gh auth git-credential"],
+                {"GH_TOKEN": token}, "the GH_TOKEN github profile")
+    helper = write_credential_helper(work_root)
+    log("gh not found - authenticating with a private credential helper "
+        "(MF_GH_TOKEN)")
+    return (["-c", "credential.helper=",
+             "-c", f"credential.helper=!{shlex.quote(sys.executable)} "
+                   f"{shlex.quote(str(helper))}"],
+            {"MF_GH_TOKEN": token}, "a private credential helper")
+
+
+def sync_automata_private(work_root: Path, token: str | None) -> dict:
+    """Clone or fast-forward the private repo, the way Windows restore does.
+
+    Windows quick and full restore both sync it because the ditto/alist/
+    opencode patchers live there, and a failed sync aborts the restore there.
+    The Linux live flow syncs it for the same reason: the token the vault
+    already handed us is what authenticates it, and a restore that ends
+    without the private checkout is not the restore that was asked for.
+    """
+    dest = private_repo_dir()
+    args, env, source = git_credential_args(work_root, token)
+    if dest.exists() and not (dest / ".git").exists():
+        raise RuntimeError(
+            f"{dest} exists but is not a git checkout - the private clone "
+            "refuses to write over it. move it aside and re-run.")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if (dest / ".git").exists():
+        log(f"{PRIVATE_REPO_NAME} repo already exists at {dest}, pulling latest")
+        cmd = ["git", *args, "-C", str(dest), "pull", "--ff-only"]
+        action = "pulled"
+    else:
+        log(f"Cloning {PRIVATE_REPO_URL} to {dest}")
+        cmd = ["git", *args, "clone", PRIVATE_REPO_URL, str(dest)]
+        action = "cloned"
+    # GIT_TERMINAL_PROMPT=0: a headless restore must fail fast and loud
+    # instead of waiting for a username nobody is there to type.
+    proc = run(cmd, env={**env, "GIT_TERMINAL_PROMPT": "0"}, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[-400:]
+        raise RuntimeError(
+            f"{PRIVATE_REPO_NAME} sync failed (git exit {proc.returncode}) at "
+            f"{dest} using {source}. the token must be able to read "
+            f"{PRIVATE_REPO_URL}. git said: {detail}")
+    return {"path": str(dest), "repo": PRIVATE_REPO_URL,
+            "credential_source": source, "action": action}
+
+
 def run_restore(backup_root: Path, work_root: Path, yes: bool,
                 restore_global_agents: bool = False) -> dict:
     import linux_restore as lr
@@ -1180,6 +1298,51 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool,
             "status": report.get("operational_status")}
 
 
+def run_restore_leg(backup_root: Path | None, work_root: Path, *,
+                    yes: bool, restore_global_agents: bool,
+                    skip_private_repo: bool, gh_token: str | None
+                    ) -> tuple[dict, list[str]]:
+    """Sync the private checkout, then restore. Returns (report, failures).
+
+    The private checkout comes first, the same order the Windows restore uses
+    (sync, then the patchers that live in it). A failed sync aborts the
+    restore leg: shipping a restored machine without the private repo is the
+    "unpatched but reported as success" bug the Windows side already fixed.
+    """
+    report: dict = {}
+    failures: list[str] = []
+    if backup_root is None:
+        return report, failures
+    if not (backup_root / "mainframe-quick.zip").exists():
+        log(f"restore skipped: no mainframe-quick.zip in {backup_root}")
+        return report, failures
+    private_repo_ok = True
+    if skip_private_repo:
+        log(f"private repo sync skipped (--skip-private-repo): "
+            f"{PRIVATE_REPO_NAME} will NOT be cloned")
+    else:
+        try:
+            report["private_repo"] = sync_automata_private(work_root, gh_token)
+            log(f"{PRIVATE_REPO_NAME} {report['private_repo']['action']} at "
+                f"{report['private_repo']['path']} "
+                f"(credential source: "
+                f"{report['private_repo']['credential_source']})")
+        except Exception as exc:
+            private_repo_ok = False
+            failures.append(f"private repo: {exc}")
+            log(f"private repo FAILED: {exc}")
+            log("the restore leg needs the private checkout, so it was not run")
+    if not private_repo_ok:
+        return report, failures
+    try:
+        report["restore"] = run_restore(
+            backup_root, work_root, yes, restore_global_agents)
+    except Exception as exc:
+        failures.append(f"restore: {exc}")
+        log(f"restore FAILED: {exc}")
+    return report, failures
+
+
 # ---------------------------------------------------------------- main
 
 def main(argv: list[str] | None = None) -> int:
@@ -1196,6 +1359,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="restore only the exact top-level AGENTS.md to HOME/AGENTS.md; other staged files remain offline unless --yes is also given")
     ap.add_argument("--skip-packages", action="store_true",
                     help="skip the package leg (restore only)")
+    ap.add_argument("--skip-private-repo", action="store_true",
+                    help="skip the private repo clone/pull in the restore leg "
+                         "(the checkout is NOT synced, and the run says so)")
     ap.add_argument("--work-root", type=Path,
                     default=Path.home() / ".local" / "share" / "mainframe",
                     help="tool installs, staging and backups live here")
@@ -1235,6 +1401,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Vault + release.
     backup_root = args.backup_root
+    gh_token = ""
     ntfy_topic = get_ntfy_topic(HERE, explicit=args.ntfy_topic)
     if ntfy_topic and not args.skip_vault:
         log(f"phone approval enabled via ntfy topic: {ntfy_topic}")
@@ -1268,15 +1435,12 @@ def main(argv: list[str] | None = None) -> int:
         report["extras"] = run_extras(work_root, bin_dir)
 
     # Restore + activation.
-    if backup_root is not None and (backup_root / "mainframe-quick.zip").exists():
-        try:
-            report["restore"] = run_restore(
-                backup_root, work_root, args.yes, args.restore_global_agents)
-        except Exception as exc:
-            failures.append(f"restore: {exc}")
-            log(f"restore FAILED: {exc}")
-    elif backup_root is not None:
-        log(f"restore skipped: no mainframe-quick.zip in {backup_root}")
+    restore_report, restore_failures = run_restore_leg(
+        backup_root, work_root, yes=args.yes,
+        restore_global_agents=args.restore_global_agents,
+        skip_private_repo=args.skip_private_repo, gh_token=gh_token)
+    report.update(restore_report)
+    failures.extend(restore_failures)
 
     report["failures"] = failures
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
