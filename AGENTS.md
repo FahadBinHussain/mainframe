@@ -2001,4 +2001,12 @@ and post garbage that killed a live approval.
   opens the card in the default browser; the first screenshot right after
   `am start` catches a blank page -- it paints ~5 s later (checked 2026-10-31,
   android 13, 1080x2400).
+- **live relay test.** `MAINFRAME_LIVE_RELAY=1 python -m unittest
+  tests.test_linux_real_vault_relay_live -v` drives the python runner against
+  real ntfy and real openssl: junk and other-key ciphertext must be skipped,
+  ours must decrypt, and a timeout must publish the expired marker. it runs on
+  windows too -- this path is only the openssl cli + urllib, the linux-only
+  parts (`/proc` ancestry, `bw`) are not in it. `raw?poll=1` can come back
+  empty for a moment right after a post, so the marker check polls instead of
+  reading once (found 2026-10-31).
 
