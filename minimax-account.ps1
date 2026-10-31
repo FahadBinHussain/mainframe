@@ -664,6 +664,10 @@ function Write-ProfileRecord {
     $metadata['generation'] = [long]$Credential['generation']
     $metadata['loginEpoch'] = [string]$Credential['loginEpoch']
     $metadata['updatedAt'] = [DateTimeOffset]::UtcNow.ToString('o')
+    # when this profile was last SWITCHED TO. Set-ActiveProfile stamps it and this
+    # write rebuilds profile.json from scratch, so it has to be carried over or a
+    # re-bank (which every status read can trigger) would erase the mark.
+    $metadata['switchedAt'] = if ($existing -and $existing['switchedAt']) { [string]$existing['switchedAt'] } else { $null }
     $metadata['grantDead'] = [bool]($sameChain -and $existing -and [bool]$existing['grantDead'])
     if ($metadata['grantDead']) {
         $metadata['grantDeadReason'] = [string]$existing['grantDeadReason']
@@ -723,13 +727,25 @@ function Set-ActiveProfile {
 
     $normalized = Normalize-ProfileName -Profile $Profile
     New-Item -ItemType Directory -Force -Path $accountRoot | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToString('o')
     $current = @{}
     $current['tool'] = $tool
     $current['service'] = $serviceName
     $current['profile'] = $normalized
-    $current['updatedAt'] = [DateTimeOffset]::UtcNow.ToString('o')
+    $current['updatedAt'] = $now
     ConvertTo-Json -InputObject $current -Depth 4 |
         Set-Content -LiteralPath $currentFile -Encoding UTF8 -NoNewline
+
+    # this profile just became the active one: stamp WHEN, on the profile itself,
+    # so the monitor can mark a row that was switched to today. kept in
+    # profile.json (it goes away with the profile -- no second state file) and
+    # carried across every re-bank by Write-ProfileRecord.
+    $metadata = Read-ProfileMetadata -Profile $normalized
+    if ($metadata) {
+        $metadata['switchedAt'] = $now
+        ConvertTo-Json -InputObject $metadata -Depth 8 |
+            Set-Content -LiteralPath (Join-Path (Get-ProfilePath -Profile $normalized) 'profile.json') -Encoding UTF8 -NoNewline
+    }
 }
 
 function Get-ActiveProfile {
@@ -1190,6 +1206,9 @@ function Get-ProfileRow {
     $row['expiresInSeconds'] = $expiry['ExpiresInSeconds']
     $row['expired'] = $expiry['Expired']
     $row['savedAt'] = if ($metadata -and $metadata['updatedAt']) { [DateTimeOffset]::Parse([string]$metadata['updatedAt']).ToUniversalTime().ToString('o').Replace('+00:00','Z') } else { $null }
+    # when this profile was last switched to (see Set-ActiveProfile). the monitor
+    # tints a row that was switched to today, so it reads this straight off the row.
+    $row['switchedAt'] = if ($metadata -and $metadata['switchedAt']) { [DateTimeOffset]::Parse([string]$metadata['switchedAt']).ToUniversalTime().ToString('o').Replace('+00:00','Z') } else { $null }
     $row['isLive'] = $isLive
     $row['isActive'] = [bool]($normalized -eq $Active)
     $row['grantDead'] = $grantDead
