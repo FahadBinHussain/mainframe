@@ -1992,4 +1992,13 @@ and post garbage that killed a live approval.
 - **human step, once per machine.** the phone must be subscribed to the topic in
   `mainframe.config.json`; ntfy returns 200 with zero subscribers, so a wrong
   topic looks like success locally and only fails at the phone.
+- **verifying the phone path.** `adb shell am start -a
+  android.intent.action.VIEW -d "ntfy://ntfy.sh/<topic>"` subscribes the app
+  directly, no taps needed. send a real push and press HOME first: while the
+  app is foregrounded on that topic it posts no system notification at all, so
+  only a backgrounded push proves the subscription (`dumpsys notification`
+  shows `pkg=io.heckel.ntfy importance=4 actions=1`). `Open-VaultApprovalOnPhone`
+  opens the card in the default browser; the first screenshot right after
+  `am start` catches a blank page -- it paints ~5 s later (checked 2026-10-31,
+  android 13, 1080x2400).
 
