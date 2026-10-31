@@ -849,7 +849,13 @@ function Get-ProfileRow {
     $row['uid'] = $uid
     $row['uidFingerprint'] = Get-UidFingerprint -Uid $uid
     $row['displayName'] = if ($metadata) { $metadata['displayName'] } else { $null }
-    $row['providers'] = if ($metadata) { @($metadata['providers']) } else { @() }
+    # never assign an array through an `if` EXPRESSION: powershell unrolls a
+    # one-element array on output, so a google-only account would serialize as
+    # "providers": "google.com" and break every consumer that expects a list.
+    $row['providers'] = @()
+    if ($metadata) {
+        $row['providers'] = @($metadata['providers'] | Where-Object { $_ })
+    }
     $row['emailSource'] = if ($metadata) { $metadata['emailSource'] } else { $null }
     $row['folder'] = Get-ProfilePath -Profile $normalized
     $row['identityFile'] = Join-Path $row['folder'] $identityRelative
@@ -938,7 +944,10 @@ function Get-StatusReport {
         $metadata = Get-ProfileMetadata -Profile $liveProfile
         $liveEmail = if ($metadata) { $metadata['email'] } else { $liveProfile }
         $liveDisplay = if ($metadata) { $metadata['displayName'] } else { $null }
-        $liveProviders = if ($metadata) { @($metadata['providers']) } else { @() }
+        $liveProviders = @()
+        if ($metadata) {
+            $liveProviders = @($metadata['providers'] | Where-Object { $_ })
+        }
         $emailSource = 'profile'
     } elseif ($live) {
         $resolved = Resolve-UnbankedLive -Live $live
@@ -1121,12 +1130,17 @@ function Invoke-Harvest {
         throw "the live identity at $(Get-LiveIdentityFile) disappeared while banking $email. sign in again inside ADCode."
     }
 
+    $providers = @()
+    if ($firebase) {
+        $providers = @($firebase['Providers'] | Where-Object { $_ })
+    }
+
     $value = @{}
     $value['email'] = $email
     $value['uid'] = [string]$live['Uid']
     $value['emailSource'] = $emailSource
     $value['displayName'] = if ($firebase) { $firebase['DisplayName'] } else { $null }
-    $value['providers'] = if ($firebase) { @($firebase['Providers']) } else { @() }
+    $value['providers'] = $providers
     $value['savedAt'] = $savedAt
     $value['updatedAt'] = $now
     $value['grantDead'] = $false
@@ -1142,7 +1156,7 @@ function Invoke-Harvest {
     $result['profile'] = $email
     $result['uid'] = [string]$live['Uid']
     $result['displayName'] = if ($firebase) { $firebase['DisplayName'] } else { $null }
-    $result['providers'] = if ($firebase) { @($firebase['Providers']) } else { @() }
+    $result['providers'] = $providers
     $result['emailSource'] = $emailSource
     $result['tokenFingerprint'] = [string]$live['TokenFingerprint']
     $result['firebaseError'] = $firebaseError
