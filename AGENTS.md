@@ -1733,6 +1733,16 @@ encrypted copy is what ships either way.
    the patcher exists. both modes share `Sync-AutomataPrivateRepo`, which THROWS on clone/pull
    failure - the old inline full-mode clone ignored `$LASTEXITCODE`, so a missing private repo
    only showed up later as "patcher not found" warnings while restore still reported success.
+   git auth for that private repo is named, not inherited: `Get-GhCredentialAuthArgs` passes
+   `-c credential.helper= -c credential.helper=!gh auth git-credential` (the same line
+   `gh auth setup-git` writes, scoped to the one command, no global config touched). boot
+   exports the vault token as `GH_TOKEN` before calling restore, so a fresh box clones the
+   private repo with no gh login and no ambient credential can silently take over. measured
+   against the real repo 2026-10-31: valid `GH_TOKEN` -> `ls-remote` ok and `gh` returns that
+   token verbatim as the password with `username=x-access-token`; bogus `GH_TOKEN` -> exit 128
+   `Invalid username or token` (this is also the proof the `credential.helper=` reset works —
+   ambient creds did not rescue it); no `GH_TOKEN` -> gh's stored login; `gh` absent -> the
+   machine's own git auth, said out loud on screen.
 
 **visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
 runs silent. it now hands visibility to an on-demand interactive task:
