@@ -655,6 +655,7 @@ function Get-ProfileMetadata {
     $metadata['grantDeadReason'] = [string]$parsed.grantDeadReason
     $metadata['grantCheckedAt'] = [string]$parsed.grantCheckedAt
     $metadata['tokenFingerprint'] = [string]$parsed.tokenFingerprint
+    $metadata['switchedAt'] = [string]$parsed.switchedAt
     return $metadata
 }
 
@@ -674,6 +675,7 @@ function Write-ProfileMetadata {
     $value['grantDeadReason'] = if ([string]::IsNullOrWhiteSpace([string]$Metadata['grantDeadReason'])) { $null } else { [string]$Metadata['grantDeadReason'] }
     $value['grantCheckedAt'] = if ([string]::IsNullOrWhiteSpace([string]$Metadata['grantCheckedAt'])) { $null } else { [string]$Metadata['grantCheckedAt'] }
     $value['tokenFingerprint'] = [string]$Metadata['tokenFingerprint']
+    $value['switchedAt'] = if ([string]::IsNullOrWhiteSpace([string]$Metadata['switchedAt'])) { $null } else { [string]$Metadata['switchedAt'] }
     Write-JsonFile -Path $path -Value $value -Label "$Profile profile.json"
 }
 
@@ -721,13 +723,23 @@ function Set-ActiveProfile {
 
     $identity = Get-ProfileIdentity -Profile $Profile
     $metadata = Get-ProfileMetadata -Profile $Profile
+    $now = Get-NowIso
     $value = @{}
     $value['profile'] = $Profile
     $value['uid'] = if ($identity) { $identity['Uid'] } else { $null }
     $value['email'] = $Profile
     $value['displayName'] = if ($metadata) { $metadata['displayName'] } else { $null }
-    $value['switchedAt'] = Get-NowIso
+    $value['switchedAt'] = $now
     Write-JsonFile -Path $currentFile -Value $value -Label 'current.json'
+
+    # this profile just became the active one: stamp WHEN on the profile itself
+    # too, so the monitor can mark a row that was switched to today. Get/Write-
+    # ProfileMetadata both carry switchedAt, so every later rewrite (renew,
+    # grant-dead check, re-bank) keeps the mark.
+    if ($metadata) {
+        $metadata['switchedAt'] = $now
+        Write-ProfileMetadata -Profile $Profile -Metadata $metadata
+    }
 }
 
 function Get-ProfileOrActive {
@@ -862,6 +874,9 @@ function Get-ProfileRow {
     $row['tokenFingerprint'] = if ($identity) { $identity['TokenFingerprint'] } else { $null }
     $row['savedAt'] = if ($metadata -and $metadata['savedAt']) { $metadata['savedAt'] } else { $null }
     $row['updatedAt'] = if ($metadata -and $metadata['updatedAt']) { $metadata['updatedAt'] } else { $null }
+    # when this profile was last switched to (see Set-ActiveProfile). the monitor
+    # tints a row that was switched to today, so it reads this straight off the row.
+    $row['switchedAt'] = if ($metadata -and $metadata['switchedAt']) { $metadata['switchedAt'] } else { $null }
     $row['chainCheckedAt'] = if ($metadata) { $metadata['grantCheckedAt'] } else { $null }
     $row['isLive'] = $isLive
     $row['isActive'] = [bool]($normalized -eq $Active)
