@@ -13,12 +13,15 @@ $ErrorActionPreference = 'Stop'
 # refresh token on every renewal, so a vault copy goes stale within minutes and a
 # stale one can sign the account out. This folder is rewritten after each refresh.
 #
-# harvest and login take the email as an argument because MiniMax will not tell
-# us one: /v1/api/user/info leaves email blank for accounts bound to Google, the
-# name it returns is a nickname the user typed, and there is no oidc discovery on
-# the authorization server, so a device grant carries no id_token. The address you
-# state is stored as emailSource=stated and the numeric realUserID is kept beside
-# it as the anchor, so the same account can never land under two emails.
+# MiniMax will not tell us whose account a credential is: /v1/api/user/info leaves
+# email BLANK for accounts bound to Google, the name it returns is a nickname the
+# user typed, and there is no oidc discovery on the authorization server, so a
+# device grant carries no id_token. So the address comes from a human, either as
+# the argument to login/harvest or (login with no argument) a moment later, when
+# the unnamed sign-in is harvested under the address it belongs to. Either way it
+# is stated, never guessed: what is stored is emailSource (minimax / stated) plus
+# the numeric realUserID as the anchor, so one account can never land under two
+# emails.
 #
 # Usage:
 #   .\minimax-account.ps1 harvest <email>              save the live sign-in as a profile
@@ -73,9 +76,11 @@ function Show-Usage {
         '',
         'Usage:',
         '  .\minimax-account.ps1 harvest <email>              save the live sign-in as a profile',
-        '  .\minimax-account.ps1 login <email>                device-code sign-in, then save + activate it',
+        '  .\minimax-account.ps1 login [email]                device-code sign-in, then save + activate it',
         '                                               (MiniMax reports no email for google-bound',
-        '                                                accounts, so you name the one you approve)',
+        '                                                accounts, so you name the one you approve; run',
+        '                                                it with no email and you name it after, with',
+        '                                                harvest <email>)',
         '  .\minimax-account.ps1 use <email>                  switch the live sign-in to a profile',
         '  .\minimax-account.ps1 refresh [email]              renew a stored access token',
         '  .\minimax-account.ps1 run [email] <mcode args...>  switch, then run the mcode-tools CLI',
@@ -92,6 +97,7 @@ function Show-Usage {
         '',
         'Examples:',
         '  .\minimax-account.ps1 login someone@example.com',
+        '  .\minimax-account.ps1 login            # sign in unnamed, then name it:',
         '  .\minimax-account.ps1 harvest someone@example.com',
         '  .\minimax-account.ps1 use someone@example.com',
         '  .\minimax-account.ps1 status-all -Json',
@@ -1243,6 +1249,23 @@ function Get-StatusReport {
     $livePart['credentialFile'] = $live.CredentialFile
     $livePart['records'] = $live.RecordCount
     $livePart['detail'] = $detail
+    # who the unnamed sign-in belongs to. this is the one case where a status read
+    # has to ask the api: the nickname is all MiniMax gives, and it is the same
+    # string the app shows in its own corner, so it is enough to tell "which of my
+    # accounts am I on right now" while the human types the address that names it.
+    # a named live account never pays for this call.
+    $livePart['displayName'] = $null
+    $livePart['realUserID'] = $null
+    $livePart['identityError'] = $null
+    if ($live.SignedIn -and -not $liveProfile -and -not $expiry.Expired) {
+        try {
+            $liveIdentity = Resolve-MiniMaxIdentity -AccessToken ([string]$live.Credential['accessToken'])
+            $livePart['displayName'] = $liveIdentity['userName']
+            $livePart['realUserID'] = $liveIdentity['realUserID']
+        } catch {
+            $livePart['identityError'] = $_.Exception.Message
+        }
+    }
 
     $counts = @{}
     $counts['profiles'] = $profiles.Count
@@ -1518,13 +1541,12 @@ function Write-LoginPhase {
 function Invoke-Login {
     param([AllowNull()][string]$Profile)
 
-    # MiniMax does not report an email for google-bound accounts, so the address
-    # has to be known BEFORE the device code is handed out: asking for it after
-    # the approval would throw away a grant the user already spent.
-    if ([string]::IsNullOrWhiteSpace($Profile)) {
-        throw "login needs the account email you are about to approve as: .\minimax-account.ps1 login you@example.com (MiniMax reports no email of its own for social sign-ins, so this helper will not guess one from a nickname)"
-    }
-    $stated = Normalize-ProfileName -Profile $Profile
+    # the email may be stated up front, which is the best case (the profile is
+    # named before any grant exists), or left out entirely: then the sign-in goes
+    # live UNNAMED and `harvest <email>` names it a moment later. MiniMax reports
+    # no email of its own for social sign-ins, so somebody has to say it either
+    # way -- leaving it out only moves when the asking happens.
+    $stated = if ([string]::IsNullOrWhiteSpace($Profile)) { $null } else { Normalize-ProfileName -Profile $Profile }
 
     # bank the current sign-in before the app replaces it, so nothing is lost.
     $live = Get-LiveAuth
@@ -1548,7 +1570,7 @@ function Invoke-Login {
     # if the previous sign-in could not be banked, the user has to see that
     # BEFORE approving: approving destroys that account's refresh chain and the
     # only way back in is a fresh sign-in.
-    $waitingMessage = "waiting for the browser approval, to be saved as $stated"
+    $waitingMessage = if ($stated) { "waiting for the browser approval, to be saved as $stated" } else { 'waiting for the browser approval with no email given: the sign-in will go live unnamed and must be saved with harvest <email>' }
     if ($bankNote) {
         $waitingMessage = "$waitingMessage -- WARNING: the account signed in right now was NOT banked ($bankNote). approving this code replaces its refresh chain, so that account will need a new sign-in before it can be switched to again."
     }
@@ -1572,13 +1594,37 @@ function Invoke-Login {
     $identity = Resolve-MiniMaxIdentity -AccessToken $grant.AccessToken
     $resolved = Resolve-AccountEmail -IdentityEmail $identity['userEmail'] -StatedEmail $stated
     $email = $resolved.Email
-    if ($identity['userEmail'] -and ($email -ne $stated)) {
+    if ($stated -and $identity['userEmail'] -and ($email -ne $stated)) {
         # MiniMax named a different account than the one that was stated: the
         # approval went to the wrong person, and banking it under the asked-for
         # name would put one account's quota behind another's label.
         $mismatch = "you approved this as '$stated' but MiniMax says the sign-in belongs to '$email'. nothing was saved; run login again with the address you actually approved."
         Write-LoginPhase -Phase 'failed' -Message $mismatch -Code ([string]$authorization['UserCode']) -Url $url -Email $email
         throw $mismatch
+    }
+
+    if (-not $email) {
+        # no stated address and MiniMax named none: the sign-in is real but a
+        # profile needs an email, so nothing is banked. the chain head sits in the
+        # app's own files, which is exactly what harvest reads -- naming it is one
+        # command, and until then the caller (the monitor panel) keeps asking.
+        $installed = Install-LiveCredential -Credential $credential -ExistingGeneration ([long]$live.Generation)
+        $unnamed = "signed in as '$($identity['userName'])' (realUserID $($identity['realUserID'])) but NOTHING was banked: this account has no email yet, so its refresh chain lives only in MiniMax Code. name it now: .\minimax-account.ps1 harvest you@example.com"
+        Write-LoginPhase -Phase 'needs-name' -Message $unnamed -Code ([string]$authorization['UserCode']) -Url $url
+        $result = @{}
+        $result['ok'] = $true
+        $result['action'] = 'logged-in-unnamed'
+        $result['profile'] = $null
+        $result['needsName'] = $true
+        $result['displayName'] = $identity['userName']
+        $result['realUserID'] = $identity['realUserID']
+        $result['userCode'] = $authorization['UserCode']
+        $result['generation'] = $installed.Generation
+        $result['expiresAt'] = (Get-ExpiryFields -ExpiresAtMs $installed.ExpiresAtMs)['ExpiresAt']
+        $result['bankError'] = $bankNote
+        $result['message'] = $unnamed
+        $result['emailSource'] = $null
+        return $result
     }
 
     $clash = Test-IdentityAnchorTaken -RealUserID $identity['realUserID'] -Email $email
@@ -1845,13 +1891,24 @@ switch ($command) {
     }
 
     'login' {
-        $profile = if ($remaining.Count -ge 1 -and (Test-LooksLikeEmail -Value $remaining[0])) { $remaining[0] } else { $null }
+        # no email is the "sign in unnamed, name it with harvest later" path; a
+        # NON-email is a typo and has to fail, not quietly become an unnamed
+        # sign-in that burns a device code.
+        $profile = if ($remaining.Count -ge 1) { $remaining[0] } else { $null }
         $result = Invoke-Login -Profile $profile
         Emit -Payload $result -Human {
-            Write-Host "Signed in to MiniMax Code as: $($result.profile)"
-            Write-Host "  display name: $($result.displayName)"
-            Write-Host "  token expires: $($result.expiresAt)"
-            Write-Host "  named by: $($result.emailSource)"
+            if ($result.needsName) {
+                Write-Host "Signed in to MiniMax Code with no name on it." -ForegroundColor Yellow
+                Write-Host "  display name: $($result.displayName) (realUserID $($result.realUserID))"
+                Write-Host "  token expires: $($result.expiresAt)"
+                Write-Host "  nothing was banked -- name it now:" -ForegroundColor Yellow
+                Write-Host "    .\minimax-account.ps1 harvest you@example.com"
+            } else {
+                Write-Host "Signed in to MiniMax Code as: $($result.profile)"
+                Write-Host "  display name: $($result.displayName)"
+                Write-Host "  token expires: $($result.expiresAt)"
+                Write-Host "  named by: $($result.emailSource)"
+            }
         }
     }
 
