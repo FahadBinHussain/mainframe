@@ -1253,7 +1253,8 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   process was spawned by another service, so the approval url and user code are
   also printed and handed to the caller (the monitor panel renders the code and an
   explicit link) rather than assuming a browser opened.
-- consumer: `automata-private\monitor` minimax tab (`apps/api/src/minimax.ts` +
+- consumer: `automata-private\monitor`, the `accounts pool > minimax code` sub tab
+  (`apps/api/src/minimax.ts` +
   `MinimaxAccounts.tsx`), which shells here for everything and keeps no token
   logic of its own.
 
