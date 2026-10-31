@@ -63,7 +63,7 @@ time with `seal-bw-email.ps1`; delete the blob and re-run to re-seal.
 #### Phone approval notification for headless restore
 
 During unattended headless restores on remote Linux boxes or containers (where stdin is not an interactive terminal), `linux_real.py` supports mobile approval:
-- Configured via `ntfyTopic` in `mainframe.config.json`, the `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`.
+- Configured via `ntfyTopic` in `mainframe.config.json`, the `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`; there is no built-in default, so an unconfigured machine fails loudly instead of broadcasting requests on a public topic. Use a long random topic name and subscribe to it in the ntfy app.
 - Generates an ephemeral single-use RSA keypair and sends an urgent push notification to your phone via [ntfy.sh](https://ntfy.sh).
 - Tapping the notification opens the static `docs/vault-tab.html` page in your phone browser, encrypts the master password client-side using WebCrypto RSA-OAEP, and relays the ciphertext back to the runner via single-use topic. The relay and servers never see plaintext secrets.
 - The remote runner polls the single-use relay, decrypts the session, wipes the private key, and continues restore unattended without needing an interactive terminal.

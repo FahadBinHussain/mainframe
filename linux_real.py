@@ -281,6 +281,10 @@ def detect_caller_identity(explicit_agent: str | None = None, explicit_model: st
     if not agent:
         if os.environ.get("ANTIGRAVITY_AGENT") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID"):
             agent = "antigravity"
+        elif os.environ.get("QODER_CLI") or os.environ.get("QODER_PRODUCT_ID") or os.environ.get("QODER_SESSION_TYPE"):
+            # qoder sets OPENCODE_DISABLE_CHANNEL_DB for compatibility, so it
+            # must be tested before the opencode branch or it reads as opencode
+            agent = "qoder"
         elif os.environ.get("OPENCODE") or os.environ.get("OPENCODE_SESSION") or os.environ.get("OPENCODE_DISABLE_CHANNEL_DB"):
             agent = "opencode"
         elif os.environ.get("CLAUDE_CODE") or os.environ.get("CLAUDE_PROJECT_DIR"):
@@ -295,7 +299,7 @@ def detect_caller_identity(explicit_agent: str | None = None, explicit_model: st
                 comm_path = Path(f"/proc/{ppid}/comm")
                 if comm_path.exists():
                     comm = comm_path.read_text().strip().lower()
-                    for known in ("antigravity", "opencode", "claude", "codex", "cursor", "windsurf", "aider"):
+                    for known in ("antigravity", "opencode", "qoder", "claude", "codex", "cursor", "windsurf", "aider"):
                         if known in comm:
                             agent = known if known != "claude" else "claude-code"
                             break
@@ -497,6 +501,30 @@ def publish_request_expired(topic: str | None, *, host: str = "",
         return False
 
 
+def _decrypt_tab_password(priv: Path, raw_b64: str) -> str | None:
+    """Decrypt a relay payload, or None when it is not this request's ciphertext.
+
+    only a 256-byte RSA-2048 block this request's key can open is an approval.
+    markers, garbage, and another session's ciphertext are skipped so they
+    cannot end the wait.
+    """
+    try:
+        ct = base64.b64decode(raw_b64, validate=True)
+    except Exception:
+        return None
+    if len(ct) != 256:
+        return None
+    proc = subprocess.run(
+        ["openssl", "pkeyutl", "-decrypt", "-inkey", str(priv),
+         "-pkeyopt", "rsa_padding_mode:oaep",
+         "-pkeyopt", "rsa_oaep_md:sha256",
+         "-pkeyopt", "rsa_mgf1_md:sha256"],
+        input=ct, capture_output=True)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode()
+
+
 def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
                           host: str = "", code: str = "") -> str:
     """Poll for encrypted password from relay or ~/Downloads, decrypt, clean up."""
@@ -504,8 +532,6 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
     if target.exists():
         target.unlink()  # never decrypt a stale submission
     deadline = time.time() + TAB_WAIT_SECONDS
-    raw_b64: str | None = None
-    source = ""
 
     if reply_topic:
         log(f"waiting for password via phone approval relay ({reply_topic}) or ~/Downloads/{TAB_CIPHER_NAME} ...")
@@ -515,11 +541,14 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
     while time.time() < deadline:
         if target.exists() and target.stat().st_size > 0:
             try:
-                raw_b64 = target.read_text().strip()
-                source = f"~/Downloads/{TAB_CIPHER_NAME}"
+                candidate = target.read_text().strip()
             finally:
                 target.unlink(missing_ok=True)
-            break
+            password = _decrypt_tab_password(priv, candidate)
+            if password is not None:
+                log(f"vault password ciphertext received via ~/Downloads/{TAB_CIPHER_NAME}")
+                return password
+            log(f"ignoring ~/Downloads/{TAB_CIPHER_NAME}: not a valid approval payload for this request")
 
         if reply_topic:
             try:
@@ -528,44 +557,23 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     if resp.status == 200:
                         body = resp.read().decode("utf-8").strip()
-                        # raw returns every message, newline separated.
-                        # request-expired markers are status bodies,
-                        # never ciphertext.
-                        lines = [line.strip() for line in body.splitlines()
-                                 if line.strip()
-                                 and not re.match(r'^\{\s*"mf"\s*:', line.strip())]
-                        if lines:
-                            raw_b64 = lines[-1]
-                            source = f"ntfy relay ({reply_topic})"
-                            break
+                        # raw returns every message, newline separated. the
+                        # expired marker and any noise fail the decrypt test,
+                        # so they are skipped rather than ending the wait.
+                        for line in reversed([ln.strip() for ln in body.splitlines() if ln.strip()]):
+                            password = _decrypt_tab_password(priv, line)
+                            if password is not None:
+                                log(f"vault password ciphertext received via ntfy relay ({reply_topic})")
+                                return password
             except Exception:
                 pass
 
         time.sleep(2)
-    else:
-        publish_request_expired(reply_topic, host=host, code=code)
-        raise RuntimeError(
-            "no password arrived in the browser tab within "
-            f"{TAB_WAIT_SECONDS // 60} minutes")
 
-    if not raw_b64:
-        raise RuntimeError("empty password ciphertext received")
-
-    log(f"vault password ciphertext received via {source}")
-    try:
-        ct = base64.b64decode(raw_b64)
-    except Exception:
-        raise RuntimeError("tab password ciphertext was not valid base64")
-
-    proc = subprocess.run(
-        ["openssl", "pkeyutl", "-decrypt", "-inkey", str(priv),
-         "-pkeyopt", "rsa_padding_mode:oaep",
-         "-pkeyopt", "rsa_oaep_md:sha256",
-         "-pkeyopt", "rsa_mgf1_md:sha256"],
-        input=ct, capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError("tab password decryption failed")
-    return proc.stdout.decode()
+    publish_request_expired(reply_topic, host=host, code=code)
+    raise RuntimeError(
+        "no password arrived in the browser tab within "
+        f"{TAB_WAIT_SECONDS // 60} minutes")
 
 
 def obtain_master_password(work_root: Path, checkout: Path,
@@ -574,7 +582,12 @@ def obtain_master_password(work_root: Path, checkout: Path,
                            model: str | None = None) -> str:
     """Obtain Bitwarden master password via 1-tap mobile biometric approval (Google-prompt style),
     falling back loudly to terminal input only if phone approval fails or times out."""
-    resolved_topic = ntfy_topic or resolve_ntfy_topic(checkout) or DEFAULT_NTFY_TOPIC
+    resolved_topic = get_ntfy_topic(checkout, explicit=ntfy_topic)
+    if not resolved_topic:
+        raise RuntimeError(
+            "no ntfy topic configured: set MAINFRAME_NTFY_TOPIC, ntfyTopic in "
+            "mainframe.config.json, or pass --ntfy-topic. the approval push has "
+            "no default -- a public topic would expose every request.")
     url, priv, reply_topic, code, resolved_agent, resolved_model = generate_tab_key(
         work_root, context="vault restore", agent=agent, model=model,
         expires_in=TAB_WAIT_SECONDS

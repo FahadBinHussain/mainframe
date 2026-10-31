@@ -143,7 +143,7 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
     def test_wait_for_tab_password_ignores_expired_marker(self, mock_urlopen, mock_subproc):
-        cipher_bytes = b"encrypted_payload_bytes"
+        cipher_bytes = b"x" * 256
         b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
         marker = json.dumps({"mf": "expired", "at": 1700000000})
 
@@ -193,7 +193,7 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
     def test_wait_for_tab_password_from_relay(self, mock_urlopen, mock_subproc):
-        cipher_bytes = b"encrypted_payload_bytes"
+        cipher_bytes = b"x" * 256
         b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
 
         mock_resp = MagicMock()
@@ -216,6 +216,31 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         self.assertIn("rsa_padding_mode:oaep", cmd)
         self.assertEqual(mock_subproc.call_args[1]["input"], cipher_bytes)
 
+    @patch("subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_wait_for_tab_password_skips_noise_that_does_not_decrypt(self, mock_urlopen, mock_subproc):
+        good = base64.b64encode(b"g" * 256).decode("ascii")
+        junk = base64.b64encode(b"j" * 256).decode("ascii")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        # junk posted last: newest-first scan must try it, fail, then take good
+        mock_resp.read.return_value = (good + "\n" + junk + "\n").encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        mock_subproc.side_effect = [
+            MagicMock(returncode=1, stdout=b""),
+            MagicMock(returncode=0, stdout=b"plaintext_master_pw"),
+        ]
+
+        priv_key = self.root / "vault-tab.key"
+        priv_key.write_text("dummy key")
+
+        pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
+        self.assertEqual(pw, "plaintext_master_pw")
+        self.assertEqual(mock_subproc.call_count, 2)
+
     @patch("pathlib.Path.home")
     @patch("subprocess.run")
     def test_wait_for_tab_password_from_file(self, mock_subproc, mock_home):
@@ -225,7 +250,7 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         downloads_dir.mkdir(parents=True, exist_ok=True)
         target = downloads_dir / lr.TAB_CIPHER_NAME
 
-        cipher_bytes = b"file_payload_bytes"
+        cipher_bytes = b"x" * 256
         b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
 
         # Simulate file arriving during sleep
