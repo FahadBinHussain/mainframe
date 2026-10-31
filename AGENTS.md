@@ -1187,6 +1187,18 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   into the owning profile and reports `rebankedProfile`. Without it every profile
   drifts into `grant-dead` within a day of being switched away from. A `grant-dead`
   row offers only a new sign-in, never "switch".
+- **`keepalive` is the other half of "keep the pool forever" (added 2026-10-31).**
+  the re-bank above protects only the LIVE account; every other profile is frozen at
+  the token it held when it was last banked, and an idle chain that is never rotated
+  eventually answers `invalid_grant` and goes `grant-dead`. `keepalive` walks every
+  profile and rotates the ones the running app is NOT holding (the live one is
+  skipped -- the app owns that chain), one at a time. A spent chain does not stop the
+  others: the verb keeps going, names every account that needs a new sign-in, and
+  exits **nonzero** so a scheduled task's Last Result and its log both say so. A
+  profile whose ~1 h ACCESS token shows `expired-token` is NOT this case -- that is
+  normal and `use`/`refresh` renews it from the stored refresh token. run by the
+  `Monitor - minimax keepalive` task (every 6 h + logon + wake, windowless via
+  pythonw; see `automata-private\monitor`).
 - **⚠️ MiniMax reports NO email for a google-bound account.** Verified 2026-10-31:
   `GET /v1/api/user/info` answers `email: ""` (also `phone` opaque; only
   `userID`/`realUserID` are stable ids), `/matrix/api/v1/user/profile` answers

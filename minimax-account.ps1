@@ -28,6 +28,7 @@ $ErrorActionPreference = 'Stop'
 #   .\minimax-account.ps1 login <email>                device-code sign-in, then save + activate it
 #   .\minimax-account.ps1 use <email>                  switch the live sign-in to a profile
 #   .\minimax-account.ps1 refresh [email]              renew a stored access token (rotates the refresh token)
+#   .\minimax-account.ps1 keepalive                    rotate every idle profile's chain so none lapses
 #   .\minimax-account.ps1 run [email] <mcode args...>  make that profile live, then run the mcode-tools CLI
 #   .\minimax-account.ps1 list / current / status / status-all / path / env
 #   .\minimax-account.ps1 logout [email]               revoke + clear the LIVE sign-in
@@ -83,6 +84,7 @@ function Show-Usage {
         '                                                harvest <email>)',
         '  .\minimax-account.ps1 use <email>                  switch the live sign-in to a profile',
         '  .\minimax-account.ps1 refresh [email]              renew a stored access token',
+        '  .\minimax-account.ps1 keepalive                    rotate every idle profile so no chain lapses',
         '  .\minimax-account.ps1 run [email] <mcode args...>  switch, then run the mcode-tools CLI',
         '  .\minimax-account.ps1 list',
         '  .\minimax-account.ps1 current',
@@ -1714,6 +1716,95 @@ function Invoke-Refresh {
     return $result
 }
 
+# MiniMax rotates the refresh token on every renewal, and the RUNNING app rotates
+# the live account's chain hourly. That leaves every OTHER profile frozen at the
+# token it held when it was last banked, and an idle chain that is never rotated
+# eventually answers invalid_grant -- the profile goes grant-dead, and only a
+# fresh browser sign-in brings it back. keepalive is the missing half of "keep the
+# pool forever": it walks every profile and rotates the ones the running app is
+# NOT holding, so each chain keeps rolling whether or not it is the active one.
+#
+# The live account is skipped on purpose while the app runs -- the app owns that
+# grant and a second rotation from here would revoke the pair (the same guard
+# Invoke-Refresh already enforces). A grant-dead or credential-less profile is not
+# retried: it needs a sign-in, so it is reported loudly and the verb exits nonzero.
+function Invoke-Keepalive {
+    $report = Get-StatusReport
+    $appRunning = [bool]$report['app']['running']
+    $liveEmail = [string]$report['live']['email']
+
+    $rows = @()
+    $rotated = 0
+    $skipped = 0
+    $failed = 0
+
+    foreach ($profile in @($report['profiles'])) {
+        $email = [string]$profile['email']
+        $entry = @{}
+        $entry['email'] = $email
+
+        if ($profile['grantDead']) {
+            $entry['action'] = 'needs-sign-in'
+            $entry['detail'] = if ($profile['grantDeadReason']) { [string]$profile['grantDeadReason'] } else { 'MiniMax refused the stored chain' }
+            $failed += 1
+            $rows += $entry
+            continue
+        }
+
+        if (($profile['state'] -eq 'missing-credential') -or -not (Read-ProfileCredential -Profile $email)) {
+            $entry['action'] = 'needs-sign-in'
+            $entry['detail'] = 'no credential.json for this address -- run login for it'
+            $failed += 1
+            $rows += $entry
+            continue
+        }
+
+        if ($appRunning -and $profile['isLive']) {
+            $entry['action'] = 'skipped'
+            $entry['detail'] = 'this is the sign-in MiniMax Code is running; the app rotates that chain itself'
+            $skipped += 1
+            $rows += $entry
+            continue
+        }
+
+        try {
+            $result = Invoke-Refresh -Profile $email
+            $entry['action'] = 'rotated'
+            $entry['expiresAt'] = $result['expiresAt']
+            $entry['installedLive'] = $result['installedLive']
+            $rotated += 1
+        } catch {
+            # one spent chain must not stop the rotation of the others: record it,
+            # keep going, and let the count decide the verb's exit code.
+            $entry['action'] = if ($_.Exception.Message -match 'invalid_grant') { 'needs-sign-in' } else { 'failed' }
+            $entry['detail'] = $_.Exception.Message
+            $failed += 1
+        }
+        $rows += $entry
+    }
+
+    $needsSignIn = @($rows | Where-Object { $_['action'] -eq 'needs-sign-in' } | ForEach-Object { [string]$_['email'] })
+    $lines = @("rotated $rotated, skipped $skipped, failed $failed (of $($rows.Count) profile(s))")
+    if ($needsSignIn.Count -gt 0) {
+        $lines += "needs a fresh browser sign-in: $($needsSignIn -join ', ')"
+    }
+
+    $payload = @{}
+    $payload['ok'] = [bool]($failed -eq 0)
+    $payload['action'] = 'keepalive'
+    $payload['rotated'] = $rotated
+    $payload['skipped'] = $skipped
+    $payload['failed'] = $failed
+    $payload['needsSignIn'] = $needsSignIn
+    $payload['live'] = $liveEmail
+    $payload['appRunning'] = $appRunning
+    $payload['profiles'] = $rows
+    $payload['rebankedProfile'] = $report['rebankedProfile']
+    $payload['checkedAt'] = [DateTimeOffset]::UtcNow.ToString('o')
+    $payload['message'] = ($lines -join '; ')
+    return $payload
+}
+
 function Invoke-Logout {
     param([AllowNull()][string]$Profile)
 
@@ -1945,6 +2036,19 @@ switch ($command) {
         $profile = if ($remaining.Count -ge 1) { $remaining[0] } else { $null }
         $result = Invoke-Refresh -Profile $profile
         Emit -Payload $result -Human { Write-Host $result.message }
+    }
+
+    'keepalive' {
+        $result = Invoke-Keepalive
+        Emit -Payload $result -Human {
+            Write-Host $result['message']
+            foreach ($row in $result['profiles']) {
+                $tone = switch ($row['action']) { 'rotated' { 'Green' } 'skipped' { 'DarkGray' } default { 'Red' } }
+                $suffix = if ($row['detail']) { " -- $($row['detail'])" } else { '' }
+                Write-Host ("  {0,-14} {1}{2}" -f $row['action'], $row['email'], $suffix) -ForegroundColor $tone
+            }
+        }
+        if (-not $result['ok']) { exit 1 }
     }
 
     'run' {
