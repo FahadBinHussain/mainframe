@@ -1325,6 +1325,16 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   app still open. Then close -> bank outgoing -> install six files -> relaunch,
   and `launchError` is reported separately so "files swapped but the IDE did not
   come back" is visible, not a green row.
+- **never assign an array field through an `if` expression.** powershell unrolls
+  a one-element array on statement output, so `$row['providers'] = if (...) { @(...) } else { @() }`
+  stored `"google.com"` instead of `["google.com"]` -- and the api (rightly) refused
+  the whole report: *"the helper reported profiles[].providers as "google.com";
+  adcode-account.ps1 changed its payload shape; this api expects an array of
+  strings"* (hit on the first real bank, 2026-10-31). assign `@()` first and fill
+  it with a direct `@(... | Where-Object { $_ })` statement instead. same trap was
+  latent in `Get-StatusReport` (`liveProviders`) and both harvest payloads; all four
+  are fixed. the api stays strict on purpose -- a scalar is shape drift, not a
+  value to coerce.
 - **switching is announced, not silent.** `use` reports `appRunning`,
   `appLaunched`, `launchError` and `liveUpdated`; `started` process is tracked by
   command line (`--user-data-dir=`), not by image name, because the user may run
