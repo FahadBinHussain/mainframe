@@ -530,13 +530,18 @@ function getParams() {
   const model = params.get('model') || (hash.match(/(?:^|&)model=([^&]+)/) || [])[1];
   const expRaw = params.get('exp') || (hash.match(/(?:^|&)exp=([0-9]+)/) || [])[1];
   const exp = expRaw ? Number(expRaw) : null;
-  const srv = params.get('srv') || (hash.match(/(?:^|&)srv=([^&]+)/) || [])[1];
+  // URLSearchParams already percent-decodes, so only the raw-regex fallback
+  // needs a manual decode - decoding twice would mangle a value that carries
+  // a literal percent sign.
+  const srvParam = params.get('srv');
+  const srvRaw = (hash.match(/(?:^|&)srv=([^&]+)/) || [])[1];
+  const srv = srvParam || (srvRaw ? decodeURIComponent(srvRaw) : null);
   return {
     k,
     sid,
     code,
     exp: Number.isFinite(exp) && exp > 0 ? exp : null,
-    srv: srv ? decodeURIComponent(srv).replace(/\/+$/, '') : null,
+    srv: srv ? srv.replace(/\/+$/, '') : null,
     host: host ? decodeURIComponent(host) : null,
     ctx: ctx ? decodeURIComponent(ctx) : null,
     agent: agent ? decodeURIComponent(agent) : null,
