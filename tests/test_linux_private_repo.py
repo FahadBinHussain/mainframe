@@ -1,4 +1,4 @@
-import os, subprocess, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -174,6 +174,48 @@ class RestoreLegTests(unittest.TestCase):
             skip_private_repo=False, gh_token=TOKEN)
         self.assertEqual(failures, [])
         self.assertEqual(report, {})
+
+
+class ConfigAndTimeoutTests(unittest.TestCase):
+    """Two defects the live container run exposed: a powershell-written config
+    carries a UTF-8 BOM, and a hung apt-get blocked the whole flow."""
+
+    def test_a_bom_config_still_loads(self):
+        tmp = Path(tempfile.mkdtemp())
+        cfg = tmp / "mainframe.config.json"
+        # exactly what powershell's Set-Content -Encoding utf8 writes
+        cfg.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+            {"ntfyTopic": "topic-not-real", "bitwardenEmail": "a@b.c"}
+        ).encode("utf-8"))
+        with patch.object(lr, "Path", Path):
+            data = lr.load_config(tmp)
+        self.assertEqual(data.get("ntfyTopic"), "topic-not-real")
+        self.assertEqual(data.get("bitwardenEmail"), "a@b.c")
+
+    def test_a_plain_config_still_loads(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "mainframe.config.json").write_text(
+            json.dumps({"ntfyTopic": "topic-not-real"}), encoding="utf-8")
+        data = lr.load_config(tmp)
+        self.assertEqual(data.get("ntfyTopic"), "topic-not-real")
+
+    def test_the_ntfy_topic_resolves_from_a_bom_config(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "mainframe.config.json").write_bytes(
+            b"\xef\xbb\xbf" + json.dumps({"ntfyTopic": "topic-not-real"}).encode())
+        self.assertEqual(lr.get_ntfy_topic(tmp), "topic-not-real")
+
+    def test_a_hung_command_times_out_loudly(self):
+        start = time.time()
+        with self.assertRaises(RuntimeError) as ctx:
+            lr.run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+        self.assertIn("timed out after 1s", str(ctx.exception))
+        self.assertLess(time.time() - start, 20)
+
+    def test_the_apt_legs_are_bounded(self):
+        self.assertGreater(lr.APT_UPDATE_TIMEOUT_SECONDS, 0)
+        self.assertGreater(lr.APT_INSTALL_TIMEOUT_SECONDS,
+                           lr.APT_UPDATE_TIMEOUT_SECONDS)
 
 
 if __name__ == '__main__':

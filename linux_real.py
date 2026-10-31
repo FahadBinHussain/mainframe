@@ -94,12 +94,20 @@ def fail(msg: str) -> "SystemExit":
 
 
 def run(cmd: list[str], *, env: dict[str, str] | None = None,
-        check: bool = True, input_text: str | None = None) -> subprocess.CompletedProcess:
+        check: bool = True, input_text: str | None = None,
+        timeout: float | None = None) -> subprocess.CompletedProcess:
     merged = dict(os.environ)
     if env:
         merged.update(env)
-    proc = subprocess.run(cmd, env=merged, input=input_text,
-                          capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, env=merged, input=input_text,
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # Without a bound, a hung child (an apt-get update waiting on a lock
+        # or an unreachable mirror) blocks the whole run forever - a headless
+        # container just sits there. Name the command and the budget instead.
+        raise RuntimeError(f"{cmd[0]} timed out after {timeout:g}s: "
+                           f"{' '.join(cmd[:5])}") from exc
     if check and proc.returncode != 0:
         raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}): "
                            f"{(proc.stderr or proc.stdout or '').strip()[-400:]}")
@@ -240,6 +248,9 @@ def unseal_email(blob_path: Path, password: str) -> str:
 TAB_CIPHER_NAME = "mainframe-vault-pass.enc"
 TAB_WAIT_SECONDS = 600
 DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+# apt must not be able to stall the whole run (see the prereqs leg).
+APT_UPDATE_TIMEOUT_SECONDS = 120
+APT_INSTALL_TIMEOUT_SECONDS = 300
 
 
 def load_config(checkout: Path | None = None) -> dict[str, str]:
@@ -255,7 +266,13 @@ def load_config(checkout: Path | None = None) -> dict[str, str]:
     for p in candidates:
         if p.is_file():
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
+                # utf-8-sig, not utf-8: this file is written by powershell on
+                # windows (Set-Content/Out-File -Encoding utf8), which emits a
+                # BOM. plain utf-8 raises on the BOM, the except below swallows
+                # it, and the config silently reads as empty - no ntfy topic,
+                # no phone approval, no vault. powershell's own reader strips
+                # the BOM, so this only ever broke the linux side.
+                data = json.loads(p.read_text(encoding="utf-8-sig"))
                 if isinstance(data, dict):
                     return data
             except Exception:
@@ -1392,9 +1409,13 @@ def main(argv: list[str] | None = None) -> int:
     # Prereqs (same set as --setup-tools, idempotent).
     log("installing prerequisites ...")
     try:
-        run(sudo_prefix() + ["apt-get", "update"])
+        # Bounded: a container without working apt sources (or with another
+        # apt holding the lock) otherwise hangs here forever and the vault
+        # leg never runs. A failed prereq is recorded and the flow continues.
+        run(sudo_prefix() + ["apt-get", "update"], timeout=APT_UPDATE_TIMEOUT_SECONDS)
         run(sudo_prefix() + ["apt-get", "install", "-y", "git", "curl",
-                             "ca-certificates", "python3", "openssl"])
+                             "ca-certificates", "python3", "openssl"],
+            timeout=APT_INSTALL_TIMEOUT_SECONDS)
     except Exception as exc:
         failures.append(f"prereqs: {exc}")
         log(f"prereqs FAILED: {exc}")
