@@ -140,6 +140,121 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
         url, *_ = lr.generate_tab_key(work_root, enable_relay=False)
         self.assertNotIn("&exp=", url)
 
+    def test_get_ntfy_server_precedence(self):
+        cfg_file = self.root / "mainframe.config.json"
+        cfg_file.write_text(json.dumps({
+            "ntfyTopic": "cfg-topic",
+            "ntfyServer": "https://cfg-relay.example"
+        }))
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lr.get_ntfy_server(self.root), "https://cfg-relay.example")
+
+        with patch.dict(os.environ, {"MAINFRAME_NTFY_SERVER": "https://env-relay.example"}):
+            self.assertEqual(lr.get_ntfy_server(self.root), "https://env-relay.example")
+
+        with patch.dict(os.environ, {"MAINFRAME_NTFY_SERVER": "https://env-relay.example"}):
+            self.assertEqual(
+                lr.get_ntfy_server(self.root, explicit="https://explicit-relay.example/"),
+                "https://explicit-relay.example")
+
+        # no config, no env -> ntfy.sh
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lr.get_ntfy_server(self.root / "missing"), lr.DEFAULT_NTFY_SERVER)
+
+    def test_get_pages_base_precedence(self):
+        cfg_file = self.root / "mainframe.config.json"
+        cfg_file.write_text(json.dumps({"pagesBase": "https://pages.example"}))
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lr.get_pages_base(self.root), "https://pages.example")
+
+        with patch.dict(os.environ, {"MAINFRAME_PAGES_BASE": "https://env-pages.example/"}):
+            self.assertEqual(lr.get_pages_base(self.root), "https://env-pages.example")
+
+        with patch.dict(os.environ, {"MAINFRAME_PAGES_BASE": "https://env-pages.example"}):
+            self.assertEqual(
+                lr.get_pages_base(self.root, explicit="https://explicit-pages.example"),
+                "https://explicit-pages.example")
+
+        # no config, no env -> the GitHub Pages url of the public tool repo
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(lr.get_pages_base(self.root / "missing"),
+                             "https://fahadbinhussain.github.io/mainframe")
+
+    @patch("urllib.request.urlopen")
+    def test_dispatch_ntfy_unlock_uses_configured_server(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        ok = lr.dispatch_ntfy_unlock("my-phone-topic", "https://example.com/tab",
+                                     hostname="test-box",
+                                     server="https://relay.example/ntfy")
+        self.assertTrue(ok)
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "https://relay.example/ntfy/my-phone-topic")
+
+    @patch("os.chmod")
+    @patch("subprocess.run")
+    def test_generate_tab_key_uses_configured_pages_base_and_relay(self, mock_run, mock_chmod):
+        def fake_run(cmd, capture_output=True):
+            if "-out" in cmd:
+                out_path = Path(cmd[cmd.index("-out") + 1])
+                out_path.write_text("fake private key")
+            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
+
+        mock_run.side_effect = fake_run
+
+        work_root = self.root / "work"
+        url, *_ = lr.generate_tab_key(
+            work_root, reply_topic="mf-vault-fixed123",
+            pages_base="https://pages.example",
+            relay_base="https://relay.example/ntfy")
+
+        self.assertTrue(url.startswith("https://pages.example/docs/vault-tab.html#"))
+        self.assertIn("srv=https%3A%2F%2Frelay.example%2Fntfy", url)
+
+    @patch("os.chmod")
+    @patch("subprocess.run")
+    def test_generate_tab_key_omits_relay_param_for_default_server(self, mock_run, mock_chmod):
+        def fake_run(cmd, capture_output=True):
+            if "-out" in cmd:
+                out_path = Path(cmd[cmd.index("-out") + 1])
+                out_path.write_text("fake private key")
+            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
+
+        mock_run.side_effect = fake_run
+
+        url, *_ = lr.generate_tab_key(self.root / "work", enable_relay=False,
+                                      relay_base=lr.DEFAULT_NTFY_SERVER)
+        self.assertNotIn("srv=", url)
+
+    @patch("urllib.request.urlopen")
+    def test_wait_for_tab_password_polls_configured_server(self, mock_urlopen):
+        cipher_bytes = b"x" * 256
+        b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = (b64_cipher + "\n").encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        with patch("subprocess.run") as mock_subproc:
+            mock_subproc.return_value = MagicMock(returncode=0, stdout=b"plaintext_master_pw")
+            priv_key = self.root / "vault-tab.key"
+            priv_key.write_text("dummy key")
+
+            pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999",
+                                          server="https://relay.example/ntfy")
+            self.assertEqual(pw, "plaintext_master_pw")
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.full_url, "https://relay.example/ntfy/mf-vault-test999/raw?poll=1")
+
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
     def test_wait_for_tab_password_ignores_expired_marker(self, mock_urlopen, mock_subproc):

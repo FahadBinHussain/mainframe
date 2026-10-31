@@ -68,6 +68,28 @@ During unattended headless restores on remote Linux boxes or containers (where s
 - Tapping the notification opens the static `docs/vault-tab.html` page in your phone browser, encrypts the master password client-side using WebCrypto RSA-OAEP, and relays the ciphertext back to the runner via single-use topic. The relay and servers never see plaintext secrets.
 - The remote runner polls the single-use relay, decrypts the session, wipes the private key, and continues restore unattended without needing an interactive terminal.
 
+**Pointing the approval flow at your own relay and page.** Two optional config keys
+make Windows and Linux behave identically on a machine whose egress proxy denies
+`ntfy.sh` (a container behind a strict proxy cannot push to it at all):
+
+| key | env override | CLI (linux) | default |
+| --- | --- | --- | --- |
+| `ntfyServer` | `MAINFRAME_NTFY_SERVER` | `--ntfy-server` | `https://ntfy.sh` |
+| `pagesBase` | `MAINFRAME_PAGES_BASE` | `--pages-base` | `https://fahadbinhussain.github.io/mainframe` |
+
+- `ntfyServer` is the base URL of the approval relay. It only has to speak the
+  ntfy HTTP API, so it can be a relay of your own that fronts `ntfy.sh`. The
+  phone keeps using the same ntfy app and the same topic; only the runner's
+  push and poll travel through the relay.
+- `pagesBase` is the base URL that serves `docs/vault-tab.html`. It is a static
+  file, so any host works — point it at your own domain to keep the tap link off
+  a raw `github.io` path. The runner adds `srv=<relay>` to the link when the
+  relay is not `ntfy.sh`, so the page posts the ciphertext back to the same
+  relay the runner reads.
+
+Both Windows (`vault-approval.psm1`) and Linux (`linux_real.py`) read the same
+`mainframe.config.json`, so one file drives both machines.
+
 ### Linux: Bash (no PowerShell dependency)
 
 **Linux now has a lossless archive-recovery path, explicit native export targets,

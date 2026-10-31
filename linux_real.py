@@ -293,6 +293,26 @@ def get_ntfy_topic(checkout: Path | None = None, explicit: str | None = None) ->
     return None
 
 
+def get_ntfy_server(checkout: Path | None = None, explicit: str | None = None) -> str:
+    """Resolve the approval relay base: explicit arg > MAINFRAME_NTFY_SERVER env
+    > ntfyServer in mainframe.config.json > https://ntfy.sh.
+
+    The relay only has to speak the ntfy HTTP api, so a machine whose egress
+    proxy denies ntfy.sh can point at any reachable ntfy-compatible endpoint
+    (a relay in front of ntfy.sh). the phone side keeps using the same ntfy
+    app and the same topic, so the approval experience is identical.
+    """
+    if explicit and explicit.strip():
+        return explicit.strip().rstrip("/")
+    from_env = os.environ.get("MAINFRAME_NTFY_SERVER")
+    if from_env and from_env.strip():
+        return from_env.strip().rstrip("/")
+    from_cfg = load_config(checkout).get("ntfyServer")
+    if from_cfg and isinstance(from_cfg, str) and from_cfg.strip():
+        return from_cfg.strip().rstrip("/")
+    return DEFAULT_NTFY_SERVER
+
+
 def detect_caller_identity(explicit_agent: str | None = None, explicit_model: str | None = None) -> tuple[str, str | None]:
     """Detect agent/harness and model identity from explicit args, env vars, or ground-truth transcript inspection."""
     agent = explicit_agent or os.environ.get("MAINFRAME_AGENT_NAME") or os.environ.get("AGENT_NAME") or os.environ.get("AI_AGENT")
@@ -376,7 +396,8 @@ def detect_caller_identity(explicit_agent: str | None = None, explicit_model: st
 
 
 def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None, code: str | None = None,
-                         agent: str | None = None, model: str | None = None) -> bool:
+                         agent: str | None = None, model: str | None = None,
+                         server: str | None = None) -> bool:
     """Send phone approval push notification via ntfy with clickable link."""
     host = hostname
     if not host:
@@ -384,7 +405,8 @@ def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None,
             host = os.uname().nodename
         except Exception:
             host = "linux-machine"
-    endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{DEFAULT_NTFY_SERVER}/{ntfy_topic}"
+    base = (server or DEFAULT_NTFY_SERVER).rstrip("/")
+    endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{base}/{ntfy_topic}"
     caller_tag = f"{host} - {agent}" if agent else host
     title = f"Vault Unlock: Code [{code}] ({caller_tag})" if code else f"Vault Unlock ({caller_tag})"
     action_title = f"Unlock [{code}]" if code else "Unlock Vault"
@@ -420,15 +442,36 @@ def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None,
 TOOL_REPO = "FahadBinHussain/mainframe"
 
 
-def _pages_base() -> str:
-    owner, repo = TOOL_REPO.split("/", 1)
+def _pages_base(tool_repo: str = TOOL_REPO) -> str:
+    owner, repo = tool_repo.split("/", 1)
     return f"https://{owner.lower()}.github.io/{repo}"
+
+
+def get_pages_base(checkout: Path | None = None, explicit: str | None = None,
+                   tool_repo: str = TOOL_REPO) -> str:
+    """Resolve the base url that serves docs/vault-tab.html.
+
+    explicit arg > MAINFRAME_PAGES_BASE env > pagesBase in
+    mainframe.config.json > the GitHub Pages url of the public tool repo.
+    the approval card is a static file, so any host that serves it works --
+    a first-party deployment keeps the tap link off a raw github.io path.
+    """
+    if explicit and explicit.strip():
+        return explicit.strip().rstrip("/")
+    from_env = os.environ.get("MAINFRAME_PAGES_BASE")
+    if from_env and from_env.strip():
+        return from_env.strip().rstrip("/")
+    from_cfg = load_config(checkout).get("pagesBase")
+    if from_cfg and isinstance(from_cfg, str) and from_cfg.strip():
+        return from_cfg.strip().rstrip("/")
+    return _pages_base(tool_repo)
 
 
 def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
                      enable_relay: bool = True, context: str = "restore",
                      agent: str | None = None, model: str | None = None,
-                     expires_in: int = 0) -> tuple[str, Path, str | None, str, str, str | None]:
+                     expires_in: int = 0, pages_base: str | None = None,
+                     relay_base: str | None = None) -> tuple[str, Path, str | None, str, str, str | None]:
     """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic, code, agent, model)."""
     resolved_agent, resolved_model = detect_caller_identity(agent, model)
     tmp = work_root / "tmp"
@@ -465,7 +508,13 @@ def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
         # how long this runner will keep waiting. the card stops offering a
         # tap once this passes instead of sitting there looking approvable.
         fragment += f"&exp={int(time.time()) + expires_in}"
-    return f"{_pages_base()}/docs/vault-tab.html#{fragment}", priv, sid, code, resolved_agent, resolved_model
+    if relay_base and relay_base.rstrip("/") != DEFAULT_NTFY_SERVER:
+        # the card has to post the ciphertext back to the same relay this
+        # runner reads. without this the page would hardcode ntfy.sh and a
+        # machine behind a relay would never see the approval land.
+        fragment += f"&srv={urllib.parse.quote(relay_base.rstrip('/'), safe='')}"
+    base = (pages_base or _pages_base()).rstrip("/")
+    return f"{base}/docs/vault-tab.html#{fragment}", priv, sid, code, resolved_agent, resolved_model
 
 
 def try_open_phone_adb(url: str) -> bool:
@@ -500,7 +549,7 @@ def _try_open_tab(url: str) -> None:
 
 
 def publish_request_expired(topic: str | None, *, host: str = "",
-                            code: str = "") -> bool:
+                            code: str = "", server: str | None = None) -> bool:
     """Tell the approval card the runner stopped waiting, so it goes stale.
 
     Same marker shape the PowerShell module publishes: the card polls this
@@ -509,8 +558,9 @@ def publish_request_expired(topic: str | None, *, host: str = "",
         return False
     body = json.dumps({"mf": "expired", "at": int(time.time()),
                        "host": host, "code": code}, separators=(",", ":"))
+    base = (server or DEFAULT_NTFY_SERVER).rstrip("/")
     req = urllib.request.Request(
-        f"{DEFAULT_NTFY_SERVER}/{topic}", data=body.encode("utf-8"),
+        f"{base}/{topic}", data=body.encode("utf-8"),
         headers={"Title": "Vault Request Expired", "Priority": "low",
                  "Tags": "hourglass"})
     try:
@@ -546,12 +596,14 @@ def _decrypt_tab_password(priv: Path, raw_b64: str) -> str | None:
 
 
 def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
-                          host: str = "", code: str = "") -> str:
+                          host: str = "", code: str = "",
+                          server: str | None = None) -> str:
     """Poll for encrypted password from relay or ~/Downloads, decrypt, clean up."""
     target = Path.home() / "Downloads" / TAB_CIPHER_NAME
     if target.exists():
         target.unlink()  # never decrypt a stale submission
     deadline = time.time() + TAB_WAIT_SECONDS
+    base = (server or DEFAULT_NTFY_SERVER).rstrip("/")
 
     if reply_topic:
         log(f"waiting for password via phone approval relay ({reply_topic}) or ~/Downloads/{TAB_CIPHER_NAME} ...")
@@ -572,7 +624,7 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
 
         if reply_topic:
             try:
-                poll_url = f"{DEFAULT_NTFY_SERVER}/{reply_topic}/raw?poll=1"
+                poll_url = f"{base}/{reply_topic}/raw?poll=1"
                 req = urllib.request.Request(poll_url)
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     if resp.status == 200:
@@ -590,7 +642,7 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
 
         time.sleep(2)
 
-    publish_request_expired(reply_topic, host=host, code=code)
+    publish_request_expired(reply_topic, host=host, code=code, server=base)
     raise RuntimeError(
         "no password arrived in the browser tab within "
         f"{TAB_WAIT_SECONDS // 60} minutes")
@@ -599,7 +651,9 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
 def obtain_master_password(work_root: Path, checkout: Path,
                            ntfy_topic: str | None = None,
                            agent: str | None = None,
-                           model: str | None = None) -> str:
+                           model: str | None = None,
+                           ntfy_server: str | None = None,
+                           pages_base: str | None = None) -> str:
     """Obtain Bitwarden master password via 1-tap mobile biometric approval (Google-prompt style),
     falling back loudly to terminal input only if phone approval fails or times out."""
     resolved_topic = get_ntfy_topic(checkout, explicit=ntfy_topic)
@@ -608,9 +662,12 @@ def obtain_master_password(work_root: Path, checkout: Path,
             "no ntfy topic configured: set MAINFRAME_NTFY_TOPIC, ntfyTopic in "
             "mainframe.config.json, or pass --ntfy-topic. the approval push has "
             "no default -- a public topic would expose every request.")
+    resolved_server = get_ntfy_server(checkout, explicit=ntfy_server)
+    resolved_pages = get_pages_base(checkout, explicit=pages_base)
     url, priv, reply_topic, code, resolved_agent, resolved_model = generate_tab_key(
         work_root, context="vault restore", agent=agent, model=model,
-        expires_in=TAB_WAIT_SECONDS
+        expires_in=TAB_WAIT_SECONDS, pages_base=resolved_pages,
+        relay_base=resolved_server
     )
     host = ""
     try:
@@ -637,7 +694,7 @@ def obtain_master_password(work_root: Path, checkout: Path,
             log(f"dispatching phone approval notification to ntfy topic: {resolved_topic}")
             sent = dispatch_ntfy_unlock(
                 resolved_topic, url, hostname=host, code=code,
-                agent=resolved_agent, model=resolved_model
+                agent=resolved_agent, model=resolved_model, server=resolved_server
             )
             if sent:
                 log("push notification dispatched to phone successfully.")
@@ -650,7 +707,8 @@ def obtain_master_password(work_root: Path, checkout: Path,
         # 4. Await decrypted password from phone relay or local download
         try:
             return wait_for_tab_password(priv, reply_topic=reply_topic,
-                                         host=host, code=code)
+                                         host=host, code=code,
+                                         server=resolved_server)
         except RuntimeError as exc:
             # Rule 8: surface fallback loudly
             log(f"WARNING: 1-tap mobile approval failed ({exc}). Falling back to MANUAL PASSWORD ENTRY.")
@@ -668,7 +726,9 @@ def obtain_master_password(work_root: Path, checkout: Path,
 
 
 def vault_session(work_root: Path, checkout: Path,
-                  ntfy_topic: str | None = None) -> tuple[str, str]:
+                  ntfy_topic: str | None = None,
+                  ntfy_server: str | None = None,
+                  pages_base: str | None = None) -> tuple[str, str]:
     """Log in to Vaultwarden via bw, return (gh_token, secrets_password).
 
     The master password is prompted once and reused for login + unlock,
@@ -694,7 +754,8 @@ def vault_session(work_root: Path, checkout: Path,
     email = None
     blob = checkout / "bw-email.enc.json"
     if blob.exists():
-        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic)
+        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
+                                          ntfy_server=ntfy_server, pages_base=pages_base)
         email = unseal_email(blob, password)
         log("email unsealed from bw-email.enc.json")
     else:
@@ -703,7 +764,8 @@ def vault_session(work_root: Path, checkout: Path,
             if not sys.stdin.isatty():
                 fail("headless run without bw-email.enc.json or bitwardenEmail config")
             email = input("Bitwarden email: ").strip()
-        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic)
+        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
+                                          ntfy_server=ntfy_server, pages_base=pages_base)
     if status.get("status") == "unauthenticated":
         log("bw login ...")
         run([bw, "login", email, "--passwordenv", "BW_PASSWORD"],
@@ -1384,6 +1446,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="tool installs, staging and backups live here")
     ap.add_argument("--ntfy-topic", type=str, default=None,
                     help="ntfy.sh topic for phone approval of vault unlock")
+    ap.add_argument("--ntfy-server", type=str, default=None,
+                    help="approval relay base url (default: ntfy.sh). point this at a "
+                         "reachable ntfy-compatible relay when the egress proxy denies ntfy.sh")
+    ap.add_argument("--pages-base", type=str, default=None,
+                    help="base url serving docs/vault-tab.html (default: the GitHub Pages "
+                         "url of the public tool repo). set it to a first-party host to keep "
+                         "the tap link off a raw github.io path")
     args = ap.parse_args(argv)
 
     if sys.platform != "linux" or sys.version_info < (3, 10):
@@ -1426,9 +1495,17 @@ def main(argv: list[str] | None = None) -> int:
     ntfy_topic = get_ntfy_topic(HERE, explicit=args.ntfy_topic)
     if ntfy_topic and not args.skip_vault:
         log(f"phone approval enabled via ntfy topic: {ntfy_topic}")
+        relay = get_ntfy_server(HERE, explicit=args.ntfy_server)
+        page = get_pages_base(HERE, explicit=args.pages_base)
+        if relay != DEFAULT_NTFY_SERVER:
+            log(f"phone approval relay: {relay}")
+        if page != _pages_base():
+            log(f"phone approval page base: {page}")
     if not args.skip_vault:
         try:
-            gh_token, secrets_pw = vault_session(work_root, HERE, ntfy_topic=ntfy_topic)
+            gh_token, secrets_pw = vault_session(work_root, HERE, ntfy_topic=ntfy_topic,
+                                                 ntfy_server=args.ntfy_server,
+                                                 pages_base=args.pages_base)
             report["secrets_password_present"] = bool(secrets_pw)
             backup_root = backup_root or download_release(work_root, gh_token)
         except Exception as exc:
