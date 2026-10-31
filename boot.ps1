@@ -2,6 +2,8 @@
 #   irm https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/boot.ps1 | iex
 # asks for the bitwarden master password ONCE; everything else flows from the vault:
 #   vault github token     -> private mainframe-production release (quick + persist zips)
+#                             and, exported as GH_TOKEN, the private automata-private clone
+#                             restore.ps1 does (git -c credential.helper=!gh auth git-credential)
 #   vault secrets password -> decrypts mainframe-secrets.zip, the encrypted entry inside
 #                             quick, so .ssh, opencode config and account profiles come back too
 #   vault tool tokens      -> all *-account.ps1 helpers after restore

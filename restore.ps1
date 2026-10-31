@@ -190,17 +190,39 @@ function Invoke-Native {
 # private repo holding the ditto/alist/opencode patchers; both restore modes
 # need it. a failed clone/pull throws - continuing would ship unpatched
 # binaries without saying so.
+#
+# the credential source is named, not inherited: gh's own git credential
+# helper (the line `gh auth setup-git` writes) returns $env:GH_TOKEN verbatim
+# when it is set - boot exports the vault's github token, so a fresh machine
+# authenticates without a gh login - and otherwise falls back to gh's stored
+# login. `credential.helper=` clears whatever the machine has configured
+# first, so the clone cannot silently go out as some other account.
+function Get-GhCredentialAuthArgs {
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Host 'gh not found - using this machine''s own git credentials for the private repo' -ForegroundColor Yellow
+        return @()
+    }
+    if ($env:GH_TOKEN) {
+        Write-Host 'authenticating with the GH_TOKEN github profile (gh auth git-credential)'
+    } else {
+        Write-Host "authenticating with gh's stored login (no GH_TOKEN in the environment)"
+    }
+    return @('-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential')
+}
+
 function Sync-AutomataPrivateRepo {
     $repo = $CloneRepos['automata-private']
+    $auth = Get-GhCredentialAuthArgs
     if (Test-Path -LiteralPath $AutomataPrivateDir) {
         Write-Host "automata-private repo already exists at $AutomataPrivateDir, pulling latest"
-        $code = Invoke-Native git -C $AutomataPrivateDir pull --ff-only
+        $code = Invoke-Native git @auth -C $AutomataPrivateDir pull --ff-only
     } else {
         Write-Host "Cloning $repo to $AutomataPrivateDir"
-        $code = Invoke-Native git clone $repo $AutomataPrivateDir
+        $code = Invoke-Native git @auth clone $repo $AutomataPrivateDir
     }
     if ($code -ne 0) {
-        throw "automata-private sync failed (git exit $code) at $AutomataPrivateDir. quick and full restore both need its ditto/alist/opencode patchers; fix git auth for $repo and re-run."
+        $source = if ($env:GH_TOKEN) { 'the GH_TOKEN github profile' } else { "gh's stored login / this machine's git credentials" }
+        throw "automata-private sync failed (git exit $code) at $AutomataPrivateDir using $source. the token must be able to read $repo. quick and full restore both need its ditto/alist/opencode patchers; fix github auth and re-run."
     }
 }
 
