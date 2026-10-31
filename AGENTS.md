@@ -1223,6 +1223,15 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   does not know), the `waiting` phase message and the result's `bankError` say so
   loudly, because approving replaces that account's chain and only a fresh sign-in
   brings it back.
+- **`use` refuses to switch away from a sign-in nobody owns.** banking the
+  outgoing account is the first thing `use` does; when the live sign-in matches no
+  profile, that bank throws, and `use` rethrows instead of warn-and-proceed -- the
+  unnamed chain has no second copy, so switching spends it permanently. It names
+  both fixes: `harvest <email>` (the monitor's "name this sign-in" does exactly
+  that), or `logout` to discard it on purpose. `login` keeps warn-and-proceed with
+  `bankError`, because there the human sees the warning BEFORE approving and can
+  abort. The guard is read in code, not yet pressed against a live unnamed
+  sign-in -- the first real refusal is the proof.
 - **`status-all` answers "who is live" only when the live sign-in has no owner.**
   for an unmatched, unexpired sign-in it calls `/v1/api/user/info` and reports
   `displayName` + `realUserID` (and `identityError` when that call fails); for a
