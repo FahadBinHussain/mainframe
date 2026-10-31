@@ -120,6 +120,16 @@ want all other staged candidates activated. Nested `AGENTS.md` files and
 `.agents/skills` remain blocked. The offline exporter has a separate
 `--include-global-agents` option that stages the file without touching live HOME.
 
+The live flow also syncs the private automation repository: `automata-private` is
+cloned, or fast-forward-pulled when it is already there, into
+`~/Downloads/automata-private` before the restore leg, using the GitHub token the
+vault session already fetched for the release download. The credential source is
+named on screen - gh's own credential helper when `gh` is installed, otherwise a
+private helper that reads the token from the child's environment - and the token
+never reaches argv, a git config file, or disk. A failed sync aborts the restore
+leg rather than reporting a success with a missing private checkout; pass
+`--skip-private-repo` to opt out explicitly.
+
 An additional **opt-in conversion**, separate from candidate copying, is available:
 
 ```bash
