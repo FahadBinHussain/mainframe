@@ -427,6 +427,10 @@ def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None,
         "Tags": "lock,key",
         "Click": url,
         "Actions": f"view, {action_title}, {url}, clear=true",
+        # explicit text/plain: a relay in front of ntfy must be able to read
+        # the body back byte for byte, and urllib would otherwise default to
+        # application/x-www-form-urlencoded.
+        "Content-Type": "text/plain; charset=utf-8",
     }
     req = urllib.request.Request(endpoint, data=body.encode("utf-8"), headers=headers, method="POST")
     try:
@@ -562,7 +566,8 @@ def publish_request_expired(topic: str | None, *, host: str = "",
     req = urllib.request.Request(
         f"{base}/{topic}", data=body.encode("utf-8"),
         headers={"Title": "Vault Request Expired", "Priority": "low",
-                 "Tags": "hourglass"})
+                 "Tags": "hourglass",
+                 "Content-Type": "text/plain; charset=utf-8"})
     try:
         with urllib.request.urlopen(req, timeout=10):
             return True
@@ -610,6 +615,7 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
     else:
         log(f"waiting for password via ~/Downloads/{TAB_CIPHER_NAME} ...")
 
+    poll_delay = 2
     while time.time() < deadline:
         if target.exists() and target.stat().st_size > 0:
             try:
@@ -637,10 +643,21 @@ def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
                             if password is not None:
                                 log(f"vault password ciphertext received via ntfy relay ({reply_topic})")
                                 return password
+                poll_delay = 2
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429:
+                    # ntfy rate-limits per ip. polling every 2 seconds on top
+                    # of another pending approval is enough to trip it, and a
+                    # tripped limit also eats the *push* - the phone then never
+                    # hears about the request at all. back off hard.
+                    poll_delay = 30
+                    log(f"WARNING: relay rate limit hit (429) - backing off to {poll_delay}s")
+                else:
+                    poll_delay = min(poll_delay * 2, 30)
             except Exception:
-                pass
+                poll_delay = min(poll_delay * 2, 30)
 
-        time.sleep(2)
+        time.sleep(poll_delay)
 
     publish_request_expired(reply_topic, host=host, code=code, server=base)
     raise RuntimeError(
@@ -699,7 +716,15 @@ def obtain_master_password(work_root: Path, checkout: Path,
             if sent:
                 log("push notification dispatched to phone successfully.")
             else:
-                log("push notification dispatch failed; check topic or open the printed URL manually.")
+                # rule 8: no silent degradation. without the push the phone
+                # never hears about this request, so waiting would burn the
+                # whole timeout and fail for a reason nobody was told about.
+                raise RuntimeError(
+                    "phone approval push failed, so the phone was never notified. "
+                    f"the request was NOT sent to the relay at {resolved_server}. "
+                    "check the relay (a 429 here means the ntfy rate limit is "
+                    "tripped - another pending approval polling every 2s is "
+                    "usually the cause). no approval can arrive now.")
 
         # 3. Best-effort open local desktop browser if present
         _try_open_tab(url)

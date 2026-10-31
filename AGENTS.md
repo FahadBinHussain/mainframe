@@ -2056,3 +2056,19 @@ and post garbage that killed a live approval.
   ntfy.sh while the runner polled somewhere else and the approval would land
   in a topic nobody reads. (found 2026-10-31, while making the muse container
   match the windows box.)
+- **the approval poll can trip the ntfy rate limit, and then the push dies too.**
+  `Wait-VaultApprovalCiphertext` / `wait_for_tab_password` poll the topic every
+  2 seconds, and ntfy rate-limits per ip. one 10-minute wait is ~300 requests,
+  and a second pending approval doubles that. once the limit trips, ntfy
+  answers **429** - to the poll *and* to the publish - so the phone never hears
+  about the request at all and the wait times out for a reason nobody was told.
+  symptoms: `WARNING: ntfy push dispatch to topic '...' failed: { "code": 42901,
+  "http": 429, "error": "limit reached: too many requests" }` and a topic poll
+  that returns 429 even with nothing pending. fixes in this repo: the poll
+  backs off to 30 s on a 429 (and doubles to 30 s on other errors), and a failed
+  push now **throws** instead of waiting for an approval that can never arrive
+  (rule 8 - no silent degradation). when it happens in the wild: stop every
+  pending approval process first, then retry once - one live waiter at a time.
+  also: the publish now sends `Content-Type: text/plain; charset=utf-8`
+  explicitly, because urllib and `Invoke-RestMethod` would otherwise default to
+  a form encoding and a relay in front of ntfy could not read the body back.
