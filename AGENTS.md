@@ -1905,7 +1905,7 @@ than `Add-Content`, which writes platform CRLF.
 ## Headless vault unlock: mobile approval via ntfy relay (2026-10-26)
 
 - Headless restores on remote Linux boxes/containers without interactive tty cannot prompt via `getpass`.
-- `linux_real.py` uses mobile approval push: configured via `ntfyTopic` in `mainframe.config.json`, `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`.
+- `linux_real.py` uses mobile approval push: configured via `ntfyTopic` in `mainframe.config.json`, `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`. since 2026-10-31 the topic is **required** -- there is no public default.
 - Remote runner generates an ephemeral RSA-2048 keypair (`vault-tab.key`) and single-use session topic (`mf-vault-<token>`).
 - Runner dispatches an urgent push notification via `ntfy.sh` with actionable click link to `https://fahadbinhussain.github.io/mainframe/docs/vault-tab.html#k=<pubkey>&sid=<session_topic>`.
 - Client-side zero-knowledge encryption & 1-tap biometric approval: public key and session ID stay in the URL fragment (`#`), never sent to GitHub Pages servers.
@@ -1958,6 +1958,38 @@ runner's deadline, so an old request reads "Stale request" and refuses to send.
   treating a line as ciphertext. use `Invoke-WebRequest` and read `.Content`
   here: `Invoke-RestMethod` parses a JSON body into an object, so a marker stops
   looking like text and the filter silently misses it (found 2026-10-30).
+  superseded 2026-10-31: `Test-VaultApprovalCiphertext` is stricter than the
+  marker regex -- a line is ciphertext only if it is 344 base64 chars decoding
+  to a 256-byte block that decrypts with the request's own key, so markers,
+  garbage, and another session's ciphertext are all skipped.
 - legacy links without `exp` still work but the card says it cannot tell when
   they expired -- honest, not a silent pass.
+
+### the approval channel is only as private as its topic (2026-10-31)
+
+`fahad-vault-restore` was a hardcoded public ntfy topic: anyone could read every
+request (host, agent, code, pubkey, sid), push fake approval cards to the phone,
+and post garbage that killed a live approval.
+
+- **no default topic.** `Get-VaultNtfyTopic` (exported by `vault-approval.psm1`)
+  resolves `-Topic` -> `MAINFRAME_NTFY_TOPIC` -> `ntfyTopic` in
+  `mainframe.config.json` (script dir, cwd, `~/.config/mainframe/`), and throws
+  with the searched paths when nothing is set. never reintroduce a literal topic
+  in code -- it runs on a public server.
+- **one resolver, both runners.** `monitor/apps/api/vault-unlock.ps1` calls the
+  module resolver instead of duplicating env->hardcode. it also passes
+  `-Agent`/`-Model` from the session to `Send-VaultApprovalNotification`; without
+  them the push title dropped the caller and read like an attacker's.
+- **qoder is detected before opencode.** qoder sets
+  `OPENCODE_DISABLE_CHANNEL_DB=1` for compatibility, so an opencode-first check
+  reported `opencode` with an empty model. `Get-CallerIdentity` tests
+  `QODER_CLI`/`QODER_PRODUCT_ID`/`QODER_SESSION_TYPE` first; qoder has no model
+  env var, so the model stays blank there and `MAINFRAME_MODEL_NAME` fills it.
+- **no passwords on argv.** `bw unlock $password --raw` put the master password
+  in the process command line, readable by any same-user process. both
+  `bitwarden.com/unlock.ps1` and `monitor/apps/api/vault-unlock.ps1` now set
+  `BW_PASSWORD` for the call and drop it in `finally`.
+- **human step, once per machine.** the phone must be subscribed to the topic in
+  `mainframe.config.json`; ntfy returns 200 with zero subscribers, so a wrong
+  topic looks like success locally and only fails at the phone.
 

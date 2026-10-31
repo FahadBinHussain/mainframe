@@ -28,6 +28,10 @@ function Get-CallerIdentity {
     if (-not $Agent) {
         if ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
             $Agent = 'antigravity'
+        } elseif ($env:QODER_CLI -or $env:QODER_PRODUCT_ID -or $env:QODER_SESSION_TYPE) {
+            # qoder sets OPENCODE_DISABLE_CHANNEL_DB for compatibility, so it
+            # must be tested before the opencode branch or it reads as opencode
+            $Agent = 'qoder'
         } elseif ($env:OPENCODE -or $env:OPENCODE_SESSION -or $env:OPENCODE_DISABLE_CHANNEL_DB) {
             $Agent = 'opencode'
         } elseif ($env:CLAUDE_CODE -or $env:CLAUDE_PROJECT_DIR) {
@@ -44,6 +48,7 @@ function Get-CallerIdentity {
                     $name = $p.ProcessName.ToLower()
                     if ($name -match 'antigravity') { $Agent = 'antigravity'; break }
                     if ($name -match 'opencode') { $Agent = 'opencode'; break }
+                    if ($name -match 'qoder') { $Agent = 'qoder'; break }
                     if ($name -match 'claude') { $Agent = 'claude-code'; break }
                     if ($name -match 'codex') { $Agent = 'codex'; break }
                     if ($name -match 'cursor') { $Agent = 'cursor'; break }
@@ -108,6 +113,39 @@ function Get-CallerIdentity {
         Agent = $Agent
         Model = $Model
     }
+}
+
+function Get-VaultNtfyTopic {
+    param(
+        [string]$Topic = $null
+    )
+
+    # the approval channel is only private when the topic name is unguessable,
+    # so there is deliberately no built-in default: an unconfigured machine
+    # fails here instead of broadcasting requests on a public topic.
+    if (-not $Topic) { $Topic = $env:MAINFRAME_NTFY_TOPIC }
+    if (-not $Topic) {
+        $configCandidates = @(
+            (Join-Path $PSScriptRoot 'mainframe.config.json'),
+            (Join-Path (Get-Location) 'mainframe.config.json'),
+            (Join-Path $HOME '.config\mainframe\mainframe.config.json')
+        )
+        foreach ($cfg in $configCandidates) {
+            if (Test-Path -LiteralPath $cfg) {
+                try {
+                    $json = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    if ($json.ntfyTopic) {
+                        $Topic = ([string]$json.ntfyTopic).Trim()
+                        break
+                    }
+                } catch {}
+            }
+        }
+    }
+    if (-not $Topic) {
+        throw "no ntfy topic configured: set `$env:MAINFRAME_NTFY_TOPIC, or ntfyTopic in mainframe.config.json (looked in: $($configCandidates -join '; ')). Use a long random topic name -- anyone who knows it can read approval requests and post fake ones."
+    }
+    return $Topic
 }
 
 function Get-VaultApprovalUrl {
@@ -253,13 +291,45 @@ function Open-VaultApprovalOnPhone {
     return $false
 }
 
+function Test-VaultApprovalCiphertext {
+    param(
+        [string]$Value,
+        [System.Security.Cryptography.RSA]$Rsa = $null
+    )
+
+    if (-not $Value) { return $false }
+    $Value = $Value.Trim()
+    # RSA-2048 / OAEP-SHA256 is always one 256-byte block, which is 344 base64
+    # chars. anything else on the relay topic is noise (status markers, garbage
+    # posted by whoever knows the topic) and must be skipped, not returned.
+    if ($Value.Length -ne 344) { return $false }
+    if ($Value -notmatch '^[A-Za-z0-9+/]+={0,2}$') { return $false }
+    try {
+        $bytes = [Convert]::FromBase64String($Value)
+    } catch {
+        return $false
+    }
+    if ($bytes.Length -ne 256) { return $false }
+    if ($Rsa) {
+        # a well-formed block this key cannot decrypt is not our approval --
+        # accepting it would kill the real one inside the poll window.
+        try {
+            $null = $Rsa.Decrypt($bytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
+        } catch {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Wait-VaultApprovalCiphertext {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Sid,
         [int]$TimeoutSeconds = 300,
         [string]$LocalFileName = 'mainframe-vault-pass.enc',
-        [DateTime]$StartTimeUtc = [DateTime]::MinValue
+        [DateTime]$StartTimeUtc = [DateTime]::MinValue,
+        [System.Security.Cryptography.RSA]$Rsa = $null
     )
 
     $downloadPath = Join-Path $HOME "Downloads\$LocalFileName"
@@ -287,11 +357,13 @@ function Wait-VaultApprovalCiphertext {
             $body = [string]$resp.Content
             if ($body) {
                 # raw returns every message on the topic, newline separated.
-                # request-expired markers are status bodies, not ciphertext.
+                # only a payload that is a valid RSA block for this request is
+                # an approval; expired markers and spoofed bodies are skipped so
+                # they cannot end the wait.
                 $cipherLines = @(
                     $body -split "`n" |
                         ForEach-Object { $_.Trim() } |
-                        Where-Object { $_ -and $_ -notmatch '^\{\s*"mf"\s*:' }
+                        Where-Object { Test-VaultApprovalCiphertext -Value $_ -Rsa $Rsa }
                 )
                 if ($cipherLines.Count -gt 0) {
                     return $cipherLines[-1]
@@ -306,8 +378,11 @@ function Wait-VaultApprovalCiphertext {
             try {
                 $content = (Get-Content -LiteralPath $downloadPath -Raw).Trim()
                 Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
-                if (-not [string]::IsNullOrWhiteSpace($content)) {
+                if (Test-VaultApprovalCiphertext -Value $content -Rsa $Rsa) {
                     return $content
+                }
+                if ($content) {
+                    Write-Warning "ignoring $LocalFileName -- not a valid approval payload for this request"
                 }
             } catch {
                 # file locked or transient read issue
@@ -325,6 +400,9 @@ function Decrypt-VaultApprovalCiphertext {
         [string]$Ciphertext
     )
 
+    if (-not (Test-VaultApprovalCiphertext -Value $Ciphertext)) {
+        throw "approval payload is not a well-formed 256-byte RSA ciphertext (length $($Ciphertext.Length)) -- refusing to treat it as the master password"
+    }
     $cipherBytes = [Convert]::FromBase64String($Ciphertext)
     $plainBytes = $Rsa.Decrypt($cipherBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
     return [System.Text.Encoding]::UTF8.GetString($plainBytes)
@@ -343,28 +421,7 @@ function Get-VaultMasterPassword {
 
     # Resolve ntfy topic
     if (-not $NtfyTopic) {
-        $NtfyTopic = $env:MAINFRAME_NTFY_TOPIC
-    }
-    if (-not $NtfyTopic) {
-        $configCandidates = @(
-            (Join-Path $PSScriptRoot 'mainframe.config.json'),
-            (Join-Path (Get-Location) 'mainframe.config.json'),
-            (Join-Path $HOME '.config\mainframe\mainframe.config.json')
-        )
-        foreach ($cfg in $configCandidates) {
-            if (Test-Path -LiteralPath $cfg) {
-                try {
-                    $json = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                    if ($json.ntfyTopic) {
-                        $NtfyTopic = [string]$json.ntfyTopic
-                        break
-                    }
-                } catch {}
-            }
-        }
-    }
-    if (-not $NtfyTopic) {
-        $NtfyTopic = 'fahad-vault-restore'
+        $NtfyTopic = Get-VaultNtfyTopic
     }
 
     $rsa = [System.Security.Cryptography.RSA]::Create(2048)
@@ -397,7 +454,7 @@ function Get-VaultMasterPassword {
         $opened = Open-VaultApprovalOnPhone -Url $url
 
         Write-Host "waiting for 1-tap fingerprint approval on phone (or ~/Downloads/mainframe-vault-pass.enc) ..." -ForegroundColor Yellow
-        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc
+        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc -Rsa $rsa
 
         if ($ct -eq '__SESSION_ALREADY_UNLOCKED__') {
             $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code
@@ -420,10 +477,12 @@ function Get-VaultMasterPassword {
 
 Export-ModuleMember -Function `
     Get-CallerIdentity, `
+    Get-VaultNtfyTopic, `
     Get-VaultApprovalUrl, `
     Send-VaultApprovalNotification, `
     Send-VaultRequestExpired, `
     Open-VaultApprovalOnPhone, `
+    Test-VaultApprovalCiphertext, `
     Wait-VaultApprovalCiphertext, `
     Decrypt-VaultApprovalCiphertext, `
     Get-VaultMasterPassword
