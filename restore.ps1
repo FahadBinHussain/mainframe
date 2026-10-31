@@ -13,6 +13,8 @@ param(
     [string]$DownloadsRoot = "$env:USERPROFILE\Downloads"
 )
 
+$AutomataPrivateDir = Join-Path $DownloadsRoot 'automata-private'
+
 $ErrorActionPreference = 'Stop'
 # Native commands (uv, pip, etc.) that write to stderr (e.g. "already
 # installed") would otherwise become terminating errors under Stop and abort
@@ -41,7 +43,7 @@ if (-not $BackupRoot) {
 }
 
 if (-not $Mode) {
-    $modeChoice = Read-Host 'Select restore mode: (F)ull restore, or (Q)uick (Edge + opencode + mainframe secrets) [F]'
+    $modeChoice = Read-Host 'Select restore mode: (F)ull restore, or (Q)uick (Edge + opencode + mainframe secrets + automata-private) [F]'
     $Mode = if ($modeChoice -match '^[Qq]') { 'quick' } else { 'full' }
     Write-Host "Mode selected: $Mode"
 }
@@ -182,6 +184,23 @@ function Invoke-Native {
         return $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $savedEap
+    }
+}
+
+# private repo holding the ditto/alist/opencode patchers; both restore modes
+# need it. a failed clone/pull throws - continuing would ship unpatched
+# binaries without saying so.
+function Sync-AutomataPrivateRepo {
+    $repo = $CloneRepos['automata-private']
+    if (Test-Path -LiteralPath $AutomataPrivateDir) {
+        Write-Host "automata-private repo already exists at $AutomataPrivateDir, pulling latest"
+        $code = Invoke-Native git -C $AutomataPrivateDir pull --ff-only
+    } else {
+        Write-Host "Cloning $repo to $AutomataPrivateDir"
+        $code = Invoke-Native git clone $repo $AutomataPrivateDir
+    }
+    if ($code -ne 0) {
+        throw "automata-private sync failed (git exit $code) at $AutomataPrivateDir. quick and full restore both need its ditto/alist/opencode patchers; fix git auth for $repo and re-run."
     }
 }
 
@@ -906,8 +925,7 @@ function Rebuild-DittoFork {
     # shared by quick + full: a scoop install writes the official 3.25.113.0
     # binary, the fork build puts back the user's merged-but-unreleased
     # starred-clips PRs. Called right after Ditto is installed in either route.
-    $automataPrivate = Join-Path $env:USERPROFILE 'Downloads\automata-private'
-    $dittoPatcher = Join-Path $automataPrivate 'github.com\sabrogden\Ditto\ditto-fork-build.ps1'
+    $dittoPatcher = Join-Path $AutomataPrivateDir 'github.com\sabrogden\Ditto\ditto-fork-build.ps1'
     if (Test-Path -LiteralPath $dittoPatcher) {
         Write-Host 'Re-building Ditto from fork (starred-clips PRs)...'
         & pwsh -NoProfile -File $dittoPatcher 2>&1 | Write-Host
@@ -979,7 +997,7 @@ function Restore-FlameshotSettings {
     }
 }
 
-$totalSteps = if ($Mode -eq 'quick') { 7 } else { 16 }
+$totalSteps = if ($Mode -eq 'quick') { 8 } else { 16 }
 $currentStep = 0
 
 function Update-Step {
@@ -1025,6 +1043,9 @@ if ($Mode -eq 'quick') {
     Update-Step 'Installing opencode2 (v2)'
     Install-OpencodePinned
 
+    Update-Step 'Syncing automata-private repo'
+    Sync-AutomataPrivateRepo
+
     Update-Step 'Installing Ditto (settings + fork build)'
     Install-DittoQuick
     Rebuild-DittoFork
@@ -1034,7 +1055,7 @@ if ($Mode -eq 'quick') {
     Restore-FlameshotSettings
 
     Write-Progress -Activity 'Restoring mainframe' -Completed
-    Write-Host 'Quick restore complete: Edge profile, opencode v2 config, mainframe secrets, Agent instructions and skills, opencode2 (v2), Ditto and Flameshot installed.'
+    Write-Host 'Quick restore complete: Edge profile, opencode v2 config, mainframe secrets, Agent instructions and skills, opencode2 (v2), automata-private checkout, Ditto and Flameshot installed.'
     return
 }
 
@@ -1345,15 +1366,7 @@ if (-not (Test-Path -LiteralPath $mainframeDest)) {
     Invoke-Native git -C $mainframeDest pull --ff-only
 }
 
-$automataRepo = $CloneRepos['automata-private']
-$automataDest = Join-Path $DownloadsRoot 'automata-private'
-if (-not (Test-Path -LiteralPath $automataDest)) {
-    Write-Host "Cloning $automataRepo to $automataDest"
-    Invoke-Native git clone $automataRepo $automataDest
-} else {
-    Write-Host "automata-private repo already exists at $automataDest, pulling latest"
-    Invoke-Native git -C $automataDest pull --ff-only
-}
+Sync-AutomataPrivateRepo
 
 Import-AppRegistryFile -AppName 'python' -RelativePath 'install-pep-514.reg'
 Import-AppRegistryFile -AppName '7zip' -RelativePath 'install-context.reg'
@@ -1561,9 +1574,10 @@ if (-not $wingetCmd) {
 # - opencode v1 fork ONLY: bash pipe hang fix #44601. we run opencode2 now (see the
 #   guard below) - that patcher builds v1, so applying it to a v2 install would
 #   overwrite v2 with a binary that cannot read the restored config.
-# All patchers live in automata-private; skip quietly if absent (backup may not include automata-private).
+# All patchers live in automata-private; Sync-AutomataPrivateRepo above has already made
+# the checkout a hard requirement, so only an individual missing patcher warns here.
 Update-Step 'Re-applying local binary patches (alist, ditto, opencode v1 fork)'
-$automataPrivate = Join-Path $env:USERPROFILE 'Downloads\automata-private'
+$automataPrivate = $AutomataPrivateDir
 $alistPatcher = Join-Path $automataPrivate 'github.com\AlistGo\alist\alist-terabox-patcher.ps1'
 if (Test-Path -LiteralPath $alistPatcher) {
     Write-Host 'Re-applying AList terabox patch...'

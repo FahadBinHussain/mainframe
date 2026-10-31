@@ -401,7 +401,7 @@ $secretsPassword = $Matches[1]
 # --- 4. restore mode choice (before download - Q skips the persist zip) ---
 Step 'restore mode'
 Write-Host '[F]ull = everything (~30min: bulk apps, pnpm/uv, winget, tasks, patches)'
-Write-Host '[Q]uick = essentials only (~10min: edge profile, opencode, ditto, secrets)'
+Write-Host '[Q]uick = essentials only (~10min: edge profile, opencode, ditto, secrets, automata-private)'
 $mode = 'full'
 $pick = Read-Host 'mode? [F]ull/[Q]uick (default F)'
 if ($pick -match '^(q|quick)$') { $mode = 'quick' }

@@ -1729,6 +1729,10 @@ encrypted copy is what ships either way.
    boot simulations never exercised it — only a full-mode restore does. fixed: real owner in both
    clone URLs, key/dest/patcher root renamed to `automata-private`, and every doc/error-message
    path renamed with them (verified: `automata(?![A-Za-z\-])` returns 0 hits repo-wide).
+   **2026-10-31**: quick mode now syncs automata-private too, before the Ditto fork rebuild so
+   the patcher exists. both modes share `Sync-AutomataPrivateRepo`, which THROWS on clone/pull
+   failure - the old inline full-mode clone ignored `$LASTEXITCODE`, so a missing private repo
+   only showed up later as "patcher not found" warnings while restore still reported success.
 
 **visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
 runs silent. it now hands visibility to an on-demand interactive task:
