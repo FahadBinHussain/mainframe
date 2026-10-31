@@ -1162,6 +1162,80 @@ in notes) + `terabox.com[2]`).
 - gotcha: `$home` is a read-only built-in in PowerShell — naming a local variable that
   throws "Cannot overwrite variable Home" at runtime; use `$homeResp`. (hit during dev)
 
+## minimax code: device-code multi-account, keyed by a stated email (helper added 2026-10-31)
+
+`minimax-account.ps1`. MiniMax Code (the desktop app) + its `mcode-tools` CLI
+share ONE credential per data dir, in plaintext:
+`%USERPROFILE%\.minimax\auth\<buildEnv>\<region>\<clientId>` holds `auth.json`
+(records keyed by a hash) and `auth-state.json` (the generation counter + status).
+The app re-reads them every 250 ms, so swapping the pair IS the switch -- no
+restart, no keychain, no api call. Signed-in means `status === 'authenticated'`
+AND a record exists AND `record.generation === state.generation`.
+
+contract verbs as usual (`login harvest use refresh run list current status
+status-all path env forget logout`, `-Json` everywhere), validated by
+`account-contract.ps1` (PASS), plus `status-all -Json` for `automata-private\monitor`.
+
+- **this is the one helper whose profiles live in `%APPDATA%\mainframe\accounts\<tool>`
+  instead of the vault, on purpose.** MiniMax ROTATES the refresh token on every
+  renewal, so a vault copy goes stale within minutes -- and installing a stale
+  chain does not fail quietly, the app itself takes the `invalid_grant` and deletes
+  the credential. The folder is inside the encrypted mainframe secret backup and is
+  rewritten after each refresh, so the chain head is never more than one write away.
+- **`status-all` is not read-only: it re-banks.** The live app holds the newest
+  token for whichever account is signed in, so `status-all` copies that head back
+  into the owning profile and reports `rebankedProfile`. Without it every profile
+  drifts into `grant-dead` within a day of being switched away from. A `grant-dead`
+  row offers only a new sign-in, never "switch".
+- **⚠️ MiniMax reports NO email for a google-bound account.** Verified 2026-10-31:
+  `GET /v1/api/user/info` answers `email: ""` (also `phone` opaque; only
+  `userID`/`realUserID` are stable ids), `/matrix/api/v1/user/profile` answers
+  `"email":""`, `.well-known/openid-configuration` and
+  `.well-known/oauth-authorization-server` are both 404 (no oidc, and the
+  `agent.default` device scope therefore carries no `id_token`), and nothing is
+  cached locally -- `minimax-agent-config.json` `.sharedUser` and the app's Local
+  Storage leveldb hold only `{userID, realUserID, userName, subUserName}`.
+- **so `login` and `harvest` take the email as an argument, and the helper never
+  infers one.** The identity that DOES come back is `userName`/`subUserName` -- a
+  nickname the user types, which for exactly this reason once looked like an email
+  and banked a real account under the wrong address. Do not scrape addresses out of
+  display names: two accounts merge the first time someone names them alike, and
+  the pool then switches to a different person than the label promises. The stated
+  address is stored as `emailSource: stated` (`minimax` when the api itself names
+  an account, `matched-credential` when the live token matched a folder the pool
+  already had) and a re-bank never downgrades it, because who named the key is an
+  origin fact.
+- **`realUserID` is the anchor.** `Test-IdentityAnchorTaken` refuses to bank an
+  account whose `realUserID` already lives under another email and says which one,
+  so a stated typo cannot quietly create a second profile for one quota bucket.
+- **ask for the email BEFORE the device code exists.** `login` requires it up
+  front: after a human has approved a code, throwing for a missing name would burn
+  a grant that cannot be re-asked. If MiniMax does name the account and it is not
+  the stated one, nothing is saved and the mismatch is printed -- the approval went
+  to a different person than the label.
+- **the pre-login bank failure must reach the human before they approve.** `login`
+  banks the outgoing sign-in first; when that cannot be named (an account the pool
+  does not know), the `waiting` phase message and the result's `bankError` say so
+  loudly, because approving replaces that account's chain and only a fresh sign-in
+  brings it back.
+- identity signing for `/v1/api/user/info` (the only way to ask whose token this
+  is): `yy = md5(encodedPath + '_{}' + md5(nowMs) + 'ooui')`,
+  `x-signature = md5(yy + '<the app ships this salt in its renderer bundle>')`,
+  sent with the app's own client `mcode-public`, audience `agent-backend`,
+  region `en`, buildEnv `prod`.
+- every write goes through the app's own lock (`auth.lock` as a DIRECTORY with an
+  `update` marker inside, proper-lockfile semantics: stale 30 s, 5-250 ms backoff
+  factor 1.15) and is re-read afterwards to prove the switch landed, with the
+  credential written BEFORE the state file. a switch either happened or says why
+  not; `appPickedUp: false` is a fault the caller shows.
+- `Start-Process $url` from the helper does not reliably surface a tab when the
+  process was spawned by another service, so the approval url and user code are
+  also printed and handed to the caller (the monitor panel renders the code and an
+  explicit link) rather than assuming a browser opened.
+- consumer: `automata-private\monitor` minimax tab (`apps/api/src/minimax.ts` +
+  `MinimaxAccounts.tsx`), which shells here for everything and keeps no token
+  logic of its own.
+
 ## edge: cross-machine extension restore (forcelist + registry external loader)
 
 **the problem**: Edge 151+ validates store-extension install signatures against the machine ID (`install_signer.cc` `HashWithMachineId` via RLZ). a profile restored on a DIFFERENT pc fails that check, and Edge silently removes every `location=1` store extension from `Secure Preferences` on first launch (measured 53 enabled -> 24, same on every attempt). extension FILES on disk survive (`Default\Extensions` still has 29 dirs) but the settings entries are wiped, so the extensions are gone. file-level fixes that do NOT work (all verified on the desktop): stripping `install_signature`/`microsoft_install_signature` from `Preferences`, stripping per-extension `installation_signature` from `Secure Preferences`, wiping `extensions.settings` entirely, setting `location=4`, deleting `Local State`, deleting `_metadata/verified_contents.json`, `icacls /reset`. the stored signature can never verify on another machine because the RLZ machine id differs.
