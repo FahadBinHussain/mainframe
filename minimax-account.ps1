@@ -1329,7 +1329,7 @@ function Invoke-Harvest {
     }
     if (-not $email) {
         $why = if ($identityError) { "and the profile lookup could not name it either -- $identityError" } else { "and MiniMax reports no account email for it (its display name is just a nickname: '$($identity['userName'])')" }
-        throw "this sign-in matches no stored profile $why. profiles are keyed by email, so pass the address you signed in as: .\minimax-account.ps1 harvest you@example.com"
+        throw "this sign-in matches no stored profile $why. profiles are keyed by email, so pass the address you signed in as: .\minimax-account.ps1 harvest you@example.com -- in the monitor's minimax tab that is the email field + 'name this sign-in'."
     }
 
     $clash = Test-IdentityAnchorTaken -RealUserID $(if ($identity) { $identity['realUserID'] } else { $null }) -Email $email
@@ -1406,6 +1406,13 @@ function Invoke-Use {
         try {
             [void](Invoke-Harvest -Profile $liveOwner -Quiet)
         } catch {
+            if (-not $liveOwner) {
+                # nobody owns the live sign-in, so this is the ONLY copy of that
+                # chain: switching away spends its refresh token and the account
+                # comes back only through a new browser sign-in. naming it is one
+                # argument, so refuse instead of trading it for this switch.
+                throw "$($_.Exception.Message) -- switch refused: the sign-in MiniMax Code is holding is not banked under any profile, and switching away spends its refresh chain for good. give it the address you signed in as (.\minimax-account.ps1 harvest <email>, or the monitor's 'name this sign-in' button), or discard it with .\minimax-account.ps1 logout -- then switch."
+            }
             $banked = $false
             $bankNote = $_.Exception.Message
             Write-Host "could not bank the live sign-in before switching: $bankNote" -ForegroundColor Yellow
@@ -1609,7 +1616,7 @@ function Invoke-Login {
         # app's own files, which is exactly what harvest reads -- naming it is one
         # command, and until then the caller (the monitor panel) keeps asking.
         $installed = Install-LiveCredential -Credential $credential -ExistingGeneration ([long]$live.Generation)
-        $unnamed = "signed in as '$($identity['userName'])' (realUserID $($identity['realUserID'])) but NOTHING was banked: this account has no email yet, so its refresh chain lives only in MiniMax Code. name it now: .\minimax-account.ps1 harvest you@example.com"
+        $unnamed = "signed in as '$($identity['userName'])' (realUserID $($identity['realUserID'])) but NOTHING was banked: this account has no email yet, so its refresh chain lives only in MiniMax Code. name it now: .\minimax-account.ps1 harvest <the address you approved>, which in the monitor's minimax tab is the field + 'name this sign-in' button. until it is named, switching away from it spends this chain for good."
         Write-LoginPhase -Phase 'needs-name' -Message $unnamed -Code ([string]$authorization['UserCode']) -Url $url
         $result = @{}
         $result['ok'] = $true
