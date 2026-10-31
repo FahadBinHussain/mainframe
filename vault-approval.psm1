@@ -275,6 +275,9 @@ function Send-VaultApprovalNotification {
             'Tags'    = 'lock,key'
             'Click'   = $Url
             'Actions' = "view, $actionTitle, $Url, clear=true"
+            # explicit text/plain: a relay in front of ntfy must be able to
+            # read the body back byte for byte.
+            'Content-Type' = 'text/plain; charset=utf-8'
         }
         $bodyParts = @("Request from $HostName")
         if ($Agent) { $bodyParts += "Agent: $Agent" }
@@ -315,6 +318,7 @@ function Send-VaultRequestExpired {
             'Title'    = 'Vault Request Expired'
             'Priority' = 'low'
             'Tags'     = 'hourglass'
+            'Content-Type' = 'text/plain; charset=utf-8'
         }
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $null = Invoke-RestMethod -Uri "$resolvedServer/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
@@ -394,9 +398,10 @@ function Wait-VaultApprovalCiphertext {
     $downloadPath = Join-Path $HOME "Downloads\$LocalFileName"
     $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $pollDelay = 2
 
     while ([DateTime]::UtcNow -lt $deadline) {
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds $pollDelay
 
         # 1. Check if another agent completed the unlock while we were waiting
         if ($StartTimeUtc -ne [DateTime]::MinValue -and (Test-Path -LiteralPath $sessionFile)) {
@@ -428,8 +433,20 @@ function Wait-VaultApprovalCiphertext {
                     return $cipherLines[-1]
                 }
             }
+            $pollDelay = 2
         } catch {
-            # timeout/no message yet
+            # ntfy rate-limits per ip. polling every 2 seconds on top of
+            # another pending approval is enough to trip it, and a tripped
+            # limit also eats the *push* - the phone then never hears about
+            # the request at all. back off hard.
+            $status = $null
+            if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
+            if ($status -eq 429) {
+                $pollDelay = 30
+                Write-Warning "relay rate limit hit (429) - backing off to $pollDelay seconds"
+            } else {
+                $pollDelay = [Math]::Min($pollDelay * 2, 30)
+            }
         }
 
         # 3. Check local file
@@ -510,6 +527,11 @@ function Get-VaultMasterPassword {
             $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel -Server $resolvedServer
             if ($sent) {
                 Write-Host "push notification sent to ntfy topic: $NtfyTopic" -ForegroundColor Green
+            } else {
+                # rule 8: no silent degradation. without the push the phone
+                # never hears about this request, so waiting would burn the
+                # whole timeout and fail for a reason nobody was told about.
+                throw "phone approval push failed, so the phone was never notified. the request was NOT sent to the relay at $resolvedServer. check the relay (a 429 here means the ntfy rate limit is tripped - another pending approval polling every 2s is usually the cause). no approval can arrive now."
             }
         }
 

@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -254,6 +255,25 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
 
         req = mock_urlopen.call_args[0][0]
         self.assertEqual(req.full_url, "https://relay.example/ntfy/mf-vault-test999/raw?poll=1")
+
+    @patch("subprocess.run")
+    @patch("urllib.request.urlopen")
+    def test_wait_for_tab_password_backs_off_on_rate_limit(self, mock_urlopen, mock_subproc):
+        # ntfy rate-limits per ip. polling every 2s on top of another pending
+        # approval trips it, and a tripped limit also eats the push - so the
+        # poll has to back off hard instead of hammering.
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://ntfy.sh/topic/raw?poll=1", 429, "Too Many Requests", {}, None)
+
+        priv_key = self.root / "vault-tab.key"
+        priv_key.write_text("dummy key")
+
+        sleeps = []
+        with patch("time.sleep", side_effect=lambda s: sleeps.append(s)):
+            with patch.object(lr, "TAB_WAIT_SECONDS", 1):
+                with self.assertRaises(RuntimeError):
+                    lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
+        self.assertIn(30, sleeps, "a 429 must back the poll off to 30s")
 
     @patch("subprocess.run")
     @patch("urllib.request.urlopen")
