@@ -1270,6 +1270,73 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   `MinimaxAccounts.tsx`), which shells here for everything and keeps no token
   logic of its own.
 
+## adcode: one Firebase identity per data dir, restart-is-the-switch (helper added 2026-10-31)
+
+`adcode-account.ps1`. ADCode (the Electron IDE, v2.4.0) keeps ONE Firebase
+identity per data dir at
+`%APPDATA%\@adcode\desktop\ads\ads\identity.json` = `{uid, refreshToken}`, and it
+reads that file ONCE per launch -- the idToken is minted in memory and the file
+is rewritten only when the app itself refreshes. So unlike minimax, swapping the
+file under a running app does nothing: `use` closes ADCode, banks the outgoing
+account, installs the target's files and relaunches it. The restart IS the
+switch.
+
+contract verbs as usual (`login harvest use refresh open run list current status
+status-all path env forget logout`, `-Json` everywhere), validated by
+`account-contract.ps1` (PASS).
+
+- **the account is SIX files, not one.** each profile mirrors the live data dir's
+  account-scoped set: `ads\ads\identity.json`, `ads\ads\receipts.json`,
+  `referrals.json`, `milestones.json`, `activity-queue.json`, `ai-usage.json`.
+  receipts/referrals/credits are per-account state, so copying only the identity
+  would hand the next account the previous one's usage. editor state
+  (`storage.json`, window layout, recent files) is machine-level and stays
+  shared. profile folders live at `%APPDATA%\mainframe\accounts\adcode\<email>\`.
+- **email comes from Firebase, never from the app bundle.** the helper refreshes
+  the stored token at `https://securetoken.googleapis.com/v1/token` (snake_case
+  `id_token` / `refresh_token` / `user_id` / `expires_in`) and then calls
+  `https://identitytoolkit.googleapis.com/v1/accounts:lookup` (camelCase
+  `email` / `displayName` / `providerUserInfo`) with the public client API key the
+  app itself ships (`$defaultFirebaseApiKey`). `TOKEN_EXPIRED`,
+  `INVALID_REFRESH_TOKEN`, `USER_NOT_FOUND` and `INVALID_GRANT` mark the chain
+  `grant-dead`; the row then only offers a new sign-in.
+- **⚠️ a fresh ADCode install is ANONYMOUS.** verified 2026-10-31: lookup returns
+  no email, no displayName and no providers -- it is a Firebase anonymous
+  account. `harvest` refuses to bank it (no address to key a profile by) and
+  `use` refuses to switch away from it (the chain has no second copy, so the
+  swap would destroy it). Both refusals name the fix: link Google/GitHub/email
+  inside ADCode's account menu first. This is global rule 16 enforced end to
+  end -- no uid, nickname, or provider label is ever promoted to a profile key.
+- **there is no device-code flow in ADCode's bundle**, so `login`/`harvest` only
+  bank an identity the app already holds. The add/switch flow is `open` (start
+  the IDE with the data dir) -> the human signs in inside it -> `harvest`. The
+  monitor's `POST /api/adcode/open` and `harvest` are exactly those two verbs.
+- **`status-all` re-banks the live head on every read** (`rebankedProfile`):
+  the app refreshes the token itself while it runs, so the stored copy in the
+  owning profile would otherwise lag. A profile whose token Firebase refuses is
+  `grant-dead`, never offered for switching.
+- **`refresh` refuses the live chain while the app is running** -- the app owns
+  it and renews on demand; closing ADCode first is the documented way to renew
+  from the helper. A successful refresh that receives a new refresh token writes
+  it into the live identity only when the file still holds the spent one.
+- **`use` proves the target before it breaks the source.** it verifies the
+  target profile's uid anchor (`profile.json` vs `identity.json`) and refreshes
+  the target chain BEFORE closing the IDE; a dead target is a refusal with the
+  app still open. Then close -> bank outgoing -> install six files -> relaunch,
+  and `launchError` is reported separately so "files swapped but the IDE did not
+  come back" is visible, not a green row.
+- **switching is announced, not silent.** `use` reports `appRunning`,
+  `appLaunched`, `launchError` and `liveUpdated`; `started` process is tracked by
+  command line (`--user-data-dir=`), not by image name, because the user may run
+  more than one copy.
+- consumer: `automata-private\monitor`, the `accounts pool > adcode` sub tab
+  (`apps/api/src/adcode.ts` + `AdcodeAccounts.tsx`), which shells here for every
+  verdict and keeps no Firebase logic of its own. no `SECTION_ADCODE_STATE`:
+  there is no device phase to share.
+- live 2026-10-31: helper on PATH-checked status-all -- 0 profiles, app running
+  (1 window), live identity anonymous (key `ea804765d86d`), and a harvest probe
+  refused without mutating the live token (fingerprint unchanged afterwards).
+
 ## edge: cross-machine extension restore (forcelist + registry external loader)
 
 **the problem**: Edge 151+ validates store-extension install signatures against the machine ID (`install_signer.cc` `HashWithMachineId` via RLZ). a profile restored on a DIFFERENT pc fails that check, and Edge silently removes every `location=1` store extension from `Secure Preferences` on first launch (measured 53 enabled -> 24, same on every attempt). extension FILES on disk survive (`Default\Extensions` still has 29 dirs) but the settings entries are wiped, so the extensions are gone. file-level fixes that do NOT work (all verified on the desktop): stripping `install_signature`/`microsoft_install_signature` from `Preferences`, stripping per-extension `installation_signature` from `Secure Preferences`, wiping `extensions.settings` entirely, setting `location=4`, deleting `Local State`, deleting `_metadata/verified_contents.json`, `icacls /reset`. the stored signature can never verify on another machine because the RLZ machine id differs.
