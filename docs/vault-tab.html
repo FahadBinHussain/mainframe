@@ -393,7 +393,11 @@ function show(text, type='') {
 // without this the page happily announced "approved" for requests nobody was
 // listening to any more.
 
-const NTFY_BASE = 'https://ntfy.sh';
+// The relay the runner reads from. Defaults to ntfy.sh; a runner whose egress
+// proxy denies ntfy.sh passes `srv=<relay base>` in the link fragment and the
+// card posts the ciphertext back through that relay instead. The phone side
+// keeps using the same ntfy app either way.
+let NTFY_BASE = 'https://ntfy.sh';
 const REQUEST = { expiresAt: null, sid: null, host: null, stale: false, timer: null, markerTimer: null, relayDown: false };
 
 function fmtLeft(ms) {
@@ -526,11 +530,13 @@ function getParams() {
   const model = params.get('model') || (hash.match(/(?:^|&)model=([^&]+)/) || [])[1];
   const expRaw = params.get('exp') || (hash.match(/(?:^|&)exp=([0-9]+)/) || [])[1];
   const exp = expRaw ? Number(expRaw) : null;
+  const srv = params.get('srv') || (hash.match(/(?:^|&)srv=([^&]+)/) || [])[1];
   return {
     k,
     sid,
     code,
     exp: Number.isFinite(exp) && exp > 0 ? exp : null,
+    srv: srv ? decodeURIComponent(srv).replace(/\/+$/, '') : null,
     host: host ? decodeURIComponent(host) : null,
     ctx: ctx ? decodeURIComponent(ctx) : null,
     agent: agent ? decodeURIComponent(agent) : null,
@@ -586,7 +592,7 @@ async function transmitCiphertext(b64, sid) {
 
   if (sid) {
     show('Transmitting encrypted password via relay...', 'waiting');
-    const res = await fetch(`https://ntfy.sh/${encodeURIComponent(sid)}`, {
+    const res = await fetch(`${NTFY_BASE}/${encodeURIComponent(sid)}`, {
       method: 'POST',
       headers: { 'Title': 'Vault Ciphertext' },
       body: b64
@@ -688,7 +694,10 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
-  const { k, sid, code, exp, host, ctx, agent, model } = getParams();
+  const { k, sid, code, exp, srv, host, ctx, agent, model } = getParams();
+  if (srv) {
+    NTFY_BASE = srv;
+  }
   if (!k || k.length < 50) {
     show('Invalid or missing public key in URL link. Request a fresh link from runner.', 'error');
     document.getElementById('icon-container').className = 'icon-wrap error';

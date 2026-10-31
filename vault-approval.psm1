@@ -115,6 +115,32 @@ function Get-CallerIdentity {
     }
 }
 
+function Get-VaultConfigValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    # one config file drives both machines: linux_real.py reads the same keys,
+    # so a windows box and a linux box can be pointed at the same relay and
+    # the same approval page without touching code.
+    $configCandidates = @(
+        (Join-Path $PSScriptRoot 'mainframe.config.json'),
+        (Join-Path (Get-Location) 'mainframe.config.json'),
+        (Join-Path $HOME '.config\mainframe\mainframe.config.json')
+    )
+    foreach ($cfg in $configCandidates) {
+        if (Test-Path -LiteralPath $cfg) {
+            try {
+                $json = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $value = $json.$Key
+                if ($value) { return ([string]$value).Trim() }
+            } catch {}
+        }
+    }
+    return $null
+}
+
 function Get-VaultNtfyTopic {
     param(
         [string]$Topic = $null
@@ -125,27 +151,44 @@ function Get-VaultNtfyTopic {
     # fails here instead of broadcasting requests on a public topic.
     if (-not $Topic) { $Topic = $env:MAINFRAME_NTFY_TOPIC }
     if (-not $Topic) {
-        $configCandidates = @(
-            (Join-Path $PSScriptRoot 'mainframe.config.json'),
-            (Join-Path (Get-Location) 'mainframe.config.json'),
-            (Join-Path $HOME '.config\mainframe\mainframe.config.json')
-        )
-        foreach ($cfg in $configCandidates) {
-            if (Test-Path -LiteralPath $cfg) {
-                try {
-                    $json = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                    if ($json.ntfyTopic) {
-                        $Topic = ([string]$json.ntfyTopic).Trim()
-                        break
-                    }
-                } catch {}
-            }
-        }
+        $Topic = Get-VaultConfigValue -Key 'ntfyTopic'
     }
     if (-not $Topic) {
-        throw "no ntfy topic configured: set `$env:MAINFRAME_NTFY_TOPIC, or ntfyTopic in mainframe.config.json (looked in: $($configCandidates -join '; ')). Use a long random topic name -- anyone who knows it can read approval requests and post fake ones."
+        throw "no ntfy topic configured: set `$env:MAINFRAME_NTFY_TOPIC, or ntfyTopic in mainframe.config.json. Use a long random topic name -- anyone who knows it can read approval requests and post fake ones."
     }
     return $Topic
+}
+
+function Get-VaultNtfyServer {
+    param(
+        [string]$Server = $null
+    )
+
+    # the relay only has to speak the ntfy http api. a machine whose egress
+    # proxy denies ntfy.sh points this at a reachable ntfy-compatible relay;
+    # the phone keeps using the same ntfy app and the same topic.
+    if (-not $Server) { $Server = $env:MAINFRAME_NTFY_SERVER }
+    if (-not $Server) { $Server = Get-VaultConfigValue -Key 'ntfyServer' }
+    if (-not $Server) { $Server = 'https://ntfy.sh' }
+    return $Server.TrimEnd('/')
+}
+
+function Get-VaultPagesBase {
+    param(
+        [string]$PagesBase = $null,
+        [string]$ToolRepo = 'FahadBinHussain/mainframe'
+    )
+
+    # the approval card is a static file, so any host that serves it works.
+    # a first-party deployment keeps the tap link off a raw github.io path.
+    if (-not $PagesBase) { $PagesBase = $env:MAINFRAME_PAGES_BASE }
+    if (-not $PagesBase) { $PagesBase = Get-VaultConfigValue -Key 'pagesBase' }
+    if (-not $PagesBase) {
+        $owner = ($ToolRepo -split '/')[0]
+        # lowercased so windows and linux emit the exact same approval url
+        $PagesBase = "https://$($owner.ToLower()).github.io/mainframe"
+    }
+    return $PagesBase.TrimEnd('/')
 }
 
 function Get-VaultApprovalUrl {
@@ -159,7 +202,9 @@ function Get-VaultApprovalUrl {
         [string]$Model = $null,
         # how long the runner will keep waiting. landing this in the link lets
         # the phone page say "stale" instead of offering a tap nobody hears.
-        [int]$ExpiresInSeconds = 0
+        [int]$ExpiresInSeconds = 0,
+        [string]$PagesBase = $null,
+        [string]$Server = $null
     )
 
     $identity = Get-CallerIdentity -Agent $Agent -Model $Model
@@ -186,7 +231,15 @@ function Get-VaultApprovalUrl {
     $expParam = if ($ExpiresInSeconds -gt 0) { "&exp=" + [DateTimeOffset]::UtcNow.AddSeconds($ExpiresInSeconds).ToUnixTimeSeconds() } else { "" }
 
     $owner = ($ToolRepo -split '/')[0]
-    $url = "https://$owner.github.io/mainframe/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam$expParam"
+    $resolvedPages = Get-VaultPagesBase -PagesBase $PagesBase -ToolRepo $ToolRepo
+    $resolvedRelay = Get-VaultNtfyServer -Server $Server
+    $url = "$resolvedPages/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam$expParam"
+    if ($resolvedRelay -ne 'https://ntfy.sh') {
+        # the card has to post the ciphertext back to the same relay this
+        # runner reads. without this the page would hardcode ntfy.sh and a
+        # machine behind a relay would never see the approval land.
+        $url += "&srv=$([Uri]::EscapeDataString($resolvedRelay))"
+    }
 
     return [PSCustomObject]@{
         Url   = $url
@@ -207,9 +260,11 @@ function Send-VaultApprovalNotification {
         [string]$Code = $null,
         [string]$PromptContext = "vault access",
         [string]$Agent = $null,
-        [string]$Model = $null
+        [string]$Model = $null,
+        [string]$Server = $null
     )
 
+    $resolvedServer = Get-VaultNtfyServer -Server $Server
     try {
         $callerTag = if ($Agent) { "$HostName - $Agent" } else { $HostName }
         $title = if ($Code) { "Vault Unlock: Code [$Code] ($callerTag)" } else { "Vault Unlock ($callerTag)" }
@@ -229,7 +284,7 @@ function Send-VaultApprovalNotification {
         $bodyParts += "Tap to verify matching number on terminal and approve."
         $body = $bodyParts -join "`n"
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-        $null = Invoke-RestMethod -Uri "https://ntfy.sh/$Topic" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
+        $null = Invoke-RestMethod -Uri "$resolvedServer/$Topic" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
     } catch {
         Write-Warning "ntfy push dispatch to topic '$Topic' failed: $_"
@@ -242,9 +297,11 @@ function Send-VaultRequestExpired {
         [Parameter(Mandatory = $true)]
         [string]$Sid,
         [string]$HostName = $env:COMPUTERNAME,
-        [string]$Code = $null
+        [string]$Code = $null,
+        [string]$Server = $null
     )
 
+    $resolvedServer = Get-VaultNtfyServer -Server $Server
     # the runner stopped waiting, so the card must stop offering a tap nobody
     # hears. the marker rides the same single-use topic the card already polls.
     try {
@@ -260,7 +317,7 @@ function Send-VaultRequestExpired {
             'Tags'     = 'hourglass'
         }
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-        $null = Invoke-RestMethod -Uri "https://ntfy.sh/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
+        $null = Invoke-RestMethod -Uri "$resolvedServer/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
     } catch {
         Write-Warning "could not publish the expired marker to '$Sid': $_"
@@ -329,9 +386,11 @@ function Wait-VaultApprovalCiphertext {
         [int]$TimeoutSeconds = 300,
         [string]$LocalFileName = 'mainframe-vault-pass.enc',
         [DateTime]$StartTimeUtc = [DateTime]::MinValue,
-        [System.Security.Cryptography.RSA]$Rsa = $null
+        [System.Security.Cryptography.RSA]$Rsa = $null,
+        [string]$Server = $null
     )
 
+    $resolvedServer = Get-VaultNtfyServer -Server $Server
     $downloadPath = Join-Path $HOME "Downloads\$LocalFileName"
     $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -353,7 +412,7 @@ function Wait-VaultApprovalCiphertext {
             # an expired marker into something no regex can recognise. the
             # webrequest content stays text, so markers and ciphertext look
             # the way they were posted.
-            $resp = Invoke-WebRequest -Uri "https://ntfy.sh/$Sid/raw?poll=1" -Method Get -TimeoutSec 5 -ErrorAction Stop
+            $resp = Invoke-WebRequest -Uri "$resolvedServer/$Sid/raw?poll=1" -Method Get -TimeoutSec 5 -ErrorAction Stop
             $body = [string]$resp.Content
             if ($body) {
                 # raw returns every message on the topic, newline separated.
@@ -416,17 +475,20 @@ function Get-VaultMasterPassword {
         [string]$Agent = $null,
         [string]$Model = $null,
         [string]$HostName = $env:COMPUTERNAME,
-        [DateTime]$StartTimeUtc = [DateTime]::MinValue
+        [DateTime]$StartTimeUtc = [DateTime]::MinValue,
+        [string]$Server = $null,
+        [string]$PagesBase = $null
     )
 
     # Resolve ntfy topic
     if (-not $NtfyTopic) {
         $NtfyTopic = Get-VaultNtfyTopic
     }
+    $resolvedServer = Get-VaultNtfyServer -Server $Server
 
     $rsa = [System.Security.Cryptography.RSA]::Create(2048)
     try {
-        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext -HostName $HostName -Agent $Agent -Model $Model -ExpiresInSeconds $TimeoutSeconds
+        $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext -HostName $HostName -Agent $Agent -Model $Model -ExpiresInSeconds $TimeoutSeconds -Server $resolvedServer -PagesBase $PagesBase
         $url = $session.Url
         $sid = $session.Sid
         $code = $session.Code
@@ -445,7 +507,7 @@ function Get-VaultMasterPassword {
         Write-Host "approval url: $url" -ForegroundColor Gray
 
         if ($NtfyTopic) {
-            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel
+            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel -Server $resolvedServer
             if ($sent) {
                 Write-Host "push notification sent to ntfy topic: $NtfyTopic" -ForegroundColor Green
             }
@@ -454,10 +516,10 @@ function Get-VaultMasterPassword {
         $opened = Open-VaultApprovalOnPhone -Url $url
 
         Write-Host "waiting for 1-tap fingerprint approval on phone (or ~/Downloads/mainframe-vault-pass.enc) ..." -ForegroundColor Yellow
-        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc -Rsa $rsa
+        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc -Rsa $rsa -Server $resolvedServer
 
         if ($ct -eq '__SESSION_ALREADY_UNLOCKED__') {
-            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code
+            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer
             return '__SESSION_ALREADY_UNLOCKED__'
         }
 
@@ -466,7 +528,7 @@ function Get-VaultMasterPassword {
             Write-Host "password decrypted successfully via 1-tap biometric approval" -ForegroundColor Green
             return $pw
         } else {
-            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code
+            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer
             Write-Warning "phone approval timed out after $TimeoutSeconds seconds."
             return $null
         }
@@ -477,7 +539,10 @@ function Get-VaultMasterPassword {
 
 Export-ModuleMember -Function `
     Get-CallerIdentity, `
+    Get-VaultConfigValue, `
     Get-VaultNtfyTopic, `
+    Get-VaultNtfyServer, `
+    Get-VaultPagesBase, `
     Get-VaultApprovalUrl, `
     Send-VaultApprovalNotification, `
     Send-VaultRequestExpired, `

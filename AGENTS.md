@@ -2038,4 +2038,21 @@ and post garbage that killed a live approval.
   parts (`/proc` ancestry, `bw`) are not in it. `raw?poll=1` can come back
   empty for a moment right after a post, so the marker check polls instead of
   reading once (found 2026-10-31).
-
+- **the relay and the approval page are configurable, because a container's
+  egress proxy can deny ntfy.sh outright.** a hosted container whose proxy
+  blocks `ntfy.sh` cannot push the approval request at all, so the phone flow
+  is impossible there -- no config change fixes a host-level deny. so the
+  relay base and the page base moved into config (`ntfyServer`, `pagesBase` in
+  `mainframe.config.json`; `MAINFRAME_NTFY_SERVER` / `MAINFRAME_PAGES_BASE`
+  env; `--ntfy-server` / `--pages-base` on the linux runner). the relay only
+  has to speak the ntfy http api, so a relay of your own in front of ntfy.sh
+  works and the phone keeps the same ntfy app and the same topic. `pagesBase`
+  is any host that serves `docs/vault-tab.html`, so the tap link does not have
+  to be a raw `github.io` path. windows (`vault-approval.psm1`) and linux
+  (`linux_real.py`) read the same config file on purpose: one file, both
+  machines, identical approval url. when the relay is not ntfy.sh the runner
+  adds `srv=<relay>` to the link fragment and `docs/vault-tab.html` posts the
+  ciphertext back through that relay -- without it the page would post to
+  ntfy.sh while the runner polled somewhere else and the approval would land
+  in a topic nobody reads. (found 2026-10-31, while making the muse container
+  match the windows box.)
