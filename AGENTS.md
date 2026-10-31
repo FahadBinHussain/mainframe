@@ -14,7 +14,7 @@ conventions used below:
 every `*-account.ps1` helper implements the same contract (`login`, `use`, `current`, `list`, `status`, `status-all`, `path`, `env`, `run`) plus tool-specific subcommands. `account-contract.ps1` validates the contract across all helpers — run it after adding or editing a helper.
 
 - profiles are keyed by account email only; if email cannot be detected after auth, fail or ask — never save a username/label/workspace fallback.
-- **invoking the helpers on this box (2026-10-10)**: the default powershell execution policy blocks `& <helper>.ps1 ...` with `UnauthorizedAccess` — call them as `pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\<tool>-account.ps1 ...` instead. `run` takes the target tool's raw subcommand args with the binary name OMITTED and an optional `<email>` first: `<helper> run auth status` / `<helper> run <email> repo view <owner>/<repo> --json name,visibility` — passing `gh`/`hf`/etc. as the first arg fails loud with `unknown command "gh" for "gh"` (the helper already invokes the binary). also note `gh auth logout` REFUSES to run while `GH_TOKEN` is in the environment (*"first clear the value from the environment"*, exit 1) — to forget a stored host entry run it with only `GH_CONFIG_DIR` set (`Remove-Item Env:GH_TOKEN` first), then re-check via the helper. fixed a stale invalid `default`-style user entry in the github profile's `hosts.yml` this way on 2026-10-10 — it made `run auth status` exit 1 (*"X Failed to log in ... The token in default is invalid"*) while the GH_TOKEN profile was fine all along.
+- **invoking the helpers on this box (2026-10-10)**: the default powershell execution policy blocks `& <helper>.ps1 ...` with `UnauthorizedAccess` — call them as `pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\<tool>-account.ps1 ...` instead. `run` takes the target tool's raw subcommand args with the binary name OMITTED and an optional `<email>` first: `<helper> run auth status` / `<helper> run <email> repo view <owner>/<repo> --json name,visibility` — passing `gh`/`hf`/etc. as the first arg fails loud with `unknown command "gh" for "gh"` (the helper already invokes the binary). also note `gh auth logout` REFUSES to run while `GH_TOKEN` is in the environment (*"first clear the value from the environment"*, exit 1) — to forget a stored host entry run it with only `GH_CONFIG_DIR` set (`Remove-Item Env:GH_TOKEN` first), then re-check via the helper. fixed a stale invalid `default`-style user entry in the github profile's `hosts.yml` this way on 2026-10-10 — it made `run auth status` exit 1 (*"X Failed to log in ... The token in default is invalid"*) while the GH_TOKEN profile was fine all along. **and run `account-contract.ps1` under pwsh, never `powershell`**: under 5.1 it aborts on `agent-browser-account.ps1` with *"17 error(s)"* (first: `Unexpected token 'usually'`) because these helpers use PS7 syntax, so the alphabetically-earlier file dies before minimax is ever reached and the whole run is meaningless; `[Parser]::ParseFile` agrees — 0 errors under pwsh 7.6, 17 under 5.1.
 - **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata-private\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `publish-backup.ps1` and `github-account.ps1` match that pattern.
 - **github: a bare-handle `login.username` makes a valid token look missing (2026-10-06)**: `Find-VaultItemByEmail` matches `login.username == profile email` first, then falls back to a notes line equal to the email. a `github.com - <handle>` item with `login.username = <handle>` satisfies neither, so `Read-ProfileToken` returns null — `status-all` prints `HasToken=False / TokenStatus=missing` and `run <email> gh ...` fails with *"populate the GH_TOKEN environment variable"* (exit 4) — while the `ghp_` in the notes is perfectly valid. **diagnose first**: read the item and probe the token directly (`Authorization: Bearer <token>` against `api.github.com/user`, check `x-oauth-scopes`) before believing it expired. **fix**: set `login.username` to the profile email. bw 2026.5.0 has no `bw item edit` command and no `--username` flag — use `bw edit item <id> <base64-of-full-item-json>` (get the item, mutate `login.username`, re-encode; posting the whole item back is the only safe form). same class of bug as the huggingface trap below.
 - **vault cache (2026-09-01)**: `vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles. **unwrap gotcha (2026-10-08)**: the function returns the whole 1256-item collection as ONE wrapped object — piping it straight into `Where-Object` runs the predicate ONCE against the array (member-enumerated `.name` contains the needle → truthy → everything passes), so a naive filter silently selects ALL items; a write loop using that pattern clobbered 10 unrelated items' `DATABASE_URL` before being caught (all 10 restored same day from local clones + `vercel env pull`). ALWAYS unwrap first — `$items = @(@(Get-VaultItems)[0])` — and assert the filtered match count is what you expect (usually 1) BEFORE any write.
@@ -1195,29 +1195,41 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   `agent.default` device scope therefore carries no `id_token`), and nothing is
   cached locally -- `minimax-agent-config.json` `.sharedUser` and the app's Local
   Storage leveldb hold only `{userID, realUserID, userName, subUserName}`.
-- **so `login` and `harvest` take the email as an argument, and the helper never
-  infers one.** The identity that DOES come back is `userName`/`subUserName` -- a
-  nickname the user types, which for exactly this reason once looked like an email
-  and banked a real account under the wrong address. Do not scrape addresses out of
-  display names: two accounts merge the first time someone names them alike, and
-  the pool then switches to a different person than the label promises. The stated
-  address is stored as `emailSource: stated` (`minimax` when the api itself names
-  an account, `matched-credential` when the live token matched a folder the pool
+- **ask for the email BEFORE the device code if you can, name it after if you
+  cannot.** `login [email]` takes it up front, which is the better path (the
+  profile exists before any grant does). It is OPTIONAL since 2026-10-31: with no
+  email the sign-in still installs and goes live, but nothing is banked -- the
+  helper writes phase `needs-name`, returns `action: logged-in-unnamed` +
+  `needsName: $true` and says which `userName`/`realUserID` it is, because
+  `harvest <email>` is the only thing that can name it afterwards. A NON-email
+  argument is a typo and throws; it must not be downgraded to an unnamed sign-in,
+  and `login` with a stray label must not burn a device code on a silent fallback.
+  The identity that DOES come back is `userName`/`subUserName` -- a nickname the
+  user types, which for exactly this reason once looked like an email and banked a
+  real account under the wrong address. Do not scrape addresses out of display
+  names: two accounts merge the first time someone names them alike, and the pool
+  then switches to a different person than the label promises. The stated address
+  is stored as `emailSource: stated` (`minimax` when the api itself names an
+  account, `matched-credential` when the live token matched a folder the pool
   already had) and a re-bank never downgrades it, because who named the key is an
-  origin fact.
+  origin fact. If MiniMax DOES name the account (a non-google sign-in) and it is
+  not the stated one, nothing is saved and the mismatch is printed -- the approval
+  went to a different person than the label.
 - **`realUserID` is the anchor.** `Test-IdentityAnchorTaken` refuses to bank an
   account whose `realUserID` already lives under another email and says which one,
   so a stated typo cannot quietly create a second profile for one quota bucket.
-- **ask for the email BEFORE the device code exists.** `login` requires it up
-  front: after a human has approved a code, throwing for a missing name would burn
-  a grant that cannot be re-asked. If MiniMax does name the account and it is not
-  the stated one, nothing is saved and the mismatch is printed -- the approval went
-  to a different person than the label.
 - **the pre-login bank failure must reach the human before they approve.** `login`
   banks the outgoing sign-in first; when that cannot be named (an account the pool
   does not know), the `waiting` phase message and the result's `bankError` say so
   loudly, because approving replaces that account's chain and only a fresh sign-in
   brings it back.
+- **`status-all` answers "who is live" only when the live sign-in has no owner.**
+  for an unmatched, unexpired sign-in it calls `/v1/api/user/info` and reports
+  `displayName` + `realUserID` (and `identityError` when that call fails); for a
+  sign-in a profile already owns, or an expired token, those three are null and the
+  email is the answer. That is what lets the monitor name a sign-in the pool has
+  never seen, without asking MiniMax on every 10 s poll for an account it already
+  knows.
 - identity signing for `/v1/api/user/info` (the only way to ask whose token this
   is): `yy = md5(encodedPath + '_{}' + md5(nowMs) + 'ooui')`,
   `x-signature = md5(yy + '<the app ships this salt in its renderer bundle>')`,
