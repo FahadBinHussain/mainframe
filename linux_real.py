@@ -820,6 +820,21 @@ def clear_cached_session(work_root: Path) -> None:
         pass
 
 
+def prereqs_present() -> list[str]:
+    """Return the prerequisites that are missing ([] when all are there).
+
+    The apt leg used to run on every single invocation, so a container whose
+    package mirror is unreachable sat on apt-get update for two minutes before
+    anything else happened - the windows side does not reinstall what it
+    already has, and neither should this.
+    """
+    missing = [tool for tool in ("git", "curl", "python3", "openssl")
+               if shutil.which(tool) is None]
+    if not Path("/etc/ssl/certs/ca-certificates.crt").is_file():
+        missing.append("ca-certificates")
+    return missing
+
+
 def extract_vault_secrets(items: list) -> tuple[str, str]:
     """Pull (github token, mainframe-production secrets password) out of the items."""
     gh_token = ""
@@ -1624,18 +1639,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # Prereqs (same set as --setup-tools, idempotent).
-    log("installing prerequisites ...")
-    try:
-        # Bounded: a container without working apt sources (or with another
-        # apt holding the lock) otherwise hangs here forever and the vault
-        # leg never runs. A failed prereq is recorded and the flow continues.
-        run(sudo_prefix() + ["apt-get", "update"], timeout=APT_UPDATE_TIMEOUT_SECONDS)
-        run(sudo_prefix() + ["apt-get", "install", "-y", "git", "curl",
-                             "ca-certificates", "python3", "openssl"],
-            timeout=APT_INSTALL_TIMEOUT_SECONDS)
-    except Exception as exc:
-        failures.append(f"prereqs: {exc}")
-        log(f"prereqs FAILED: {exc}")
+    missing = prereqs_present()
+    if not missing:
+        log("prerequisites already present - skipping the apt leg")
+    else:
+        log(f"installing prerequisites (missing: {', '.join(missing)}) ...")
+        try:
+            # Bounded: a container without working apt sources (or with another
+            # apt holding the lock) otherwise hangs here forever and the vault
+            # leg never runs. A failed prereq is recorded and the flow continues.
+            run(sudo_prefix() + ["apt-get", "update"], timeout=APT_UPDATE_TIMEOUT_SECONDS)
+            run(sudo_prefix() + ["apt-get", "install", "-y", "git", "curl",
+                                 "ca-certificates", "python3", "openssl"],
+                timeout=APT_INSTALL_TIMEOUT_SECONDS)
+        except Exception as exc:
+            failures.append(f"prereqs: {exc}")
+            log(f"prereqs FAILED: {exc}")
 
     # Vault + release.
     backup_root = args.backup_root
