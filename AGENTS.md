@@ -2120,3 +2120,14 @@ and post garbage that killed a live approval.
   also: the publish now sends `Content-Type: text/plain; charset=utf-8`
   explicitly, because urllib and `Invoke-RestMethod` would otherwise default to
   a form encoding and a relay in front of ntfy could not read the body back.
+- **the page's fingerprint enrolment is bound to the ORIGIN, not to the topic.**
+  `docs/vault-tab.html` keeps the encrypted master password and the WebAuthn
+  credential in `localStorage`, and `localStorage` is per-origin. the "Approve
+  with Fingerprint" button only renders when `localStorage.getItem('mf_vault_enc')`
+  exists for the origin the page was served from - so moving `pagesBase` to a
+  different host silently downgrades the phone to the manual password form,
+  even though the relay itself is working perfectly. the first approval on a
+  new origin needs the master password typed once, with "Save for 1-tap
+  fingerprint approval" ticked; after that it is 1-tap again on every machine
+  that uses that same `pagesBase`. so: if the phone suddenly asks for the
+  password, it is the origin that moved, not a broken relay.
