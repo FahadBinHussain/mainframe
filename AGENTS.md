@@ -1380,6 +1380,85 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   (1 window), live identity anonymous (key `ea804765d86d`), and a harvest probe
   refused without mutating the live token (fingerprint unchanged afterwards).
 
+## trae: one token file, restart-is-the-switch (helper added 2026-11-01)
+
+`trae-account.ps1`. Trae (the Electron/VS Code fork, shipped 2.3.93439 /
+product.json 1.107.1) keeps the WHOLE signed-in session in ONE file --
+`%USERPROFILE%\.trae\trae-jwt-token`, a 933-byte RS256 JWT (`iss: trae`, 7 day
+life, `data{id,tenant_id,type,user_id}`). Nothing else on the machine holds it:
+the auth object the renderer keeps in memory (`refreshToken` /
+`refreshExpiredAt` / `tokenReleaseAt` / `loginScope`) is never written to disk
+(it only reaches `%APPDATA%\Trae\logs\...\main.log` as a log line) and Trae's
+Local Storage leveldb holds no credential. So a Trae "account" is exactly one
+access token, and `use` closes Trae, writes the target token into the live file
+and relaunches. Trae reads that file ONCE per launch, so the restart IS the
+switch -- the same shape as adcode, not minimax.
+
+contract verbs as usual (`login harvest use refresh open run list current status
+status-all path env forget logout`, `-Json` everywhere), validated by
+`account-contract.ps1` (PASS).
+
+- **the token renews itself with no login.** `GenerateTempToken` (same host as
+  `GetUserInfo`, `POST https://growsg-normal.trae.ai/cloudide/api/v3/trae/...`,
+  header `x-cloudide-token: <current token>`, body
+  `{"IDEVersion":"<installed version>"}`) mints a fresh token for the SAME
+  account from a live one, and the new one can renew itself again. `refresh`
+  uses only that -- no password, no MFA.
+- **email comes from `GetUserInfo`, and only from there.** a pure read (it hands
+  back no token) returning `Result.NonPlainTextEmail` (the plain address despite
+  the name), `Result.UserID`, `Result.ScreenName`, `Result.LastLoginType`,
+  `Result.TenantID`. the uid lives in the token itself (`data.user_id`), which
+  is what makes `status`/`list` work offline and what `use` verifies. A sign-in
+  `GetUserInfo` cannot name is **refused, never filed under a uid or a screen
+  name** (global rule 16, same as minimax `realUserID` / adcode Firebase).
+- **⚠️ a freshly installed Trae is ANONYMOUS.** no address, so `harvest` refuses
+  to bank it and `use` refuses to switch away from it (an unbanked live sign-in
+  has no second copy, so the swap would destroy it). Both refusals name the fix.
+- **there is no device-code flow in Trae**, so `login`/`harvest` only bank a
+  sign-in the IDE already holds. The add/switch flow is `open` (start the IDE)
+  -> the human signs in inside it -> `harvest`. The monitor's
+  `POST /api/trae/open` and `harvest` are exactly those two verbs.
+- **`status-all` re-reads the live head on every call** (`rebankedProfile`) --
+  the app rewrites the token file on its own schedule while it runs, so the
+  stored copy in the owning profile would otherwise lag behind. A token the
+  auth service refuses is `token-dead`, never offered for switching.
+- **`refresh` refuses the live chain while Trae is running** -- the app owns
+  that token and renews it itself; closing Trae first is the documented way to
+  renew from the helper. Renewing a live token with Trae closed also writes the
+  new head into the live file, but only when the file still holds the spent one.
+- **`use` proves the target before it breaks the source.** it re-reads and
+  re-banks the outgoing account, verifies the target profile's uid anchor
+  (`profile.json` vs the token) and renews the target chain BEFORE closing the
+  IDE; a refusal leaves Trae open. Then close -> bank outgoing -> install token
+  -> relaunch, and `launchError` / `appWasRunning` / `liveUpdated` are reported
+  separately so "files swapped but the IDE did not come back" is visible, not a
+  green row. `already-live` is reported without closing anything.
+- **why this is NOT a chat-account switcher.** the hub authenticates requests
+  by the signed-in credential, not by a claimed uid -- a foreign live token
+  answers `1001` and a mismatched pair answers `4015`. Moving the token makes
+  the IDE *be* the other account (its own history, bucket, token file); it does
+  not make one account's existing chat sessions drivable from another. That is
+  the fork route, documented in `automata-private\trae.ai\AGENTS.md`.
+- **`logout` and `forget` are separate.** `logout` clears the LIVE token and
+  refuses while Trae runs (`close Trae first` -- deleting the file under a
+  running app would not sign it out and would lose the newest token). `forget`
+  moves a stored profile aside. profiles live at
+  `%APPDATA%\mainframe\accounts\trae\<email>\` with two files: `token` (one
+  line, no trailing newline) and `profile.json` (uid / email / screen name /
+  provider / expiry, so rows work offline).
+- **switching closes Trae.** if the monitor panel is opened INSIDE Trae (it
+  detects the Electron UA), pressing switch closes the window it is being read
+  in -- the panel says that out loud instead of doing it quietly.
+- consumer: `automata-private\monitor`, the `accounts pool > trae` sub tab
+  (`apps/api/src/trae.ts` + `TraeAccounts.tsx`), which shells here for every
+  verdict and keeps no Trae auth logic of its own. env: `SECTION_TRAE_HELPER`
+  only -- no `SECTION_TRAE_STATE`, there is no device phase to share.
+- live 2026-11-01: one banked profile (active), plus a live sign-in the auth
+  service named (`emailSource: auth`) that was not yet banked, Trae running (1
+  window), ide 2.3.93439, 0 `token-dead`. `check-api.mjs` probes only `status`,
+  POST-only guards and label refusals -- it never fires a real switch, because
+  that would close Trae.
+
 ## edge: cross-machine extension restore (forcelist + registry external loader)
 
 **the problem**: Edge 151+ validates store-extension install signatures against the machine ID (`install_signer.cc` `HashWithMachineId` via RLZ). a profile restored on a DIFFERENT pc fails that check, and Edge silently removes every `location=1` store extension from `Secure Preferences` on first launch (measured 53 enabled -> 24, same on every attempt). extension FILES on disk survive (`Default\Extensions` still has 29 dirs) but the settings entries are wiped, so the extensions are gone. file-level fixes that do NOT work (all verified on the desktop): stripping `install_signature`/`microsoft_install_signature` from `Preferences`, stripping per-extension `installation_signature` from `Secure Preferences`, wiping `extensions.settings` entirely, setting `location=4`, deleting `Local State`, deleting `_metadata/verified_contents.json`, `icacls /reset`. the stored signature can never verify on another machine because the RLZ machine id differs.
