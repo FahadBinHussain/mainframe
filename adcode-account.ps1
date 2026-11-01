@@ -718,6 +718,23 @@ function Get-ActiveProfile {
     return $profile
 }
 
+# When the ACTIVE profile became active. current.json is written at every switch
+# and is the authoritative record for exactly that one profile, so the monitor
+# can tint the live row the same way it tints any other switched-today row even
+# when that account was switched in before this feature existed (its own
+# profile.json then carries no switchedAt).
+function Get-ActiveSwitchedAt {
+    $parsed = Read-JsonFile -Path $currentFile -Label 'current.json'
+    if (-not $parsed -or [string]::IsNullOrWhiteSpace([string]$parsed.switchedAt)) {
+        return $null
+    }
+    try {
+        return [DateTimeOffset]::Parse([string]$parsed.switchedAt).ToUniversalTime().ToString('o').Replace('+00:00', 'Z')
+    } catch {
+        return $null
+    }
+}
+
 function Set-ActiveProfile {
     param([string]$Profile)
 
@@ -838,7 +855,8 @@ function Get-ProfileRow {
     param(
         [string]$Profile,
         [AllowNull()][string]$LiveUid,
-        [AllowNull()][string]$Active
+        [AllowNull()][string]$Active,
+        [AllowNull()][string]$ActiveSwitchedAt
     )
 
     $normalized = Normalize-ProfileName -Profile $Profile
@@ -875,8 +893,13 @@ function Get-ProfileRow {
     $row['savedAt'] = if ($metadata -and $metadata['savedAt']) { $metadata['savedAt'] } else { $null }
     $row['updatedAt'] = if ($metadata -and $metadata['updatedAt']) { $metadata['updatedAt'] } else { $null }
     # when this profile was last switched to (see Set-ActiveProfile). the monitor
-    # tints a row that was switched to today, so it reads this straight off the row.
-    $row['switchedAt'] = if ($metadata -and $metadata['switchedAt']) { $metadata['switchedAt'] } else { $null }
+    # tints a row that was switched to today, so it reads this straight off the
+    # row. the ACTIVE profile's source is current.json -- the authoritative
+    # record of when the active account became active -- so it is tinted even
+    # when that switch predates this feature. json dates deserialize to a
+    # [datetime], so it is reformatted to a fixed ISO-8601 utc string here.
+    $switchedSource = if (($normalized -eq $Active) -and $ActiveSwitchedAt) { $ActiveSwitchedAt } elseif ($metadata -and $metadata['switchedAt']) { [string]$metadata['switchedAt'] } else { $null }
+    $row['switchedAt'] = if ($switchedSource) { [DateTimeOffset]::Parse($switchedSource).ToUniversalTime().ToString('o').Replace('+00:00','Z') } else { $null }
     $row['chainCheckedAt'] = if ($metadata) { $metadata['grantCheckedAt'] } else { $null }
     $row['isLive'] = $isLive
     $row['isActive'] = [bool]($normalized -eq $Active)
@@ -947,6 +970,7 @@ function Resolve-UnbankedLive {
 function Get-StatusReport {
     $live = Get-LiveIdentity
     $active = Get-ActiveProfile
+    $activeSwitchedAt = Get-ActiveSwitchedAt
     $app = Get-AppReport
     $liveProfile = if ($live) { Find-ProfileForUid -Uid ([string]$live['Uid']) } else { $null }
     $liveEmail = $null
@@ -998,7 +1022,7 @@ function Get-StatusReport {
     }
 
     $profiles = @(foreach ($directory in Get-ProfileDirectories) {
-            Get-ProfileRow -Profile $directory.Name -LiveUid $(if ($live) { [string]$live['Uid'] } else { $null }) -Active $active
+            Get-ProfileRow -Profile $directory.Name -LiveUid $(if ($live) { [string]$live['Uid'] } else { $null }) -Active $active -ActiveSwitchedAt $activeSwitchedAt
         })
 
     $detail = if ($live) {
