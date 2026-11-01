@@ -19,8 +19,16 @@ class LinuxRealVaultRelayTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        # the config loader falls back to the working directory, and this box
+        # has a real mainframe.config.json in the repo root - run inside an
+        # empty temp dir so the fixtures never see it.
+        self._old_cwd = os.getcwd()
+        self.cwd = self.root / "cwd"
+        self.cwd.mkdir(exist_ok=True)
+        os.chdir(self.cwd)
 
     def tearDown(self):
+        os.chdir(self._old_cwd)
         self.temp_dir.cleanup()
 
     def test_load_config_and_get_ntfy_topic_precedence(self):
