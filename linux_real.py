@@ -750,61 +750,78 @@ def obtain_master_password(work_root: Path, checkout: Path,
         priv.unlink(missing_ok=True)
 
 
-def vault_session(work_root: Path, checkout: Path,
-                  ntfy_topic: str | None = None,
-                  ntfy_server: str | None = None,
-                  pages_base: str | None = None) -> tuple[str, str]:
-    """Log in to Vaultwarden via bw, return (gh_token, secrets_password).
+DEFAULT_VAULT_TTL_MINUTES = 60
 
-    The master password is prompted once and reused for login + unlock,
-    exactly like the Windows sealed-email flow.
+
+def get_vault_ttl_minutes(checkout: Path | None = None) -> int:
+    """Session TTL in minutes: env > config > 60.
+
+    Same precedence, same key and same default as the windows side
+    (vault-secret.psm1 Get-VaultSessionTtlMinutes), so one config file drives
+    both machines.
     """
-    import bitwarden_cli_linux as bw_tools
-    bw = shutil.which("bw")
-    if bw is None:
-        dest = work_root / "vault" / "bitwarden-cli"
-        mkdirs(dest.parent)
-        log("installing bw CLI for the vault step ...")
-        release = bw_tools.resolve_release("x86_64")
-        bw_tools.install_release(release, dest)
-        bw = str(dest / "bw")
-    else:
-        log(f"using existing bw at {bw}")
-    status = json.loads(run([bw, "status"]).stdout)
-    if status.get("serverUrl") != BW_SERVER:
-        if status.get("status") != "unauthenticated":
-            run([bw, "logout"], check=False)
-        run([bw, "config", "server", BW_SERVER])
-        status = json.loads(run([bw, "status"]).stdout)
-    email = None
-    blob = checkout / "bw-email.enc.json"
-    if blob.exists():
-        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
-                                          ntfy_server=ntfy_server, pages_base=pages_base)
-        email = unseal_email(blob, password)
-        log("email unsealed from bw-email.enc.json")
-    else:
-        email = os.environ.get("MAINFRAME_BW_EMAIL") or load_config(checkout).get("bitwardenEmail")
-        if not email:
-            if not sys.stdin.isatty():
-                fail("headless run without bw-email.enc.json or bitwardenEmail config")
-            email = input("Bitwarden email: ").strip()
-        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
-                                          ntfy_server=ntfy_server, pages_base=pages_base)
-    if status.get("status") == "unauthenticated":
-        log("bw login ...")
-        run([bw, "login", email, "--passwordenv", "BW_PASSWORD"],
-            env={"BW_PASSWORD": password})
-        run([bw, "lock"])
-    log("bw unlock ...")
-    session = run([bw, "unlock", "--raw", "--passwordenv", "BW_PASSWORD"],
-                  env={"BW_PASSWORD": password}).stdout.strip()
-    if not session:
-        raise RuntimeError("bw unlock produced no session key")
+    from_env = os.environ.get("MAINFRAME_VAULT_TTL_MINUTES")
+    if from_env:
+        try:
+            return int(from_env)
+        except ValueError:
+            pass
+    cfg = load_config(checkout) if checkout is not None else load_config()
+    for key in ("vaultTtlMinutes", "sessionTtlMinutes"):
+        value = cfg.get(key)
+        if value:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+    return DEFAULT_VAULT_TTL_MINUTES
+
+
+def session_key_path(work_root: Path) -> Path:
+    """Where the cached bw session key lives (mirrors the windows session.key)."""
+    return work_root / "vault" / "session.key"
+
+
+def read_cached_session(work_root: Path, ttl_minutes: int) -> str | None:
+    """Return the cached session key if it is still inside the TTL."""
+    path = session_key_path(work_root)
+    if not path.is_file():
+        return None
     try:
-        items = json.loads(run([bw, "list", "items", "--session", session]).stdout)
-    except Exception:
-        items = []
+        age_minutes = (time.time() - path.stat().st_mtime) / 60.0
+    except OSError:
+        return None
+    if ttl_minutes > 0 and age_minutes >= ttl_minutes:
+        return None
+    try:
+        key = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
+
+
+def write_cached_session(work_root: Path, session: str) -> None:
+    """Cache the session key with owner-only permissions."""
+    path = session_key_path(work_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(session, encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def clear_cached_session(work_root: Path) -> None:
+    """Drop the cached session key (expired or explicitly locked)."""
+    path = session_key_path(work_root)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def extract_vault_secrets(items: list) -> tuple[str, str]:
+    """Pull (github token, mainframe-production secrets password) out of the items."""
     gh_token = ""
     secrets_password = ""
     repo_owner = RELEASE_REPO.split("/")[0].lower()
@@ -830,6 +847,97 @@ def vault_session(work_root: Path, checkout: Path,
         raise RuntimeError("no GitHub token found in the vault; "
                            "cannot download the release")
     return gh_token, secrets_password
+
+
+def vault_session(work_root: Path, checkout: Path,
+                  ntfy_topic: str | None = None,
+                  ntfy_server: str | None = None,
+                  pages_base: str | None = None) -> tuple[str, str]:
+    """Log in to Vaultwarden via bw, return (gh_token, secrets_password).
+
+    The master password is prompted once and reused for login + unlock,
+    exactly like the Windows sealed-email flow.
+
+    The session is cached the same way windows caches it: the raw bw session
+    key is written to <work_root>/vault/session.key and reused while it is
+    younger than the TTL, so a second run inside the TTL needs no phone
+    approval at all. an expired session is locked and purged, and the phone
+    is asked again.
+    """
+    import bitwarden_cli_linux as bw_tools
+    bw = shutil.which("bw")
+    if bw is None:
+        dest = work_root / "vault" / "bitwarden-cli"
+        mkdirs(dest.parent)
+        log("installing bw CLI for the vault step ...")
+        release = bw_tools.resolve_release("x86_64")
+        bw_tools.install_release(release, dest)
+        bw = str(dest / "bw")
+    else:
+        log(f"using existing bw at {bw}")
+    status = json.loads(run([bw, "status"]).stdout)
+    if status.get("serverUrl") != BW_SERVER:
+        if status.get("status") != "unauthenticated":
+            run([bw, "logout"], check=False)
+        run([bw, "config", "server", BW_SERVER])
+        status = json.loads(run([bw, "status"]).stdout)
+
+    ttl = get_vault_ttl_minutes(checkout)
+
+    # 1. a fresh cached session means no phone approval is needed at all
+    cached = read_cached_session(work_root, ttl)
+    if cached:
+        if status.get("status") == "unauthenticated":
+            log("cached vault session is useless while bw is logged out - asking the phone again")
+            clear_cached_session(work_root)
+        else:
+            try:
+                items = json.loads(run([bw, "list", "items", "--session", cached]).stdout)
+            except Exception as exc:
+                log(f"cached vault session is no longer usable ({exc}) - asking the phone again")
+                items = None
+            if items is not None:
+                log(f"vault: reusing the cached session (under the {ttl} minute TTL) - "
+                    "no phone approval needed")
+                return extract_vault_secrets(items)
+    elif session_key_path(work_root).exists():
+        # expired: lock and purge, exactly like the windows Lock-VaultSession
+        log("vault session expired - locking vault")
+        run([bw, "lock"], check=False)
+        clear_cached_session(work_root)
+
+    email = None
+    blob = checkout / "bw-email.enc.json"
+    if blob.exists():
+        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
+                                          ntfy_server=ntfy_server, pages_base=pages_base)
+        email = unseal_email(blob, password)
+        log("email unsealed from bw-email.enc.json")
+    else:
+        email = os.environ.get("MAINFRAME_BW_EMAIL") or load_config(checkout).get("bitwardenEmail")
+        if not email:
+            if not sys.stdin.isatty():
+                fail("headless run without bw-email.enc.json or bitwardenEmail config")
+            email = input("Bitwarden email: ").strip()
+        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
+                                          ntfy_server=ntfy_server, pages_base=pages_base)
+    if status.get("status") == "unauthenticated":
+        log("bw login ...")
+        run([bw, "login", email, "--passwordenv", "BW_PASSWORD"],
+            env={"BW_PASSWORD": password})
+        run([bw, "lock"])
+    log("bw unlock ...")
+    session = run([bw, "unlock", "--raw", "--passwordenv", "BW_PASSWORD"],
+                  env={"BW_PASSWORD": password}).stdout.strip()
+    if not session:
+        raise RuntimeError("bw unlock produced no session key")
+    write_cached_session(work_root, session)
+    log(f"vault session cached at {session_key_path(work_root)} (TTL {ttl} minutes)")
+    try:
+        items = json.loads(run([bw, "list", "items", "--session", session]).stdout)
+    except Exception:
+        items = []
+    return extract_vault_secrets(items)
 
 
 def download_release(work_root: Path, token: str) -> Path:
@@ -1454,6 +1562,10 @@ def main(argv: list[str] | None = None) -> int:
         "(live home, like the Windows irm flow).")
     ap.add_argument("--skip-vault", action="store_true",
                     help="skip vault login + release download")
+    ap.add_argument("--lock-vault", action="store_true",
+                    help="lock the vault and purge the cached session key, then exit "
+                         "(the linux twin of vault-lock.ps1). the next run asks the "
+                         "phone again")
     ap.add_argument("--backup-root", type=Path,
                     help="directory containing mainframe-quick.zip "
                          "(overrides the release download)")
@@ -1500,6 +1612,17 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[str] = []
     report: dict = {"work_root": str(work_root)}
 
+    # --lock-vault: the linux twin of vault-lock.ps1. locks the cli and purges
+    # the cached session key, so the next run asks the phone again.
+    if args.lock_vault:
+        bw = shutil.which("bw")
+        if bw:
+            run([bw, "lock"], check=False)
+        clear_cached_session(work_root)
+        log(f"vault locked and the cached session purged "
+            f"({session_key_path(work_root)})")
+        return 0
+
     # Prereqs (same set as --setup-tools, idempotent).
     log("installing prerequisites ...")
     try:
@@ -1538,7 +1661,10 @@ def main(argv: list[str] | None = None) -> int:
             log(f"vault/release FAILED: {exc}")
         finally:
             bw = shutil.which("bw")
-            if bw:
+            # a cached session stays usable - and the cli stays unlocked - until
+            # the TTL lapses, exactly like the windows side. only lock when
+            # there is no fresh session to reuse.
+            if bw and not read_cached_session(work_root, get_vault_ttl_minutes(HERE)):
                 run([bw, "lock"], check=False)
     elif backup_root is None:
         log("vault skipped and no --backup-root: restore leg skipped")

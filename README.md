@@ -90,6 +90,18 @@ make Windows and Linux behave identically on a machine whose egress proxy denies
 Both Windows (`vault-approval.psm1`) and Linux (`linux_real.py`) read the same
 `mainframe.config.json`, so one file drives both machines.
 
+**One phone tap per hour, not per run.** Windows has always cached the vault
+session: the raw `bw` session key lives in
+`%APPDATA%\mainframe\accounts\bitwarden\session.key`, and while that file is
+younger than the TTL (`vaultTtlMinutes` in `mainframe.config.json`,
+`MAINFRAME_VAULT_TTL_MINUTES`, default 60) the helpers reuse it and never ask
+the phone. Linux now does the same at
+`~/.local/share/mainframe/vault/session.key` (mode `600`): the first run asks
+for the tap, every run inside the hour reuses the session silently, and an
+expired session is locked and purged so the phone is asked again. Lock it by
+hand at any time with `python3 linux_real.py --lock-vault` — the Linux twin of
+`vault-lock.ps1`.
+
 ### Linux: Bash (no PowerShell dependency)
 
 **Linux now has a lossless archive-recovery path, explicit native export targets,
