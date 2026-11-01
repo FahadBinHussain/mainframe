@@ -191,6 +191,122 @@ function Get-VaultPagesBase {
     return $PagesBase.TrimEnd('/')
 }
 
+function ConvertTo-DerLength {
+    param([int]$Length)
+
+    # DER length: short form under 128, otherwise the long form with the
+    # number of length bytes in the top bits.
+    if ($Length -lt 0x80) { return ,([byte[]]@($Length)) }
+    $bytes = New-Object System.Collections.Generic.List[byte]
+    $value = $Length
+    while ($value -gt 0) {
+        $bytes.Insert(0, [byte]($value -band 0xFF))
+        $value = $value -shr 8
+    }
+    $out = New-Object System.Collections.Generic.List[byte]
+    $out.Add([byte](0x80 -bor $bytes.Count))
+    $out.AddRange($bytes.ToArray())
+    return ,$out.ToArray()
+}
+
+function ConvertTo-DerInteger {
+    param([byte[]]$Value)
+
+    # a DER INTEGER is signed, so a leading zero byte goes in front when the
+    # top bit of the first content byte is set. leading zero bytes that are
+    # already there are dropped.
+    $start = 0
+    while ($start -lt ($Value.Length - 1) -and $Value[$start] -eq 0) { $start++ }
+    $body = New-Object System.Collections.Generic.List[byte]
+    for ($i = $start; $i -lt $Value.Length; $i++) { $body.Add($Value[$i]) }
+    if ($body.Count -gt 0 -and ($body[0] -band 0x80) -ne 0) { $body.Insert(0, [byte]0) }
+
+    $length = ConvertTo-DerLength $body.Count
+    $out = New-Object System.Collections.Generic.List[byte]
+    $out.Add([byte]0x02)
+    $out.AddRange($length)
+    $out.AddRange($body.ToArray())
+    return ,$out.ToArray()
+}
+
+function ConvertTo-DerSequence {
+    param([byte[]]$Content)
+
+    $length = ConvertTo-DerLength $Content.Length
+    $out = New-Object System.Collections.Generic.List[byte]
+    $out.Add([byte]0x30)
+    $out.AddRange($length)
+    $out.AddRange($Content)
+    return ,$out.ToArray()
+}
+
+function ConvertTo-DerBitString {
+    param([byte[]]$Content)
+
+    # a BIT STRING carries the number of unused bits in the first content byte
+    $length = ConvertTo-DerLength ($Content.Length + 1)
+    $out = New-Object System.Collections.Generic.List[byte]
+    $out.Add([byte]0x03)
+    $out.AddRange($length)
+    $out.Add([byte]0x00)
+    $out.AddRange($Content)
+    return ,$out.ToArray()
+}
+
+function ConvertTo-SubjectPublicKeyInfoManual {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Cryptography.RSA]$Rsa
+    )
+
+    # hand rolled SubjectPublicKeyInfo:
+    #
+    #   SEQUENCE {
+    #     SEQUENCE { OID 1.2.840.113549.1.1.1, NULL },
+    #     BIT STRING { SEQUENCE { modulus INTEGER, exponent INTEGER } }
+    #   }
+    #
+    # this is the .NET framework path - see ConvertTo-SubjectPublicKeyInfo.
+    $public = $Rsa.ExportParameters($false)
+
+    $rsaPublicKey = ConvertTo-DerSequence (
+        (ConvertTo-DerInteger $public.Modulus) + (ConvertTo-DerInteger $public.Exponent)
+    )
+
+    $algorithm = ConvertTo-DerSequence ([byte[]]@(
+        0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01,
+        0x05, 0x00
+    ))
+
+    return ,(ConvertTo-DerSequence ($algorithm + (ConvertTo-DerBitString $rsaPublicKey)))
+}
+
+function ConvertTo-SubjectPublicKeyInfo {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Cryptography.RSA]$Rsa
+    )
+
+    # The approval page imports this key with WebCrypto as 'spki', so it has
+    # to be a real SubjectPublicKeyInfo DER structure.
+    #
+    # RSA.ExportSubjectPublicKeyInfo() is .NET Core only. windows powershell
+    # 5.1 (.NET framework) has no such method and no RSAExtensions type at
+    # all, and RSA.Create() there returns an RSACng - so calling the method
+    # there dies with "does not contain a method named
+    # 'ExportSubjectPublicKeyInfo'". that breaks the 1-tap unlock for every
+    # helper invoked through `powershell -File`, because the unlock flow runs
+    # inside windows powershell.
+    #
+    # so: use the native method when the runtime has it, and build the same
+    # bytes by hand when it does not. the hand rolled encoder is byte for byte
+    # identical to the native one - there is a test for that.
+    if ([System.Security.Cryptography.RSA].GetMethod('ExportSubjectPublicKeyInfo')) {
+        return ,($Rsa.ExportSubjectPublicKeyInfo())
+    }
+    return ,(ConvertTo-SubjectPublicKeyInfoManual -Rsa $Rsa)
+}
+
 function Get-VaultApprovalUrl {
     param(
         [Parameter(Mandatory = $true)]
@@ -211,7 +327,7 @@ function Get-VaultApprovalUrl {
     $resolvedAgent = $identity.Agent
     $resolvedModel = $identity.Model
 
-    $derBytes = $Rsa.ExportSubjectPublicKeyInfo()
+    $derBytes = ConvertTo-SubjectPublicKeyInfo -Rsa $Rsa
     $k = [Convert]::ToBase64String($derBytes).Replace('+', '-').Replace('/', '_').TrimEnd('=')
 
     $sidBytes = New-Object byte[] 12
@@ -565,6 +681,8 @@ Export-ModuleMember -Function `
     Get-VaultNtfyTopic, `
     Get-VaultNtfyServer, `
     Get-VaultPagesBase, `
+    ConvertTo-SubjectPublicKeyInfo, `
+    ConvertTo-SubjectPublicKeyInfoManual, `
     Get-VaultApprovalUrl, `
     Send-VaultApprovalNotification, `
     Send-VaultRequestExpired, `
