@@ -1270,6 +1270,38 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   (`apps/api/src/minimax.ts` +
   `MinimaxAccounts.tsx`), which shells here for everything and keeps no token
   logic of its own.
+- **`signin` / `signin-claim` are the daily check-in verbs (added 2026-11-01).**
+  `signin [email]` answers `GET {IdentityOrigin}/minimax-cloud/api/v1/signin/status`
+  (no email = every profile) and returns `{timezoneId, rows[], counts{profiles,
+  claimedToday, claimable, unreadable}}`; each row carries `status`
+  (`upcoming`/`claimable`/`claimed`/`disabled`), `dayNo` + `points` from the 7-day
+  panel, and an `unreadable` row carries the reason in `detail`.
+  `signin-claim [email]` is `POST .../signin/claim` and claims TODAY's reward only,
+  returning `{alreadyClaimed, dayNo, points, row}` (row = the re-read panel, so a
+  caller never needs a second status round-trip). Both take `-Json`; the read is
+  available for every profile, the claim needs exactly one (defaults to active).
+- **`timezone_id` is MANDATORY and must be an IANA NAME.** Omitting it (or passing
+  an offset / a Windows id) answers HTTP **200** with
+  `{"base_resp":{"status_code":1406010011,"status_msg":"invalid timezone_id"}}` --
+  a success code with no data, which is why every signin response is asserted with
+  `Assert-SigninData` before it is read. `Get-SigninTimezoneId` takes the profile's
+  stored zone when it is an IANA name and otherwise falls back to `Asia/Dhaka`;
+  only `?timezone_id=Asia/Dhaka` was accepted among 5 tested variants (offset, UTC,
+  Windows id, `Asia/Dacca` all refused). `agent.minimax.io` is the host that works
+  -- `agent.minimaxi.com` answers 401 `invalid access token` for the same token.
+- **reading a lapsed check-in panel is NOT free: it rotates that profile's token.**
+  `Resolve-SigninToken` uses the live credential when the running app holds that
+  account and otherwise refreshes from the stored profile, and the server rotates
+  the refresh token on renewal -- so a `signin` sweep over 15 `expired-token`
+  profiles rewrites 15 chains. The monitor therefore runs it through its
+  single-flight `runAction` slot (never a bare `runHelper`) and caches the result
+  for `SIGNIN_TTL_MS` (3 min) so the 10 s pool poll never pays for it. A profile
+  whose refresh the app currently owns is read from the live credential instead of
+  being rotated out from under it, same rule as `use`/`refresh`.
+- panel semantics: exactly 7 days, unique `day_no` 1-7, `status` 1=upcoming
+  2=claimable 3=claimed 4=disabled, `scene` 0-4; `claim_result` 1=claimed
+  2=already-claimed. credits are 400/day, 1000 on day 4 and day 7, 4000 for a full
+  week.
 
 ## adcode: one Firebase identity per data dir, restart-is-the-switch (helper added 2026-10-31)
 

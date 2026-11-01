@@ -90,6 +90,8 @@ function Show-Usage {
         '  .\minimax-account.ps1 current',
         '  .\minimax-account.ps1 status [email]',
         '  .\minimax-account.ps1 status-all',
+        '  .\minimax-account.ps1 signin [email]               daily check-in status, every account by default',
+        '  .\minimax-account.ps1 signin-claim [email]         claim today''s check-in reward',
         '  .\minimax-account.ps1 path [email]',
         '  .\minimax-account.ps1 env [email]',
         '  .\minimax-account.ps1 logout [email]               revoke + clear the LIVE sign-in',
@@ -1164,6 +1166,359 @@ function Resolve-MiniMaxIdentity {
     return $out
 }
 
+# ---- daily check-in --------------------------------------------------------
+
+# The daily sign-in panel MiniMax Code itself draws, read out of the shipped
+# runtime:
+#   GET  {identityOrigin}/minimax-cloud/api/v1/signin/status?timezone_id=<iana>
+#   POST {identityOrigin}/minimax-cloud/api/v1/signin/claim?timezone_id=<iana>
+# Both take the caller's zone as timezone_id, and it is an IANA NAME, not an
+# offset: without a usable one the service answers base_resp.status_code
+# 1406010011 "invalid timezone_id" instead of a panel. The zone also decides
+# when "today" rolls over, so it is the operator's own zone -- the one the
+# reward is actually granted in -- never a hardcoded one.
+$signinStatusNames = @{ 1 = 'upcoming'; 2 = 'claimable'; 3 = 'claimed'; 4 = 'disabled' }
+
+function Get-SigninTimezoneId {
+    $configured = Get-EnvText 'MINIMAX_SIGNIN_TIMEZONE' ''
+    if ($configured) {
+        return $configured
+    }
+
+    $local = [System.TimeZoneInfo]::Local.Id
+    $iana = $null
+    $mapped = [System.TimeZoneInfo]::TryConvertWindowsIdToIanaId($local, [ref]$iana)
+    if ($mapped -and -not [string]::IsNullOrWhiteSpace($iana)) {
+        return $iana
+    }
+
+    throw "the daily check-in needs an IANA timezone id and Windows' '$local' did not map to one. set MINIMAX_SIGNIN_TIMEZONE (for example Asia/Dhaka) for this shell."
+}
+
+# The response envelope: base_resp.status_code 0 plus a data object -- exactly
+# what the desktop app asserts before it will draw the panel.
+function Assert-SigninData {
+    param($Body, [string]$Where)
+
+    $base = if ($Body -and $Body.ContainsKey('base_resp')) { $Body['base_resp'] } else { $null }
+    if ($base -and $base.ContainsKey('status_code')) {
+        $code = [int]$base['status_code']
+        if ($code -ne 0) {
+            $message = if ($base.ContainsKey('status_msg')) { [string]$base['status_msg'] } else { 'no message' }
+            throw "MiniMax refused the daily check-in request at ${Where} (base_resp.status_code $code): $message"
+        }
+    }
+    if (-not $Body -or -not $Body.ContainsKey('data') -or $null -eq $Body['data']) {
+        throw "the daily check-in answer from $Where carried no data."
+    }
+
+    return $Body['data']
+}
+
+function Invoke-SigninRequest {
+    param(
+        [string]$AccessToken,
+        [string]$Path,
+        [string]$Method,
+        [string]$TimezoneId
+    )
+
+    $ns = Get-MiniMaxNamespace
+    $uri = "$($ns.IdentityOrigin)$Path`?timezone_id=$([Uri]::EscapeDataString($TimezoneId))"
+
+    $headers = @{}
+    $headers['Accept'] = 'application/json'
+    $headers['Content-Type'] = 'application/json'
+    $headers['User-Agent'] = 'MiniMaxCode'
+    $headers['Authorization'] = "Bearer $AccessToken"
+
+    try {
+        $response = Invoke-WebRequest -Method $Method -Uri $uri -Headers $headers -TimeoutSec $httpTimeoutSec -SkipHttpErrorCheck
+    } catch {
+        throw "the daily check-in endpoint at $($ns.IdentityOrigin)$Path could not be reached -- $($_.Exception.Message)"
+    }
+
+    $status = [int]$response.StatusCode
+    $text = if ($null -ne $response.Content) { [string]$response.Content } else { '' }
+    if ($status -eq 401) {
+        throw "MiniMax rejected this profile's token for the daily check-in (HTTP 401) -- renew it (or switch to this account) before its check-in can be read."
+    }
+    if ($status -ne 200) {
+        throw "the daily check-in endpoint at $Path answered HTTP ${status}: $($text.Substring(0, [Math]::Min(200, $text.Length)))"
+    }
+
+    try {
+        $body = $text | ConvertFrom-Json -AsHashtable
+    } catch {
+        throw "the daily check-in endpoint at $Path answered HTTP 200 with something that is not json: $($text.Substring(0, [Math]::Min(200, $text.Length)))"
+    }
+
+    return Assert-SigninData -Body $body -Where $Path
+}
+
+# The seven-day panel, validated the way the desktop app validates it before it
+# draws anything: scene 0-4, exactly seven days, unique integer day_no 1-7,
+# non-negative points, status 1-4, at most one claimable day, exactly one today.
+# A panel the app itself would refuse is a shape change, not a state to guess at,
+# so it fails here instead of rendering something plausible.
+function ConvertTo-SigninPanel {
+    param($Data, [string]$Where)
+
+    $scene = if ($Data.ContainsKey('scene')) { [int]$Data['scene'] } else { -1 }
+    if ($scene -lt 0 -or $scene -gt 4) {
+        throw "the check-in panel from $Where reported scene $scene, outside 0-4 -- MiniMax changed the panel shape."
+    }
+
+    $days = @()
+    if ($Data.ContainsKey('days')) { $days = @($Data['days']) }
+    if ($days.Count -ne 7) {
+        throw "the check-in panel from $Where carried $($days.Count) day(s) instead of 7 -- MiniMax changed the panel shape."
+    }
+
+    $today = $null
+    $claimable = 0
+    $claimed = 0
+    $seen = @{}
+    foreach ($day in $days) {
+        $dayNo = [int]$day['day_no']
+        if ($dayNo -lt 1 -or $dayNo -gt 7 -or $seen.ContainsKey($dayNo)) {
+            throw "the check-in panel from $Where repeated or misplaced day_no $dayNo."
+        }
+        $seen[$dayNo] = $true
+
+        $status = [int]$day['status']
+        if ($status -lt 1 -or $status -gt 4) {
+            throw "day $dayNo of the check-in panel from $Where has status $status, outside 1-4."
+        }
+
+        $points = [int]$day['points']
+        if ($points -lt 0) {
+            throw "day $dayNo of the check-in panel from $Where carries negative points ($points)."
+        }
+
+        $bonus = 0
+        if ($day.ContainsKey('bonus_points') -and $null -ne $day['bonus_points']) {
+            $bonus = [int]$day['bonus_points']
+        }
+
+        if ($status -eq 2) { $claimable += 1 }
+        if ($status -eq 3) { $claimed += 1 }
+
+        if ($day.ContainsKey('is_today') -and [bool]$day['is_today']) {
+            if ($today) {
+                throw "the check-in panel from $Where marks more than one day as today."
+            }
+            $today = @{ DayNo = $dayNo; Status = $status; Points = $points; BonusPoints = $bonus }
+        }
+    }
+
+    if ($claimable -gt 1) {
+        throw "the check-in panel from $Where marks $claimable days claimable, which MiniMax's own reader refuses."
+    }
+    if (-not $today) {
+        throw "the check-in panel from $Where marks no day as today, so there is no check-in state for today."
+    }
+
+    return @{ Scene = $scene; Today = $today; ClaimedDays = $claimed }
+}
+
+function New-SigninRow {
+    param([string]$Profile, [AllowNull()]$Panel)
+
+    $row = @{}
+    $row['email'] = $Profile
+    $row['status'] = $null
+    $row['dayNo'] = $null
+    $row['points'] = $null
+    $row['bonusPoints'] = $null
+    $row['claimedDays'] = $null
+    $row['scene'] = $null
+    $row['detail'] = $null
+
+    if ($Panel) {
+        $today = $Panel['Today']
+        $row['status'] = $signinStatusNames[[int]$today['Status']]
+        $row['dayNo'] = [int]$today['DayNo']
+        $row['points'] = [int]$today['Points']
+        $row['bonusPoints'] = [int]$today['BonusPoints']
+        $row['claimedDays'] = [int]$Panel['ClaimedDays']
+        $row['scene'] = [int]$Panel['Scene']
+    }
+
+    return $row
+}
+
+# Which token to read (or claim) a profile's check-in with. The profile store is
+# the source, and a lapsed token is renewed through the same grant rotation
+# `refresh` runs -- that rotation is also what keeps an idle chain alive, so this
+# pass doubles as a keepalive.
+#
+# The live sign-in is NOT a fallback path: the running app OWNS that chain, and a
+# second rotation from here would revoke the pair (the guard Invoke-Refresh
+# enforces). The app's own copy of that token is the fresh one, so it is read
+# from the app's auth dir -- which also keeps this pass from racing the re-bank
+# `status-all` performs on that same profile.
+function Resolve-SigninToken {
+    param(
+        [string]$Profile,
+        [AllowNull()][string]$LiveOwner,
+        [AllowNull()][string]$LiveToken
+    )
+
+    $normalized = Normalize-ProfileName -Profile $Profile
+    if ($LiveOwner -eq $normalized -and -not [string]::IsNullOrWhiteSpace($LiveToken)) {
+        return $LiveToken
+    }
+
+    $credential = Read-ProfileCredential -Profile $normalized
+    if (-not $credential) {
+        throw "profile '$normalized' has no credential.json, so its daily check-in cannot be read."
+    }
+
+    $expiry = Get-ExpiryFields -ExpiresAtMs ([long]$credential['expiresAtMs'])
+    if ($expiry.Expired) {
+        [void](Invoke-Refresh -Profile $normalized)
+        $credential = Read-ProfileCredential -Profile $normalized
+        if (-not $credential) {
+            throw "renewing $normalized reported success but left no credential.json behind."
+        }
+    }
+
+    return [string]$credential['accessToken']
+}
+
+function Read-SigninPanel {
+    param([string]$AccessToken, [string]$TimezoneId)
+
+    $data = Invoke-SigninRequest -AccessToken $AccessToken -Path '/minimax-cloud/api/v1/signin/status' -Method 'Get' -TimezoneId $TimezoneId
+    return ConvertTo-SigninPanel -Data $data -Where 'signin/status'
+}
+
+# One profile's check-in, or the sentence saying why it could not be read. A
+# spent chain must not hide the other fifteen, so the failure travels on the row
+# and the panel prints it there -- never as a blank.
+function Get-SigninRow {
+    param(
+        [string]$Profile,
+        [AllowNull()][string]$LiveOwner,
+        [AllowNull()][string]$LiveToken,
+        [string]$TimezoneId
+    )
+
+    $normalized = Normalize-ProfileName -Profile $Profile
+    try {
+        $token = Resolve-SigninToken -Profile $normalized -LiveOwner $LiveOwner -LiveToken $LiveToken
+        $panel = Read-SigninPanel -AccessToken $token -TimezoneId $TimezoneId
+        return (New-SigninRow -Profile $normalized -Panel $panel)
+    } catch {
+        $row = New-SigninRow -Profile $normalized
+        $row['detail'] = $_.Exception.Message
+        return $row
+    }
+}
+
+# The live sign-in's owner and its current token, resolved once per run: both are
+# the same answer for every row, and each lookup walks every stored profile.
+function Get-SigninLiveContext {
+    $live = Get-LiveAuth
+    $context = @{ Owner = $null; Token = $null }
+    if (-not $live.SignedIn -or -not $live.Credential) {
+        return $context
+    }
+    $context['Owner'] = Find-ProfileForCredential -Credential $live.Credential
+    $context['Token'] = [string]$live.Credential['accessToken']
+    return $context
+}
+
+# Every profile's daily check-in in one pass. Read-only: nothing is claimed here,
+# so a profile that cannot be read costs one row, not the run.
+function Invoke-Signin {
+    param([AllowNull()][string]$Profile)
+
+    $timezoneId = Get-SigninTimezoneId
+    $live = Get-SigninLiveContext
+    $emails = if ($Profile) {
+        @(Normalize-ProfileName -Profile $Profile)
+    } else {
+        @(Get-ProfileDirectories | ForEach-Object { $_.Name })
+    }
+
+    $rows = @()
+    foreach ($email in $emails) {
+        $rows += (Get-SigninRow -Profile $email -LiveOwner $live['Owner'] -LiveToken $live['Token'] -TimezoneId $timezoneId)
+    }
+
+    $payload = @{}
+    $payload['ok'] = $true
+    $payload['action'] = 'signin'
+    $payload['timezoneId'] = $timezoneId
+    $payload['checkedAt'] = [DateTimeOffset]::UtcNow.ToString('o')
+    $payload['rows'] = $rows
+    $payload['counts'] = @{
+        profiles = @($rows).Count
+        claimedToday = @($rows | Where-Object { $_['status'] -eq 'claimed' }).Count
+        claimable = @($rows | Where-Object { $_['status'] -eq 'claimable' }).Count
+        unreadable = @($rows | Where-Object { $_['detail'] }).Count
+    }
+    return $payload
+}
+
+# Claim today's reward for one profile. MiniMax answers the panel it just moved,
+# so the row comes back fresh without a second round trip.
+function Invoke-SigninClaim {
+    param([AllowNull()][string]$Profile)
+
+    $normalized = Get-ProfileOrActive -Profile $Profile
+    $timezoneId = Get-SigninTimezoneId
+    $live = Get-SigninLiveContext
+    $token = Resolve-SigninToken -Profile $normalized -LiveOwner $live['Owner'] -LiveToken $live['Token']
+
+    $data = Invoke-SigninRequest -AccessToken $token -Path '/minimax-cloud/api/v1/signin/claim' -Method 'Post' -TimezoneId $timezoneId
+
+    $claimId = if ($data.ContainsKey('claim_id')) { [string]$data['claim_id'] } else { '' }
+    if ([string]::IsNullOrWhiteSpace($claimId)) {
+        throw "the daily check-in claim for $normalized answered without a claim_id -- MiniMax changed the claim shape."
+    }
+
+    $claimResult = [int]$data['claim_result']
+    if ($claimResult -notin @(1, 2)) {
+        throw "the daily check-in claim for $normalized answered claim_result $claimResult, which is neither Claimed (1) nor AlreadyClaimed (2)."
+    }
+
+    $dayNo = [int]$data['day_no']
+    if ($dayNo -lt 1 -or $dayNo -gt 7) {
+        throw "the daily check-in claim for $normalized answered day_no $dayNo, outside the seven-day cycle."
+    }
+
+    $points = [int]$data['points']
+    if ($points -lt 0) {
+        throw "the daily check-in claim for $normalized answered negative points ($points)."
+    }
+
+    if (-not $data.ContainsKey('panel') -or $null -eq $data['panel']) {
+        throw "the daily check-in claim for $normalized came back without the panel it moved."
+    }
+    $panel = ConvertTo-SigninPanel -Data $data['panel'] -Where 'signin/claim'
+
+    $alreadyClaimed = [bool]($claimResult -eq 2)
+    $result = @{}
+    $result['ok'] = $true
+    $result['action'] = 'signin-claimed'
+    $result['profile'] = $normalized
+    $result['timezoneId'] = $timezoneId
+    $result['alreadyClaimed'] = $alreadyClaimed
+    $result['claimId'] = $claimId
+    $result['dayNo'] = $dayNo
+    $result['points'] = $points
+    $result['row'] = (New-SigninRow -Profile $normalized -Panel $panel)
+    $result['message'] = if ($alreadyClaimed) {
+        "$normalized had already checked in for day $dayNo today -- nothing was claimed."
+    } else {
+        "checked $normalized in for day $dayNo (+$points points)."
+    }
+    return $result
+}
+
 # ---- status ----------------------------------------------------------------
 
 function Get-AppProcessReport {
@@ -2155,6 +2510,28 @@ switch ($command) {
                 Format-Table -AutoSize | Out-String | Write-Host
             Write-Host "live: $($report['live']['detail'])"
         }
+    }
+
+    'signin' {
+        $profile = if ($remaining.Count -ge 1) { $remaining[0] } else { $null }
+        $payload = Invoke-Signin -Profile $profile
+        Emit -Payload $payload -Human {
+            Write-Host "daily check-in (timezone $($payload['timezoneId'])):"
+            foreach ($row in $payload['rows']) {
+                $state = if ($row['status']) { $row['status'] } else { 'unreadable' }
+                $suffix = if ($row['detail']) { "  $($row['detail'])" } else { "  day $($row['dayNo']), $($row['points']) points" }
+                Write-Host ('  {0,-42} {1}{2}' -f $row['email'], $state, $suffix)
+            }
+            $counts = $payload['counts']
+            Write-Host ''
+            Write-Host "profiles $($counts['profiles']) | claimed today $($counts['claimedToday']) | claimable $($counts['claimable']) | unreadable $($counts['unreadable'])"
+        }
+    }
+
+    'signin-claim' {
+        $profile = if ($remaining.Count -ge 1) { $remaining[0] } else { $null }
+        $result = Invoke-SigninClaim -Profile $profile
+        Emit -Payload $result -Human { Write-Host $result.message }
     }
 
     'list' {
