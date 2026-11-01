@@ -1,5 +1,53 @@
 # mainframe workflows
 
+> # **STOP. READ THIS BEFORE YOU WRITE A SINGLE FILE.**
+>
+> ## **`mainframe` IS A PUBLIC REPO, AND IT IS NOT THE HOME FOR YOUR PROJECT'S STUFF.**
+>
+> **this repo holds ONE kind of thing: the shared, portable account layer.**
+> that is the `*-account.ps1` helpers + `account-contract.ps1`, the bitwarden
+> modules (`vault-*.psm1`), and the bootstrap / backup / restore / linux-parity
+> plumbing that carries them to every box.
+>
+> ### **NOTHING ELSE GOES IN HERE. NO EXCEPTIONS.**
+>
+> **HARD RULE — if a task needs a helper, an extension, a note, a doc, a script,
+> a screenshot or a patch for a specific project, tool, vendor or product, it
+> goes in THAT PROJECT'S OWN REPO, next to THAT PROJECT'S own notes. It does
+> NOT go into `mainframe`. "a similar helper already exists here" is not a
+> reason to add your version here. Consuming a helper from here is not
+> permission to extend it here.**
+>
+> **what that looks like in practice (real incident, 2026-11-01):** the automata
+> monitor's account pool needed extra verbs on `minimax-account.ps1` /
+> `adcode-account.ps1`. an agent added them straight into `mainframe` because
+> the pool already lived here. **wrong.** the pool *reads* helpers from here;
+> the monitor's own work belongs in the private `automata-private` repo beside
+> the minimax / adcode / trae vendor notes, wired through its own
+> `SECTION_*_HELPER` env. all six commits were reverted the same day
+> (`cd0e8b1`) and the helpers were moved out.
+>
+> ### **WHY THIS IS NON-NEGOTIABLE — TWO REASONS, BOTH HARD:**
+>
+> **1. IT IS PUBLIC.** every push is public the instant it lands. project names,
+> hostnames, account layouts, internal routes, screenshots, reversed-engineer
+> notes, private-repo file names — all of it leaks. never commit personal
+> secrets or identifiers here, and never commit anything that only makes sense
+> inside a private project. (see the "no personal secret / identifier in public
+> repos" rule.)
+>
+> **2. IT IS SHARED AND PORTABLE.** this tree is cloned, bootstrapped and
+> restored onto every machine. a project-specific file added here becomes merge
+> pain, silent drift and dead weight on every future restore, forever.
+>
+> ### **SO: BEFORE YOU `Write` ANY FILE IN `mainframe`, ASK —**
+> ### **"is this the general account layer, or is this my project's stuff?"**
+> ### **IF IT IS EVEN SLIGHTLY THE LATTER, IT GOES SOMEWHERE ELSE.**
+>
+> if you are unsure, **STOP AND ASK THE USER** where it belongs. do not guess,
+> do not "just add it here for now", do not leave it as a temporary file in this
+> tree.
+
 durable workflows for agents using the mainframe account helpers.
 
 this file documents reusable knowledge for operating the `*-account.ps1` helpers and their bulk-table scripts. anything machine- or account-specific (real emails, org/project ids, service ids, urls, hostnames, credentials) intentionally lives OUTSIDE this repo in the local `%APPDATA%\mainframe\accounts\<tool>\<email>\` profile dirs — never commit it.
