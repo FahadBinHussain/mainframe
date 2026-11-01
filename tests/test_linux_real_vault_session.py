@@ -132,6 +132,25 @@ class LinuxVaultSessionCacheTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             lr.extract_vault_secrets([{"name": "nothing", "notes": "x"}])
 
+    # ------------------------------------------- prereq detection
+
+    def test_nothing_missing_when_every_tool_is_there(self):
+        with patch("linux_real.shutil.which", return_value="/usr/bin/tool"), \
+             patch("linux_real.Path.is_file", return_value=True):
+            self.assertEqual(lr.prereqs_present(), [])
+
+    def test_a_missing_binary_is_reported(self):
+        def which(name):
+            return None if name == "openssl" else "/usr/bin/tool"
+        with patch("linux_real.shutil.which", side_effect=which), \
+             patch("linux_real.Path.is_file", return_value=True):
+            self.assertEqual(lr.prereqs_present(), ["openssl"])
+
+    def test_a_missing_ca_bundle_is_reported(self):
+        with patch("linux_real.shutil.which", return_value="/usr/bin/tool"), \
+             patch("linux_real.Path.is_file", return_value=False):
+            self.assertIn("ca-certificates", lr.prereqs_present())
+
 
 if __name__ == "__main__":
     unittest.main()
