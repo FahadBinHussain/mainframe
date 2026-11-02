@@ -455,6 +455,18 @@ function Restore-AgentInstructionsAndSkills {
         Write-Host 'Restored AGENTS.md'
     }
 
+    # the lock goes down BEFORE the skills so a fresh box can immediately run
+    # restore-from-lock.ps1 / `npx skills update -g` against it
+    $skillLockSrc = Join-Path $BackupRoot '.agents\.skill-lock.json'
+    if (Test-Path -LiteralPath $skillLockSrc) {
+        $skillLockDestDir = Join-Path $env:USERPROFILE '.agents'
+        New-Item -ItemType Directory -Force -Path $skillLockDestDir | Out-Null
+        Copy-Item -LiteralPath $skillLockSrc -Destination (Join-Path $skillLockDestDir '.skill-lock.json') -Force
+        Write-Host 'Restored .agents\.skill-lock.json'
+    } else {
+        Write-Warning 'No .agents\.skill-lock.json in backup - skills restore as plain folders with no recorded source/version (pre-2026-11-02 backups did not carry it).'
+    }
+
     $agentSkillsSrc = Join-Path $BackupRoot '.agents\skills'
     if (Test-Path -LiteralPath $agentSkillsSrc) {
         $agentSkillsDest = Join-Path $env:USERPROFILE '.agents\skills'
