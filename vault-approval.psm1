@@ -14,8 +14,17 @@ Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNa
 function Get-CallerIdentity {
     param(
         [string]$Agent,
-        [string]$Model
+        [string]$Model,
+        [string]$PromptContext = $null
     )
+
+    # 1. Explicit or context-inferred browser requests from web UI
+    if (-not $Agent -and $PromptContext -and ($PromptContext -match 'monitor' -or $PromptContext -match 'browser')) {
+        return [PSCustomObject]@{
+            Agent = 'browser'
+            Model = $null
+        }
+    }
 
     if (-not $Agent) {
         $Agent = $env:MAINFRAME_AGENT_NAME
@@ -29,10 +38,35 @@ function Get-CallerIdentity {
         if (-not $Model) { $Model = $env:AI_MODEL }
     }
 
+    # 2. Check process ancestry FIRST before trusting inherited env vars
     if (-not $Agent) {
-        if ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
-            $Agent = 'antigravity'
-        } elseif ($env:QODER_CLI -or $env:QODER_PRODUCT_ID -or $env:QODER_SESSION_TYPE) {
+        try {
+            $p = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
+            while ($p) {
+                $name = $p.ProcessName.ToLower()
+                # If running under node.exe serving the monitor, it's the browser
+                if ($name -match 'node') {
+                    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)" -ErrorAction SilentlyContinue).CommandLine
+                    if ($cmd -match 'monitor' -or $cmd -match 'server\.ts') {
+                        $Agent = 'browser'
+                        break
+                    }
+                }
+                if ($name -match 'qoder') { $Agent = 'qoder'; break }
+                if ($name -match 'claude') { $Agent = 'claude-code'; break }
+                if ($name -match 'opencode') { $Agent = 'opencode'; break }
+                if ($name -match 'cursor') { $Agent = 'cursor'; break }
+                if ($name -match 'windsurf') { $Agent = 'windsurf'; break }
+                if ($name -match 'codex') { $Agent = 'codex'; break }
+                if ($name -match 'antigravity') { $Agent = 'antigravity'; break }
+                $p = $p.Parent
+            }
+        } catch {}
+    }
+
+    # 3. Environment variables fallback only if ancestry didn't resolve
+    if (-not $Agent) {
+        if ($env:QODER_CLI -or $env:QODER_PRODUCT_ID -or $env:QODER_SESSION_TYPE) {
             # qoder sets OPENCODE_DISABLE_CHANNEL_DB for compatibility, so it
             # must be tested before the opencode branch or it reads as opencode
             $Agent = 'qoder'
@@ -44,27 +78,19 @@ function Get-CallerIdentity {
             $Agent = 'codex'
         } elseif ($env:AIDER_MODEL) {
             $Agent = 'aider'
+        } elseif ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
+            $Agent = 'antigravity'
         } else {
-            # Check process ancestry
-            try {
-                $p = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
-                while ($p) {
-                    $name = $p.ProcessName.ToLower()
-                    if ($name -match 'antigravity') { $Agent = 'antigravity'; break }
-                    if ($name -match 'opencode') { $Agent = 'opencode'; break }
-                    if ($name -match 'qoder') { $Agent = 'qoder'; break }
-                    if ($name -match 'claude') { $Agent = 'claude-code'; break }
-                    if ($name -match 'codex') { $Agent = 'codex'; break }
-                    if ($name -match 'cursor') { $Agent = 'cursor'; break }
-                    if ($name -match 'windsurf') { $Agent = 'windsurf'; break }
-                    $p = $p.Parent
-                }
-            } catch {}
+            $Agent = 'terminal'
         }
     }
 
-    if (-not $Agent) {
-        $Agent = 'terminal'
+    # Human / browser / terminal callers do not have an LLM model
+    if ($Agent -eq 'browser' -or $Agent -eq 'terminal') {
+        return [PSCustomObject]@{
+            Agent = $Agent
+            Model = $null
+        }
     }
 
     # Resolve Model via Ground-Truth Thread Inspection or Environment
@@ -315,7 +341,7 @@ function Get-VaultApprovalUrl {
         [string]$Server = $null
     )
 
-    $identity = Get-CallerIdentity -Agent $Agent -Model $Model
+    $identity = Get-CallerIdentity -Agent $Agent -Model $Model -PromptContext $PromptContext
     $resolvedAgent = $identity.Agent
     $resolvedModel = $identity.Model
 
