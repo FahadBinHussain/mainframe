@@ -73,7 +73,11 @@ function Seal-BwEmail {
 }
 
 # --- vault session (must be unlocked) ---
-$sessionKeyFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$sessionKeyFile = Get-MainframeSessionKeyPath
 if (-not (Test-Path -LiteralPath $sessionKeyFile)) {
     throw "vault is locked: no session.key found. run automata-private\bitwarden.com\unlock.ps1 first, then retry."
 }
@@ -92,7 +96,7 @@ if ($bwEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 
 # --- github token from vault ---
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
-$githubAccountRoot = Join-Path $env:APPDATA 'mainframe\accounts\github'
+$githubAccountRoot = Join-Path (Get-MainframeAccountsDir) 'github'
 $currentProfileFile = Join-Path $githubAccountRoot 'current.json'
 if (-not (Test-Path -LiteralPath $currentProfileFile)) {
     throw "no active github profile at $currentProfileFile - run github-account.ps1 use <email> first"

@@ -42,7 +42,11 @@ $ErrorActionPreference = 'Stop'
 $tool = 'minimax'
 $serviceName = 'MiniMax Code'
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\minimax'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'minimax'
 $currentFile = Join-Path $accountRoot 'current.json'
 
 # ---- the oauth contract, read out of the shipped runtime -------------------

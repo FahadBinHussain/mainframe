@@ -25,6 +25,10 @@ $script:VaultItemsCacheSession = $null
 $script:VaultSessionOkSession = $null
 $script:DefaultSessionTtlMinutes = 60
 
+# the profile root is resolved by one shared module, so windows and linux read
+# the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
 function Get-VaultSessionTtlMinutes {
     if ($env:MAINFRAME_VAULT_TTL_MINUTES) {
         try { return [int]$env:MAINFRAME_VAULT_TTL_MINUTES } catch {}
@@ -47,7 +51,7 @@ function Get-VaultSessionTtlMinutes {
 }
 
 function Lock-VaultSession {
-    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+    $sessionFile = Get-MainframeSessionKeyPath
     if (Test-Path -LiteralPath $sessionFile) {
         Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
     }
@@ -61,7 +65,7 @@ function Lock-VaultSession {
 function Get-VaultSession {
     param([switch]$AllowExpired)
 
-    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+    $sessionFile = Get-MainframeSessionKeyPath
     $ttlMinutes = Get-VaultSessionTtlMinutes
 
     if (Test-Path -LiteralPath $sessionFile) {
@@ -159,7 +163,7 @@ function Ensure-VaultSession {
                 $unlockOut = @(& bw unlock --raw --passwordenv BW_PASSWORD 2>&1)
                 $rawKey = $unlockOut | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z0-9+/=]{20,}$' } | Select-Object -Last 1
                 if ($rawKey) {
-                    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+                    $sessionFile = Get-MainframeSessionKeyPath
                     New-Item -ItemType Directory -Force -Path (Split-Path $sessionFile) | Out-Null
                     Set-Content -LiteralPath $sessionFile -Value $rawKey.Trim() -Encoding UTF8 -NoNewline
                     $env:BW_SESSION = $rawKey.Trim()
@@ -382,4 +386,4 @@ function Write-VaultSecretToExisting {
     return $item.id
 }
 
-Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache
+Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot

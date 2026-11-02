@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\firebase'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'firebase'
 $currentFile = Join-Path $accountRoot 'current.json'
 $defaultConfigRoot = Join-Path $env:USERPROFILE '.config'
 $defaultConfigPath = Join-Path $defaultConfigRoot 'configstore\firebase-tools.json'

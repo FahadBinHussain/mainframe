@@ -115,6 +115,9 @@ $approvalModule = Join-Path $MainframeDir 'vault-approval.psm1'
 if (Test-Path -LiteralPath $approvalModule) {
     Import-Module $approvalModule -Force -DisableNameChecking
 }
+$pathsModule = Join-Path $MainframeDir 'mainframe-paths.psm1'
+if (-not (Test-Path -LiteralPath $pathsModule)) { Die "mainframe-paths.psm1 is missing from $MainframeDir - the profile-root rules live there. Pull the newest mainframe and re-run." }
+Import-Module $pathsModule -Force -DisableNameChecking
 
 # --- sealed bw email (bw-email.enc.json) ---
 # publish-backup.ps1 / seal-bw-email.ps1 seal the vault account email with a
@@ -224,7 +227,7 @@ if ($bwStatus.status -eq 'unauthenticated') {
             }
         }
     }
-    $bwEmailFile = Join-Path $env:APPDATA 'mainframe\bw-email.txt'
+    $bwEmailFile = Join-Path (Get-MainframeProfileRoot) 'bw-email.txt'
     if (-not $bwEmail -and (Test-Path -LiteralPath $bwEmailFile)) {
         $savedEmail = Get-Content -LiteralPath $bwEmailFile -Raw -ErrorAction SilentlyContinue
         if (-not [string]::IsNullOrWhiteSpace($savedEmail)) { $bwEmail = $savedEmail.Trim() }
@@ -362,7 +365,7 @@ if ($bwStatus.status -ne 'unlocked') {
     Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
     $obtainedMasterPw = $null
     # persist for the restore helpers that read session.key
-    $sk = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+    $sk = Get-MainframeSessionKeyPath
     New-Item -ItemType Directory -Force -Path (Split-Path $sk) | Out-Null
     Set-Content -LiteralPath $sk -Value $session -Encoding UTF8
 } else {

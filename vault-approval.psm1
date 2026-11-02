@@ -7,6 +7,10 @@
     and listens on the single-use relay topic for client-side encrypted master password.
 #>
 
+# the profile root is resolved by one shared module, so windows and linux read
+# the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
 function Get-CallerIdentity {
     param(
         [string]$Agent,
@@ -512,7 +516,7 @@ function Wait-VaultApprovalCiphertext {
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
     $downloadPath = Join-Path $HOME "Downloads\$LocalFileName"
-    $sessionFile = Join-Path $env:APPDATA 'mainframe\accounts\bitwarden\session.key'
+    $sessionFile = Get-MainframeSessionKeyPath
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $pollDelay = 2
 
@@ -690,4 +694,9 @@ Export-ModuleMember -Function `
     Test-VaultApprovalCiphertext, `
     Wait-VaultApprovalCiphertext, `
     Decrypt-VaultApprovalCiphertext, `
-    Get-VaultMasterPassword
+    Get-VaultMasterPassword, `
+    Get-MainframeProfileRoot, `
+    Get-MainframeAccountsDir, `
+    Get-MainframeAccountDir, `
+    Get-MainframeSessionKeyPath, `
+    Get-MainframeCheckoutRoot
