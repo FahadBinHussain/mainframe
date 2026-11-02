@@ -2007,7 +2007,7 @@ than `Add-Content`, which writes platform CRLF.
 - **1-hour session TTL & on-demand 1-tap re-approval (2026-10-27)**: Bitwarden CLI has no default auto-lock TTL for CLI sessions, which previously allowed `session.key` to remain valid on disk indefinitely. `vault-secret.psm1` now enforces a 60-minute TTL (configurable via `MAINFRAME_VAULT_TTL_MINUTES` or `vaultTtlMinutes` in `mainframe.config.json`). When `session.key` is older than 60 minutes, `Get-VaultSession` purges `session.key` and runs `bw lock`. `Ensure-VaultSession` triggers 1-tap mobile approval on demand (`Get-VaultMasterPassword`), auto-launching the prompt on the attached phone or sending ntfy push, obtaining a fresh 1-hour session token seamlessly without typing passwords. `vault-lock.ps1` locks the vault immediately on demand.
 - **Number matching & host provenance (2026-10-27)**: To protect against MFA fatigue, prompt bombing, and distinguishing legitimate agent requests from unauthorized triggers during the day, approval requests generate a cryptographic 2-digit verification code (`code`), requesting hostname (`host`), and context (`ctx`). The runner terminal outputs `VERIFICATION CODE: [ XX ]`, and `docs/vault-tab.html` renders a prominent glowing verification card showing that code, hostname, and action. Users only approve if the code on their phone screen matches the number printed on their terminal monitor.
 - **Agent, harness & model provenance (2026-10-27)**: Approval requests include full caller identity (`agent` and `model`) across terminal banners, ntfy push notifications, and the mobile approval card. Runners resolve identity via explicit `-Agent`/`-Model` args, environment overrides (`MAINFRAME_AGENT_NAME`, `MAINFRAME_MODEL_NAME`, `AGENT_NAME`, `MODEL_NAME`), or automatic ground-truth detection: for Antigravity, runners inspect the active thread's conversation transcript on disk (`<appDataDir>/brain/<convoId>/.system_generated/logs/transcript.jsonl`) for system-injected `Model Selection` settings changes (tail and head), extracting the exact active model (e.g. `Gemini 3.8 Flash (High)`) without hallucination or hardcoding; for OpenCode/Claude/Codex/Aider, runners inspect harness env vars or process ancestry, falling back to `terminal` for interactive human shells. `docs/vault-tab.html` renders animated tags (Rule 10) for host (`💻`), agent (`🤖`), model (`🧠`), and action context (`⚡`), and updates the header badge and description to clearly identify who is requesting vault access.
-- **cross-agent 1-hour session reuse & stampede mitigation (2026-10-28)**: vault unlock is shared across all agents on the box via the profile root's `accounts/bitwarden/session.key` (windows: `%APPDATA%\mainframe\...`, linux: `$XDG_CONFIG_HOME/mainframe\...` - see `mainframe-paths.psm1`). 1-tap mobile approval unlocks the vault once for 60 minutes for ALL agents (Antigravity, OpenCode, Claude Code, terminal). Previously, transient Node/Bitwarden CLI failures (concurrent execution locking `data.json`, stderr output breaking JSON parse) caused `Test-VaultSession` and external scripts (`get-session.ps1`, `unlock.ps1`) to mistakenly conclude the vault was locked or delete `session.key`, triggering duplicate approval prompts on phone within the same hour. `Test-VaultSession` now passes `--session` explicitly and retries once before declaring locked. `Wait-VaultApprovalCiphertext` in `vault-approval.psm1` polls disk for fresh `session.key` writes while waiting for approval, instantly unblocking concurrent agent runs without asking for duplicate approvals.
+- **cross-agent 1-hour session reuse & stampede mitigation (2026-10-28)**: vault unlock is shared across all agents on the box via the profile root's `accounts/bitwarden/session.key` (windows: `%APPDATA%\mainframe\...`, linux: `$XDG_CONFIG_HOME/mainframe\...` - see `mainframe-paths.psm1`). 1-tap mobile approval unlocks the vault once for 60 minutes for ALL agents (Antigravity, OpenCode, Claude Code, terminal). Previously, transient Node/Bitwarden CLI failures (concurrent execution locking `data.json`, stderr output breaking JSON parse) caused `Test-VaultSession` and external scripts (`get-session.ps1`, `unlock.ps1`) to mistakenly conclude the vault was locked or delete `session.key`, triggering duplicate approval prompts on phone within the same hour. `Test-VaultSession` now passes `--session` explicitly and retries once before declaring locked. `Wait-VaultApprovalCiphertext` in `vault-approval.psm1` polls disk for fresh `session.key` writes while waiting for approval, instantly unblocking concurrent agent runs without asking for duplicate approvals. that only helps a request that is ALREADY asking, though - the prompt itself is single-flight since 2026-11-02, see "one phone prompt at a time" below.
 - **the linux side now has the same 1-hour session (2026-11-01)**: `linux_real.py` used to unlock the vault on EVERY run and lock it again in a `finally`, so a container asked the phone for a tap every single time. it now caches the raw bw session key at `<work_root>/vault/session.key` (mode 600) exactly like windows does at `%APPDATA%\mainframe\accounts\bitwarden\session.key`: a run inside the TTL reuses it and asks for NOTHING, an expired one is locked and purged so the phone is asked again, and `--lock-vault` (the linux twin of `vault-lock.ps1`) purges it on demand. the TTL comes from the same `vaultTtlMinutes` config key with the same precedence as windows (env > config > 60). the cli stays unlocked while a fresh session is cached - that is what keeps the cached key usable, and it is the windows behaviour too. symmtry is the point: one tap per hour on every machine, not one per run.
 - **parity proven on the muse container (2026-11-01)**: two consecutive `linux_real.py` runs in the container, the second one inside the TTL: `verification codes pushed: 0`, `times it asked the phone: 0`, `reused the cached session: 1`, `rate limit hits: 0`, `failures: []`. the windows side proves the same from the other end - the cached session key alone reads the vault (`bw list items --session <cached>` -> 1334 items) with no unlock and no phone approval, and `bw status` says `locked` on both machines while the cached key still works. the session key does not need the cli to be unlocked, only to be *authenticated* (`unauthenticated` is the one state that forces a new approval).
 - **one profile root for both platforms (2026-11-02)**: `mainframe-paths.psm1` is the ONLY place that knows where the profile lives - `%APPDATA%\mainframe` on windows, `$XDG_CONFIG_HOME\mainframe` (or `~/.config/mainframe`) on linux. every account helper, both vault modules and the session key path go through it, so the same helper code finds the same profiles, the same cached session and the same tool state on either platform. the windows layout is unchanged (existing profiles stay put) and `$env:MAINFRAME_PROFILE_ROOT` overrides it. `tests/mainframe-paths.Tests.ps1` pins the rule down under BOTH runtimes, including the linux branch (it clears `$env:OS` to take it). **never hardcode `$env:APPDATA` in a new script** - use `Get-MainframeAccountsDir` / `Get-MainframeAccountDir` / `Get-MainframeSessionKeyPath`, or the helper will silently look in the wrong place on linux.
@@ -2141,3 +2141,66 @@ and post garbage that killed a live approval.
   fingerprint approval" ticked; after that it is 1-tap again on every machine
   that uses that same `pagesBase`. so: if the phone suddenly asks for the
   password, it is the origin that moved, not a broken relay.
+
+### one phone prompt at a time (single-flight approval, 2026-11-02)
+
+several agents asking for the vault at the same moment each minted their own
+keypair, topic and push, so the phone got one prompt per agent. that was worse
+than noise: every pending request polled the relay every 2 s, and tripping
+ntfy's rate limit also eats the *push*, so the request that mattered went
+silent (the poll then backs off to 30 s and the phone never hears anything).
+
+`vault-approval.psm1` now serialises the whole thing through one file next to
+the cached session:
+
+    <profile root>/accounts/bitwarden/approval.lock
+
+- the first requester creates it atomically (`[IO.File]::Move` from a temp
+  file), so two requesters can never both believe they own the phone. only that
+  one pushes, opens the adb popup and polls the relay.
+- everybody else reads it and WAITS: no push, no phone popup, no relay traffic.
+  a waiter watches only `session.key` and the lock record, and prints one line
+  naming the request it is behind (`code [42] by opencode @ LAPTOP-MAIN`).
+- a session key written while a request waits means another agent already
+  unlocked: `Get-VaultMasterPassword` returns `__SESSION_ALREADY_UNLOCKED__`
+  and NOTHING is pushed. `Ensure-VaultSession` and `vault-flow.ps1` treat that
+  as success, so a queue drains with one tap.
+- the turn carries its own deadline (`startedAt`/`expiresAt` = its wait window
+  plus 15 s) so a crashed holder cannot wedge the queue: once it lapses (plus a
+  5 s grace for a live holder finishing its own record) exactly one waiter
+  takes over and asks the phone. that is the rule - wait for the live request to
+  go stale, then the next one asks.
+- after a successful tap the record is kept 20 s in state `approved` (expiry
+  pushed forward) because the caller still has to run `bw unlock` and write
+  `session.key`; a waiter that grabbed the turn in that gap would push a second
+  prompt for an already-approved unlock. the next requester reads the fresh
+  session key instead.
+- `Close-VaultApprovalRequest` runs in `finally`, so a timeout, a failed push or
+  a throw always hands the turn back to the queue.
+- a waiter gives up after `QueueTimeoutSeconds` (default `max(600,
+  TimeoutSeconds*4)`) with a loud error naming the lock path and its holder -
+  never a silent empty return.
+
+the record is JSON: `token` (ownership - close and takeover only ever touch the
+token they read), `pid`, `host`, `context`, `agent`, `model`, `state`, `code`,
+`sid`, `startedAt`, `expiresAt`.
+
+`tests/vault-approval-lock.Tests.ps1` pins the behaviour with no pester, no
+network and no phone: two requesters started together produce exactly one push
+and the second one only after the first expired, a waiter returns
+`__SESSION_ALREADY_UNLOCKED__` without pushing, a dead holder is taken over, and
+an approved record is reused without the crash grace. run it under BOTH runtimes:
+
+    pwsh -NoProfile -File tests/vault-approval-lock.Tests.ps1
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests/vault-approval-lock.Tests.ps1
+
+if a lock ever looks wedged (a bogus far-future `expiresAt` from a suspended
+process), deleting the file is safe - it only serialises prompts, it never holds
+a secret. normally nothing needs doing: the deadline handles it.
+
+**known gap**: `linux_real.py` still carries its own python approval path
+(`obtain_master_password` + `dispatch_ntfy_unlock`) and defines `vault_session`
+twice, so the python one is the effective definition until that path is deleted
+in favour of `vault-flow.ps1`. it does not read the lock. once linux runs the
+pwsh flow (the stated end state) it is covered automatically, because the lock
+lives in `Get-VaultMasterPassword`, which the cli calls.

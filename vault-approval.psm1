@@ -604,6 +604,353 @@ function Decrypt-VaultApprovalCiphertext {
     return [System.Text.Encoding]::UTF8.GetString($plainBytes)
 }
 
+# --- single flight: one phone prompt at a time -------------------------------
+#
+# Every requester used to mint its own keypair + topic and push its own
+# notification. Two agents that start together therefore produced two prompts
+# on the phone, and both of them polled the relay every 2 seconds - which is
+# exactly how the ntfy rate limit gets tripped, and a tripped limit also eats
+# the push (see AGENTS.md). The phone must not be asked twice for one unlock.
+#
+# So the request that gets the phone is serialised through one small file next
+# to session.key:
+#
+#   <profile root>/accounts/bitwarden/approval.lock
+#
+# - the first requester creates it (atomic create, never a truncate) and asks
+#   the phone. it owns the turn until it either gets the password, times out,
+#   or crashes.
+# - everybody else reads it and WAITS. a waiter never pushes, never opens the
+#   phone, and never polls the relay - it only watches session.key and the lock
+#   file, so a queue of agents costs the relay nothing.
+# - the turn has a deadline written into the file (its own wait window plus a
+#   margin), so a crashed holder cannot wedge the queue: once it lapses, one
+#   waiter takes over and asks the phone. that is the "wait until the request
+#   is stale, then send the next one" rule.
+# - a waiter returns __SESSION_ALREADY_UNLOCKED__ the moment any session is
+#   unlocked while it waits, so a queue drains without a second tap.
+#
+# The lock always records who holds it (pid, host, agent, model, code), so a
+# queue reads as "waiting on code [42] by opencode @ LAPTOP-MAIN", not silence.
+$script:VaultApprovalLockMarginSeconds = 15   # how long past its own wait a request keeps the turn
+$script:VaultApprovalLockGraceSeconds = 5     # how long past the deadline before a waiter takes over
+$script:VaultApprovalLockSettleSeconds = 20   # keep the turn while the caller writes session.key
+
+function Get-VaultApprovalLockPath {
+    <#
+    .SYNOPSIS
+        the one lock file that serialises phone approval requests.
+    #>
+    $dir = Join-Path (Get-MainframeAccountsDir) 'bitwarden'
+    if (-not (Test-Path -LiteralPath $dir)) {
+        $null = New-Item -ItemType Directory -Force -Path $dir -ErrorAction Stop
+    }
+    return (Join-Path $dir 'approval.lock')
+}
+
+function ConvertFrom-VaultApprovalLockJson {
+    param([string]$Json, [string]$Path)
+
+    if (-not $Json -or -not $Json.Trim()) { return $null }
+    try {
+        $data = $Json | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    if (-not $data.token) { return $null }
+
+    $started = if ($data.startedAt) { [long]$data.startedAt } else { 0 }
+    $expires = if ($data.expiresAt) { [long]$data.expiresAt } else { 0 }
+    $startedLocal = if ($started -gt 0) {
+        [DateTimeOffset]::FromUnixTimeSeconds($started).LocalDateTime.ToString('HH:mm:ss')
+    } else {
+        'unknown'
+    }
+
+    return [pscustomobject]@{
+        Path           = $Path
+        Token          = [string]$data.token
+        Pid            = [int]$data.pid
+        Host           = [string]$data.host
+        Context        = [string]$data.context
+        Agent          = [string]$data.agent
+        Model          = [string]$data.model
+        State          = [string]$data.state
+        Code           = [string]$data.code
+        Sid            = [string]$data.sid
+        StartedAtUnix  = $started
+        ExpiresAtUnix  = $expires
+        StartedAtLocal = $startedLocal
+        Data           = $data
+    }
+}
+
+function Read-VaultApprovalLock {
+    param([string]$Path = (Get-VaultApprovalLockPath))
+
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    $json = $null
+    try {
+        $json = [IO.File]::ReadAllText($Path)
+    } catch {
+        # a holder rewriting the record (or a transient share violation) reads
+        # as "no record yet"; the caller loops, it never treats this as owned.
+        return $null
+    }
+    return (ConvertFrom-VaultApprovalLockJson -Json $json -Path $Path)
+}
+
+function Write-VaultApprovalLockFile {
+    <#
+    .SYNOPSIS
+        create the lock record atomically. returns $false when somebody already
+        holds the turn - the create either wins the whole file or loses it, so
+        two requesters can never both believe they own the phone.
+    #>
+    param(
+        [string]$Path,
+        [System.Collections.IDictionary]$Data
+    )
+
+    $tmp = "$Path.$PID.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    $json = ConvertTo-Json -InputObject $Data -Compress
+    try {
+        [IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        [IO.File]::Move($tmp, $Path)
+        return $true
+    } catch [System.IO.IOException] {
+        return $false
+    } finally {
+        if ([IO.File]::Exists($tmp)) {
+            [IO.File]::Delete($tmp)
+        }
+    }
+}
+
+function Set-VaultApprovalRequestDetails {
+    <#
+    .SYNOPSIS
+        stamp the verification code / relay topic onto our own lock record, so
+        a queue can say which request it is waiting on.
+    #>
+    param(
+        [string]$Path,
+        [string]$Token,
+        [string]$Code,
+        [string]$Sid
+    )
+
+    $current = Read-VaultApprovalLock -Path $Path
+    if (-not $current -or $current.Token -ne $Token) { return $false }
+    $current.Data.code = $Code
+    $current.Data.sid = $Sid
+    try {
+        [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $current.Data -Compress))
+        return $true
+    } catch {
+        Write-Warning "could not record the approval code on $Path - the queue will show it without a code: $_"
+        return $false
+    }
+}
+
+function Remove-VaultApprovalLock {
+    <#
+    .SYNOPSIS
+        delete the lock, but only while it still carries the expected token -
+        a record that somebody took over is never deleted out from under them.
+    #>
+    param(
+        [string]$Path,
+        [string]$Token
+    )
+
+    $current = Read-VaultApprovalLock -Path $Path
+    if (-not $current) { return $true }
+    if ($Token -and $current.Token -ne $Token) { return $false }
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    return (-not (Test-Path -LiteralPath $Path))
+}
+
+function Test-VaultSessionKeyFresh {
+    <#
+    .SYNOPSIS
+        true when a session key was written at or after the given moment - the
+        same rule Wait-VaultApprovalCiphertext uses to notice another agent's
+        unlock.
+    #>
+    param(
+        [string]$SessionFile = (Get-MainframeSessionKeyPath),
+        [DateTime]$SinceUtc = [DateTime]::MinValue
+    )
+
+    if ($SinceUtc -eq [DateTime]::MinValue) { return $false }
+    if (-not (Test-Path -LiteralPath $SessionFile)) { return $false }
+    try {
+        $written = (Get-Item -LiteralPath $SessionFile).LastWriteTimeUtc
+        return ($written -ge $SinceUtc.ToUniversalTime())
+    } catch {
+        return $false
+    }
+}
+
+function Enter-VaultApprovalRequest {
+    <#
+    .SYNOPSIS
+        take the phone turn, or wait quietly until the live request goes stale.
+
+    .DESCRIPTION
+        Returns an object with either:
+            Acquired = $true   - this caller owns the prompt and must close the
+                                 request when it is done (Close-VaultApprovalRequest)
+            AlreadyUnlocked    - a session key appeared while waiting; nothing
+                                 was pushed and nothing must be
+        It throws when the queue itself cannot move (a dead holder that never
+        releases, an unreadable lock path), so a stuck queue is never silent.
+    #>
+    param(
+        [string]$PromptContext = 'vault access',
+        [int]$TimeoutSeconds = 300,
+        [string]$Agent = $null,
+        [string]$Model = $null,
+        [string]$HostName = $env:COMPUTERNAME,
+        [DateTime]$SinceUtc = [DateTime]::MinValue,
+        [int]$QueueTimeoutSeconds = 0
+    )
+
+    $path = Get-VaultApprovalLockPath
+    $sessionFile = Get-MainframeSessionKeyPath
+    if ($SinceUtc -eq [DateTime]::MinValue) { $SinceUtc = [DateTime]::UtcNow }
+    if ($QueueTimeoutSeconds -le 0) {
+        # enough turns for a stampede to drain, and never less than ten minutes
+        # so a slow tap is not cut short by the queue itself.
+        $QueueTimeoutSeconds = [Math]::Max(600, $TimeoutSeconds * 4)
+    }
+    $queueDeadline = [DateTime]::UtcNow.AddSeconds($QueueTimeoutSeconds)
+    $waitingOn = ''
+    $waited = $false
+
+    while ($true) {
+        if (Test-VaultSessionKeyFresh -SessionFile $sessionFile -SinceUtc $SinceUtc) {
+            if ($waited) {
+                Write-Host 'the vault was unlocked while this request waited - no phone prompt was sent' -ForegroundColor Green
+            }
+            return [pscustomobject]@{ Acquired = $false; AlreadyUnlocked = $true; Path = $path; Token = $null }
+        }
+
+        if ([DateTime]::UtcNow -gt $queueDeadline) {
+            $owner = Read-VaultApprovalLock -Path $path
+            $ownerText = if ($owner) {
+                "code [$($owner.Code)] by $($owner.Agent) @ $($owner.Host), pid $($owner.Pid), expires $($owner.ExpiresAtUnix)"
+            } else {
+                'nobody - the lock file is gone'
+            }
+            throw "another agent's phone approval has been in flight for more than $QueueTimeoutSeconds seconds and this request gave up waiting. nothing was pushed to the phone from this request. lock: $path; holder: $ownerText"
+        }
+
+        $holder = Read-VaultApprovalLock -Path $path
+        $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
+        if ($holder -and $holder.ExpiresAtUnix -gt $nowUnix) {
+            $holderId = "$($holder.Pid)|$($holder.StartedAtUnix)"
+            if ($holderId -ne $waitingOn) {
+                $waitingOn = $holderId
+                $waited = $true
+                $codeText = if ($holder.Code) { "code [$($holder.Code)]" } else { 'no code yet' }
+                $left = [int]($holder.ExpiresAtUnix - $nowUnix)
+                Write-Host ("another request already has the phone ({0}, {1} @ {2}, started {3}, {4}s left) - waiting quietly, no second prompt" -f $codeText, $holder.Agent, $holder.Host, $holder.StartedAtLocal, $left) -ForegroundColor Yellow
+            }
+            Start-Sleep -Seconds 2
+            continue
+        }
+
+        if ($holder) {
+            # the deadline lapsed: either the holder crashed, or it is in its
+            # last seconds (it still deletes its own record when it finishes).
+            # the grace window keeps a live holder from losing its own turn.
+            if ($holder.State -eq 'approved') {
+                # the previous request succeeded and held the turn only while
+                # its caller wrote session.key. that state is terminal, so it
+                # is safe to reuse the slot right away.
+                $null = Remove-VaultApprovalLock -Path $path -Token $holder.Token
+            } elseif ($holder.ExpiresAtUnix -le ($nowUnix - $script:VaultApprovalLockGraceSeconds)) {
+                if (Remove-VaultApprovalLock -Path $path -Token $holder.Token) {
+                    Write-Warning ("taking over the expired phone approval ({0} from {1} @ {2}, started {3}) - this request is now the one asking" -f $(if ($holder.Code) { "code [$($holder.Code)]" } else { 'no code' }), $holder.Agent, $holder.Host, $holder.StartedAtLocal)
+                }
+            }
+            Start-Sleep -Seconds 1
+            continue
+        }
+
+        $token = [guid]::NewGuid().ToString('N')
+        $startedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $expiresAt = $startedAt + [Math]::Max(30, $TimeoutSeconds) + $script:VaultApprovalLockMarginSeconds
+        $record = [ordered]@{
+            token     = $token
+            pid       = $PID
+            host      = $HostName
+            context   = $PromptContext
+            agent     = $Agent
+            model     = $Model
+            state     = 'pending'
+            code      = ''
+            sid       = ''
+            startedAt = $startedAt
+            expiresAt = $expiresAt
+        }
+        if (Write-VaultApprovalLockFile -Path $path -Data $record) {
+            if ($waited) {
+                Write-Host 'the earlier request is gone - this request now asks the phone' -ForegroundColor Cyan
+            }
+            return [pscustomobject]@{
+                Acquired      = $true
+                AlreadyUnlocked = $false
+                Path          = $path
+                Token         = $token
+                StartedAtUnix = $startedAt
+                ExpiresAtUnix = $expiresAt
+            }
+        }
+        # somebody else created it first; loop and wait on them
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+function Close-VaultApprovalRequest {
+    <#
+    .SYNOPSIS
+        give the turn back. -Approved keeps it for a moment, because the caller
+        still has to run `bw unlock` and write session.key - a waiter that
+        grabbed the turn in that gap would push a second prompt.
+    #>
+    param(
+        [string]$Path,
+        [string]$Token,
+        [switch]$Approved
+    )
+
+    if (-not $Path -or -not $Token) { return }
+    $current = Read-VaultApprovalLock -Path $Path
+    if (-not $current) { return }
+    if ($current.Token -ne $Token) {
+        # our record lapsed while we were still waiting; whoever took over owns
+        # the file now, so leave it (and say so - this is not normal).
+        Write-Warning "the approval lock at $Path was taken over by another request while this one was still running - leaving it alone"
+        return
+    }
+
+    if ($Approved) {
+        $current.Data.state = 'approved'
+        $current.Data.expiresAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + $script:VaultApprovalLockSettleSeconds
+        try {
+            [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $current.Data -Compress))
+            return
+        } catch {
+            Write-Warning "could not mark the approval lock as resolved - releasing it now: $_"
+        }
+    }
+    $null = Remove-VaultApprovalLock -Path $Path -Token $Token
+}
+
 function Get-VaultMasterPassword {
     param(
         [string]$NtfyTopic = $null,
@@ -614,7 +961,8 @@ function Get-VaultMasterPassword {
         [string]$HostName = $env:COMPUTERNAME,
         [DateTime]$StartTimeUtc = [DateTime]::MinValue,
         [string]$Server = $null,
-        [string]$PagesBase = $null
+        [string]$PagesBase = $null,
+        [int]$QueueTimeoutSeconds = 0
     )
 
     # Resolve ntfy topic
@@ -623,14 +971,32 @@ function Get-VaultMasterPassword {
     }
     $resolvedServer = Get-VaultNtfyServer -Server $Server
 
-    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+    # A call means "the caller believes the vault is locked". Freshness is
+    # measured from here, so a session another agent writes while we queue
+    # reads as "already unlocked" instead of as a reason to ask again.
+    if ($StartTimeUtc -eq [DateTime]::MinValue) {
+        $StartTimeUtc = [DateTime]::UtcNow
+    }
+
+    # Single flight: one prompt on the phone, everybody else waits for it.
+    $turn = Enter-VaultApprovalRequest -PromptContext $PromptContext -TimeoutSeconds $TimeoutSeconds `
+        -Agent $Agent -Model $Model -HostName $HostName -SinceUtc $StartTimeUtc `
+        -QueueTimeoutSeconds $QueueTimeoutSeconds
+    if ($turn.AlreadyUnlocked) {
+        return '__SESSION_ALREADY_UNLOCKED__'
+    }
+
+    $approved = $false
+    $rsa = $null
     try {
+        $rsa = [System.Security.Cryptography.RSA]::Create(2048)
         $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext $PromptContext -HostName $HostName -Agent $Agent -Model $Model -ExpiresInSeconds $TimeoutSeconds -Server $resolvedServer -PagesBase $PagesBase
         $url = $session.Url
         $sid = $session.Sid
         $code = $session.Code
         $resolvedAgent = $session.Agent
         $resolvedModel = $session.Model
+        $null = Set-VaultApprovalRequestDetails -Path $turn.Path -Token $turn.Token -Code $code -Sid $sid
 
         $callerDisplay = if ($resolvedModel) { "$resolvedAgent ($resolvedModel) @ $HostName" } else { "$resolvedAgent @ $HostName" }
 
@@ -667,6 +1033,9 @@ function Get-VaultMasterPassword {
 
         if ($ct) {
             $pw = Decrypt-VaultApprovalCiphertext -Rsa $rsa -Ciphertext $ct
+            # the caller runs `bw unlock` next; keep the turn a little longer so
+            # no queued waiter beats it to a second prompt.
+            $approved = $true
             Write-Host "password decrypted successfully via 1-tap biometric approval" -ForegroundColor Green
             return $pw
         } else {
@@ -675,7 +1044,10 @@ function Get-VaultMasterPassword {
             return $null
         }
     } finally {
-        $rsa.Dispose()
+        if ($rsa) { $rsa.Dispose() }
+        # the turn is always given back: on a password, on a timeout, on a
+        # failed push, and on a throw. a queue never stalls behind a dead run.
+        Close-VaultApprovalRequest -Path $turn.Path -Token $turn.Token -Approved:$approved
     }
 }
 
@@ -695,6 +1067,11 @@ Export-ModuleMember -Function `
     Wait-VaultApprovalCiphertext, `
     Decrypt-VaultApprovalCiphertext, `
     Get-VaultMasterPassword, `
+    Get-VaultApprovalLockPath, `
+    Read-VaultApprovalLock, `
+    Enter-VaultApprovalRequest, `
+    Close-VaultApprovalRequest, `
+    Test-VaultSessionKeyFresh, `
     Get-MainframeProfileRoot, `
     Get-MainframeAccountsDir, `
     Get-MainframeAccountDir, `
