@@ -48,6 +48,14 @@ class PythonVaultDuplicateIsGoneTests(unittest.TestCase):
         self.assertIn("vault-flow.ps1", source)
         self.assertNotIn("secretsPassword =", source)
 
+    def test_the_flow_never_logs_the_approval_topic(self):
+        # the topic is the whole privacy of the approval channel: whoever holds
+        # it can read requests and push fake cards. the flow's log line goes to
+        # a screen someone may paste, so it names the relay and the page only.
+        source = (REPO / "vault-flow.ps1").read_text(encoding="utf-8")
+        self.assertNotIn("topic '$approvalTopic'", source)
+        self.assertIn("relay '$approvalServer'", source)
+
 
 class VaultFlowCommandTests(unittest.TestCase):
     def test_pins_the_one_cli_with_the_json_contract(self):

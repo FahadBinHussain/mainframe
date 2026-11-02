@@ -220,10 +220,14 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     # the channel is resolved by the module, from the same config file the
     # windows side reads - so the operator sees which relay and page are in
     # use without the caller having to resolve anything itself.
+    #
+    # the topic is NOT logged: it is the whole privacy of the approval channel
+    # (anyone who has it can read requests and push fake cards), and this log
+    # goes to a screen someone may paste. only the relay and the page are named.
     $approvalTopic = Get-VaultNtfyTopic -Topic $NtfyTopic
     $approvalServer = Get-VaultNtfyServer -Server $Server
     $approvalPages = Get-VaultPagesBase -PagesBase $PagesBase
-    Write-FlowLog "phone approval channel: topic '$approvalTopic', relay '$approvalServer', page '$approvalPages'"
+    Write-FlowLog "phone approval channel: relay '$approvalServer', page '$approvalPages'"
     $approvalRequested = $true
     $password = Get-VaultMasterPassword -NtfyTopic $approvalTopic -Server $approvalServer -PagesBase $approvalPages `
         -TimeoutSeconds $TimeoutSeconds -PromptContext $PromptContext

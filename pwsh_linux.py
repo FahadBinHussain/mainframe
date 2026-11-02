@@ -62,6 +62,14 @@ def _fetch_metadata(url: str) -> bytes:
         response = urllib.request.build_opener(_NoRedirect()).open(request, timeout=TIMEOUT)
     except RuntimeError:
         raise
+    except urllib.error.HTTPError as exc:
+        # a rate limit is not a flaky network: unauthenticated api.github.com
+        # calls from a shared host answer 403, and saying so is the difference
+        # between "wait and retry" and hunting a bug in the resolver.
+        if exc.code in {403, 429}:
+            raise RuntimeError(
+                f"Official PowerShell metadata request was rate limited (HTTP {exc.code})") from None
+        raise RuntimeError(f"Official PowerShell metadata request failed (HTTP {exc.code})") from None
     except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError):
         raise RuntimeError("Official PowerShell metadata request failed") from None
     with response:
@@ -128,8 +136,11 @@ def _manifest_metadata(raw: bytes) -> tuple[str, str, str]:
 
 
 def _published_sha256(body: str, asset_name: str) -> str:
+    # the release notes are CRLF on GitHub, while the fetched text is split on
+    # lines: the digest line ends with \r\n, so the trailing anchor has to
+    # allow the \r that [^\r\n]+ deliberately leaves behind.
     pattern = re.compile(
-        rf"(?m)^-[ \t]+{re.escape(asset_name)}[ \t]*\r?\n[ \t]*-[ \t]+([^\r\n]+)[ \t]*$"
+        rf"(?m)^-[ \t]+{re.escape(asset_name)}[ \t]*\r?\n[ \t]*-[ \t]+([^\r\n]+)[ \t]*\r?$"
     )
     matches = pattern.findall(body)
     if len(matches) != 1:
