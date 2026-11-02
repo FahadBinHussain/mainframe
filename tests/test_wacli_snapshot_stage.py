@@ -18,6 +18,10 @@ import wacli_snapshot_stage as stage
 from wacli_snapshot_stage import SnapshotStageError, StageLimits, stage_snapshot
 
 
+# this contract needs the POSIX filesystem operations (O_NOFOLLOW, private
+# staging, hot rollback journals). windows has no such contract to test, so
+# these cases skip there instead of erroring out.
+@unittest.skipUnless(os.name == 'posix', 'this WACLI contract needs POSIX filesystem operations')
 class SnapshotStageTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="wacli-stage-test-")
