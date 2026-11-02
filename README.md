@@ -464,7 +464,8 @@ The existing `da.gd/f85Bj` short link remains Windows-only and unchanged.
 - Scoop persisted app data from `$SCOOP\persist`
 - Native app installers and settings described in `native-apps.json`
 - Optional encrypted tool auth/config from `tool-secrets.manifest.json` (for tools not yet on vault-native secrets: gcloud, gws, firebase, tailscale, telegram, whatsapp, microsoft, bitwarden session)
-- Optional user-managed Agent skills from `%USERPROFILE%\.agents\skills`
+- Optional user-managed Agent skills from `%USERPROFILE%\.agents\skills` (+ the `.skill-lock.json` source/version record)
+- Optional Antigravity global config from `%USERPROFILE%\.gemini\config` (MCP servers, plugins, rules)
 - Optional Windsurf app data from `%USERPROFILE%\.codeium\windsurf`
 - Optional Git global config from `%USERPROFILE%\.gitconfig`
 
@@ -807,6 +808,8 @@ Back these profiles up with the encrypted secrets flow:
 ```
 
 The encrypted secrets flow also carries user-managed Agent skills from `%USERPROFILE%\.agents\skills`. Codex was uninstalled 2026-08-15 (scoop) and its config removed from this manifest, so `%USERPROFILE%\.codex` is no longer backed up.
+
+Antigravity's global config is carried as `%USERPROFILE%\.gemini\config` (added 2026-11-02): that is where its MCP servers (`mcp_config.json` — the ghidra / open-computer-use / rea entries), enabled plugins (`config.json`), and rules (`rules/`) live. `.git` and `node_modules` are excluded (reinstallable; the i-have-adhd plugin re-clones from its upstream repo). OpenCode's MCP servers ride in the `%USERPROFILE%\.opencode\opencode.json` item above, so both harnesses' MCP configs survive a restore.
 
 Windsurf rule/memory Markdown is carried as part of its natural app data bucket: `%USERPROFILE%\.codeium\windsurf`. This keeps app-specific rules with the app state instead of treating them as cross-tool Agent skills.
 
