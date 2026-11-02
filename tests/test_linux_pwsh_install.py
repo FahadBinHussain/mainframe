@@ -123,6 +123,18 @@ class PowerShellReleasePinTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "digests disagree"):
             resolve_with(release=release_bytes(asset_digest="c" * 64))
 
+    def test_reads_the_release_notes_when_they_are_crlf(self):
+        # GitHub serves the notes with CRLF line endings, and that is what the
+        # real 7.6.9 body has. a digest line under them ends with \r\n, so a
+        # pattern that demands end-of-line without the \r matches NOTHING and
+        # resolve_release can never succeed - which is exactly how the live
+        # linux run failed while the LF fixtures stayed green.
+        crlf = release_body().replace("\n", "\r\n")
+        self.assertNotEqual(crlf, release_body())
+        release = resolve_with(release=release_bytes(body=crlf))
+        self.assertEqual(release["sha256"], LINUX_SHA)
+        self.assertEqual(release["windows_sha256"], WINDOWS_SHA)
+
     def test_refuses_a_release_without_an_asset_digest(self):
         payload = json.loads(release_bytes())
         payload["assets"][1].pop("digest")
