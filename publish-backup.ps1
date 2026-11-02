@@ -96,6 +96,7 @@ if ($bwEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 
 # --- github token from vault ---
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
 $githubAccountRoot = Join-Path (Get-MainframeAccountsDir) 'github'
 $currentProfileFile = Join-Path $githubAccountRoot 'current.json'
 if (-not (Test-Path -LiteralPath $currentProfileFile)) {
@@ -124,7 +125,7 @@ Write-Host "publishing as $me -> $Repo"
 # --- secrets archive: AES-256 copy for the release (password lives in the vault only) ---
 # boot.ps1 runs this SAME search + regex to decrypt; keep both byte-identical.
 function Get-SecretsArchivePassword {
-    $items = @(& bw list items --search 'mainframe-production' --raw 2>$null | ConvertFrom-Json)
+    $items = @(ConvertFrom-JsonArray -Json (& bw list items --search 'mainframe-production' --raw 2>$null | Out-String))
     $item = $items | Where-Object { $_.name -eq 'mainframe-production' } | Select-Object -First 1
     if (-not $item) { throw "no vault item named 'mainframe-production' - it must hold the '[secrets archive password]' notes header" }
     if ($item.notes -notmatch '(?m)^\[secrets archive password\]\s*\r?\n\s*(\S+)') {

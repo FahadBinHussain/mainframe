@@ -118,6 +118,9 @@ if (Test-Path -LiteralPath $approvalModule) {
 $pathsModule = Join-Path $MainframeDir 'mainframe-paths.psm1'
 if (-not (Test-Path -LiteralPath $pathsModule)) { Die "mainframe-paths.psm1 is missing from $MainframeDir - the profile-root rules live there. Pull the newest mainframe and re-run." }
 Import-Module $pathsModule -Force -DisableNameChecking
+$vaultModule = Join-Path $MainframeDir 'vault-secret.psm1'
+if (-not (Test-Path -LiteralPath $vaultModule)) { Die "vault-secret.psm1 is missing from $MainframeDir - the vault rules live there. Pull the newest mainframe and re-run." }
+Import-Module $vaultModule -Force -DisableNameChecking
 
 # --- sealed bw email (bw-email.enc.json) ---
 # publish-backup.ps1 / seal-bw-email.ps1 seal the vault account email with a
@@ -126,47 +129,8 @@ Import-Module $pathsModule -Force -DisableNameChecking
 # this (public) repo is ciphertext only: useless without the master
 # password, which setup asks for anyway. Unsealing it means a fresh machine
 # never has to type the email address.
-function Get-BwEmailKeyMaterial {
-    param([securestring]$Password, [byte[]]$Salt, [int]$Iterations)
-    $plain = [System.Net.NetworkCredential]::new('', $Password).Password
-    $pwBytes = [System.Text.Encoding]::UTF8.GetBytes($plain)
-    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($pwBytes, $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
-    try { return ,$kdf.GetBytes(64) } finally { $kdf.Dispose() }
-}
-
-function Unseal-BwEmail {
-    param([string]$BlobPath, [securestring]$Password)
-    try {
-        $blob = Get-Content -LiteralPath $BlobPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        $salt = [Convert]::FromBase64String([string]$blob.salt)
-        $iv = [Convert]::FromBase64String([string]$blob.iv)
-        $ct = [Convert]::FromBase64String([string]$blob.ct)
-        $macExpected = [Convert]::FromBase64String([string]$blob.mac)
-        $km = Get-BwEmailKeyMaterial -Password $Password -Salt $salt -Iterations ([int]$blob.iter)
-        $encKey = New-Object byte[] 32; [Array]::Copy($km, 0, $encKey, 0, 32)
-        $macKey = New-Object byte[] 32; [Array]::Copy($km, 32, $macKey, 0, 32)
-        $hmac = [System.Security.Cryptography.HMACSHA256]::new($macKey)
-        $macInput = New-Object byte[] ($salt.Length + $iv.Length + $ct.Length)
-        [Array]::Copy($salt, 0, $macInput, 0, $salt.Length)
-        [Array]::Copy($iv, 0, $macInput, $salt.Length, $iv.Length)
-        [Array]::Copy($ct, 0, $macInput, $salt.Length + $iv.Length, $ct.Length)
-        $macActual = $hmac.ComputeHash($macInput)
-        $hmac.Dispose()
-        if ($macExpected.Length -ne $macActual.Length) { return $null }
-        $diff = 0
-        for ($i = 0; $i -lt $macExpected.Length; $i++) { $diff = $diff -bor ($macExpected[$i] -bxor $macActual[$i]) }
-        if ($diff -ne 0) { return $null }
-        $aes = [System.Security.Cryptography.Aes]::Create()
-        $aes.Key = $encKey; $aes.IV = $iv
-        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-        $pt = $aes.CreateDecryptor().TransformFinalBlock($ct, 0, $ct.Length)
-        $aes.Dispose()
-        $email = [System.Text.Encoding]::UTF8.GetString($pt)
-        if ($email -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { return $email }
-        return $null
-    } catch { return $null }
-}
+# The unseal itself lives in vault-secret.psm1 (Unseal-BwEmail) - windows and
+# linux must unseal it the same way, so there is exactly one implementation.
 
 # --- 2. bitwarden unlock (1-tap mobile approval or master password) ---
 Step 'unlocking bitwarden vault'

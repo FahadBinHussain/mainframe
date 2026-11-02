@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
 
 # the profile root is resolved by one shared module, so windows and linux
 # read the same place (see mainframe-paths.psm1).
@@ -1104,7 +1105,7 @@ switch ($action.ToLowerInvariant()) {
                 throw "neon orgs list failed with exit code $orgExitCode"
             }
 
-            $orgs = @(($orgOutput -join [Environment]::NewLine) | ConvertFrom-Json)
+            $orgs = @(ConvertFrom-JsonArray -Json ($orgOutput -join [Environment]::NewLine))
             if ($orgs.Count -eq 1) {
                 Invoke-NeonJsonProfile -Email $parts.Email -NeonArgs @('projects', 'list', '--org-id', $orgs[0].id)
             } elseif ($orgs.Count -gt 1) {
