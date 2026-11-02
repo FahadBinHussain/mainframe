@@ -127,22 +127,10 @@ function Get-VaultConfigValue {
 
     # one config file drives both machines: linux_real.py reads the same keys,
     # so a windows box and a linux box can be pointed at the same relay and
-    # the same approval page without touching code.
-    $configCandidates = @(
-        (Join-Path $PSScriptRoot 'mainframe.config.json'),
-        (Join-Path (Get-Location) 'mainframe.config.json'),
-        (Join-Path $HOME '.config\mainframe\mainframe.config.json')
-    )
-    foreach ($cfg in $configCandidates) {
-        if (Test-Path -LiteralPath $cfg) {
-            try {
-                $json = Get-Content -LiteralPath $cfg -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-                $value = $json.$Key
-                if ($value) { return ([string]$value).Trim() }
-            } catch {}
-        }
-    }
-    return $null
+    # the same approval page without touching code. the lookup itself lives
+    # in mainframe-paths.psm1 - a literal '.config\mainframe' never matches
+    # on linux, so the profile root has to be resolved the portable way.
+    return Get-MainframeConfigValue -Key $Key
 }
 
 function Get-VaultNtfyTopic {
@@ -410,7 +398,7 @@ function Send-VaultApprovalNotification {
         $null = Invoke-RestMethod -Uri "$resolvedServer/$Topic" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
     } catch {
-        Write-Warning "ntfy push dispatch to topic '$Topic' failed: $_"
+        Write-MainframeWarning "ntfy push dispatch to topic '$Topic' failed: $_"
         return $false
     }
 }
@@ -444,7 +432,7 @@ function Send-VaultRequestExpired {
         $null = Invoke-RestMethod -Uri "$resolvedServer/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
     } catch {
-        Write-Warning "could not publish the expired marker to '$Sid': $_"
+        Write-MainframeWarning "could not publish the expired marker to '$Sid': $_"
         return $false
     }
 }
@@ -515,7 +503,10 @@ function Wait-VaultApprovalCiphertext {
     )
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
-    $downloadPath = Join-Path $HOME "Downloads\$LocalFileName"
+    # two joins, not one: a 'Downloads\file' literal would look for a file
+    # NAMED "Downloads\file" inside $HOME on linux, and the browser tab's
+    # download would never be found.
+    $downloadPath = Join-Path (Join-Path $HOME 'Downloads') $LocalFileName
     $sessionFile = Get-MainframeSessionKeyPath
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $pollDelay = 2
@@ -563,7 +554,7 @@ function Wait-VaultApprovalCiphertext {
             if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
             if ($status -eq 429) {
                 $pollDelay = 30
-                Write-Warning "relay rate limit hit (429) - backing off to $pollDelay seconds"
+                Write-MainframeWarning "relay rate limit hit (429) - backing off to $pollDelay seconds"
             } else {
                 $pollDelay = [Math]::Min($pollDelay * 2, 30)
             }
@@ -578,7 +569,7 @@ function Wait-VaultApprovalCiphertext {
                     return $content
                 }
                 if ($content) {
-                    Write-Warning "ignoring $LocalFileName -- not a valid approval payload for this request"
+                    Write-MainframeWarning "ignoring $LocalFileName -- not a valid approval payload for this request"
                 }
             } catch {
                 # file locked or transient read issue
@@ -748,7 +739,7 @@ function Set-VaultApprovalRequestDetails {
         [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $current.Data -Compress))
         return $true
     } catch {
-        Write-Warning "could not record the approval code on $Path - the queue will show it without a code: $_"
+        Write-MainframeWarning "could not record the approval code on $Path - the queue will show it without a code: $_"
         return $false
     }
 }
@@ -874,7 +865,7 @@ function Enter-VaultApprovalRequest {
                 $null = Remove-VaultApprovalLock -Path $path -Token $holder.Token
             } elseif ($holder.ExpiresAtUnix -le ($nowUnix - $script:VaultApprovalLockGraceSeconds)) {
                 if (Remove-VaultApprovalLock -Path $path -Token $holder.Token) {
-                    Write-Warning ("taking over the expired phone approval ({0} from {1} @ {2}, started {3}) - this request is now the one asking" -f $(if ($holder.Code) { "code [$($holder.Code)]" } else { 'no code' }), $holder.Agent, $holder.Host, $holder.StartedAtLocal)
+                    Write-MainframeWarning ("taking over the expired phone approval ({0} from {1} @ {2}, started {3}) - this request is now the one asking" -f $(if ($holder.Code) { "code [$($holder.Code)]" } else { 'no code' }), $holder.Agent, $holder.Host, $holder.StartedAtLocal)
                 }
             }
             Start-Sleep -Seconds 1
@@ -934,7 +925,7 @@ function Close-VaultApprovalRequest {
     if ($current.Token -ne $Token) {
         # our record lapsed while we were still waiting; whoever took over owns
         # the file now, so leave it (and say so - this is not normal).
-        Write-Warning "the approval lock at $Path was taken over by another request while this one was still running - leaving it alone"
+        Write-MainframeWarning "the approval lock at $Path was taken over by another request while this one was still running - leaving it alone"
         return
     }
 
@@ -945,7 +936,7 @@ function Close-VaultApprovalRequest {
             [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $current.Data -Compress))
             return
         } catch {
-            Write-Warning "could not mark the approval lock as resolved - releasing it now: $_"
+            Write-MainframeWarning "could not mark the approval lock as resolved - releasing it now: $_"
         }
     }
     $null = Remove-VaultApprovalLock -Path $Path -Token $Token
@@ -1040,7 +1031,7 @@ function Get-VaultMasterPassword {
             return $pw
         } else {
             $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer
-            Write-Warning "phone approval timed out after $TimeoutSeconds seconds."
+            Write-MainframeWarning "phone approval timed out after $TimeoutSeconds seconds."
             return $null
         }
     } finally {

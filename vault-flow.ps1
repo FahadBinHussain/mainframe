@@ -30,12 +30,18 @@
           "secretsPassword":   "...",
           "email":             "...",
           "sessionCached":     true,
+          "sessionReused":     true,
           "approvalRequested": false,
           "sessionPath":       "/root/.config/mainframe/accounts/bitwarden/session.key",
           "ttlMinutes":        60
         }
 
-    Logs go to stderr so stdout stays machine-readable.
+    Logs go to stderr so stdout stays machine-readable. -OutputPath writes
+    the same document to a file, so a caller never has to parse a stream.
+
+    -Lock always locks the vault and purges the cached session. -LockIfStale
+    locks only when the cached session is NOT fresh - so a run inside the TTL
+    leaves the vault unlocked and the next run needs no phone.
 
 .EXAMPLE
     pwsh -NoProfile -File vault-flow.ps1 -Json
@@ -49,10 +55,16 @@ param(
     [string]$PromptContext = 'vault restore',
     [string]$BwPath = 'bw',
     [switch]$Lock,
+    [switch]$LockIfStale,
+    [string]$OutputPath = $null,
     [switch]$Json
 )
 
 $ErrorActionPreference = 'Stop'
+# stdout belongs to the result document. the modules narrate with Write-Host,
+# which lands in the information stream - silencing it keeps stdout a clean
+# JSON document on both windows powershell 5.1 and pwsh 7.
+$InformationPreference = 'SilentlyContinue'
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'vault-approval.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
@@ -63,10 +75,57 @@ function Write-FlowLog {
     [Console]::Error.WriteLine("vault-flow: $Message")
 }
 
+function Write-FlowResult {
+    <#
+    .SYNOPSIS
+        publish the result document - on stdout, and to -OutputPath when the
+        caller wants to read it from a file instead of parsing a stream.
+    #>
+    param([object]$Result)
+    $json = ConvertTo-Json -InputObject $Result -Compress -Depth 4
+    if ($OutputPath) {
+        $parent = Split-Path -Parent $OutputPath
+        if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        }
+        Set-Content -LiteralPath $OutputPath -Value $json -Encoding UTF8 -NoNewline
+    }
+    # the success stream, not the host: a caller that captures stdout gets
+    # the document and nothing else.
+    Write-Output $json
+}
+
 function Get-BwStatus {
     $raw = & $BwPath status 2>$null | Out-String
     if (-not $raw.Trim()) { throw 'bw status produced no output - is the bitwarden CLI installed and on PATH?' }
     return $raw | ConvertFrom-Json
+}
+
+function Initialize-BwServer {
+    <#
+    .SYNOPSIS
+        point the bw CLI at the right server, exactly like boot.ps1 does.
+
+    .DESCRIPTION
+        a fresh linux box has a bw CLI that knows no server, and one that was
+        pointed elsewhere must be moved - otherwise the flow would unlock the
+        wrong vault. the server comes from Get-VaultBwServer, so windows and
+        linux agree on it.
+    #>
+    param([string]$BwPath = 'bw')
+    $expected = Get-VaultBwServer
+    $status = Get-BwStatus
+    $current = ([string]$status.serverUrl).TrimEnd('/')
+    if ($current -ne $expected) {
+        Write-FlowLog "the bw CLI points at '$current' - switching it to '$expected'"
+        if ([string]$status.status -ne 'unauthenticated') {
+            & $BwPath logout 2>$null | Out-Null
+        }
+        & $BwPath config server $expected 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "bw config server $expected failed" }
+        $status = Get-BwStatus
+    }
+    return $status
 }
 
 function Get-VaultSecretsFromItems {
@@ -111,21 +170,40 @@ function Get-VaultSecretsFromItems {
 }
 
 # --- 0. lock on demand (the twin of vault-lock.ps1) ---
-if ($Lock) {
-    Lock-VaultSession -BwPath $BwPath
-    Write-FlowLog "vault session purged at $(Get-MainframeSessionKeyPath)"
-    if ($Json) { ConvertTo-Json -InputObject ([ordered]@{ locked = $true; sessionPath = Get-MainframeSessionKeyPath }) -Compress }
+# -Lock always locks. -LockIfStale locks only when there is no FRESH cached
+# session, so a run inside the TTL leaves the vault unlocked and the next run
+# needs no phone. the rule lives HERE, in the one implementation, so linux
+# does not grow a second copy of it.
+if ($Lock -or $LockIfStale) {
+    $sessionFile = Get-MainframeSessionKeyPath
+    $fresh = $false
+    if ($LockIfStale -and (Test-Path -LiteralPath $sessionFile)) {
+        $age = (Get-Date) - (Get-Item -LiteralPath $sessionFile).LastWriteTime
+        $ttl = Get-VaultSessionTtlMinutes
+        $fresh = ($ttl -le 0 -or $age.TotalMinutes -lt $ttl)
+    }
+    if ($fresh) {
+        Write-FlowLog 'the cached session is still fresh - leaving the vault unlocked'
+    } else {
+        Lock-VaultSession -BwPath $BwPath
+        Write-FlowLog "vault session purged at $sessionFile"
+    }
+    if ($Json) {
+        Write-FlowResult ([ordered]@{ locked = (-not $fresh); sessionPath = $sessionFile })
+    }
     exit 0
 }
 
 # --- 1. the cached session (no phone, no master password) ---
 $cached = Get-VaultSession
-$status = Get-BwStatus
+$status = Initialize-BwServer -BwPath $BwPath
 $approvalRequested = $false
+$sessionReused = $false
 $email = ''
 
 if ($cached -and $status.status -ne 'unauthenticated') {
     Write-FlowLog "reusing the cached session (TTL $(Get-VaultSessionTtlMinutes) minutes) - no phone approval needed"
+    $sessionReused = $true
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $cached 2>$null | Out-String))
 } else {
     if ($cached -and $status.status -eq 'unauthenticated') {
@@ -139,8 +217,15 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     }
 
     Write-FlowLog 'triggering the 1-tap mobile approval'
+    # the channel is resolved by the module, from the same config file the
+    # windows side reads - so the operator sees which relay and page are in
+    # use without the caller having to resolve anything itself.
+    $approvalTopic = Get-VaultNtfyTopic -Topic $NtfyTopic
+    $approvalServer = Get-VaultNtfyServer -Server $Server
+    $approvalPages = Get-VaultPagesBase -PagesBase $PagesBase
+    Write-FlowLog "phone approval channel: topic '$approvalTopic', relay '$approvalServer', page '$approvalPages'"
     $approvalRequested = $true
-    $password = Get-VaultMasterPassword -NtfyTopic $NtfyTopic -Server $Server -PagesBase $PagesBase `
+    $password = Get-VaultMasterPassword -NtfyTopic $approvalTopic -Server $approvalServer -PagesBase $approvalPages `
         -TimeoutSeconds $TimeoutSeconds -PromptContext $PromptContext
     if (-not $password -or $password -eq '__SESSION_ALREADY_UNLOCKED__') {
         throw 'the phone approval did not return a master password'
@@ -189,6 +274,7 @@ $result = [ordered]@{
     secretsPassword   = $secrets.SecretsPassword
     email             = $email
     sessionCached     = $true
+    sessionReused     = $sessionReused
     approvalRequested = $approvalRequested
     sessionPath       = Get-MainframeSessionKeyPath
     ttlMinutes        = Get-VaultSessionTtlMinutes
@@ -196,9 +282,9 @@ $result = [ordered]@{
 
 if ($Json) {
     # compress the JSON so a caller cannot mistake the document for a log
-    ConvertTo-Json -InputObject $result -Compress -Depth 4
+    Write-FlowResult $result
 } else {
-    Write-Host "github token    : $(if ($secrets.GitHubToken) { 'found' } else { 'MISSING' })"
-    Write-Host "secrets password: $(if ($secrets.SecretsPassword) { 'found' } else { 'MISSING' })"
-    Write-Host "session path    : $(Get-MainframeSessionKeyPath)"
+    Write-Output "github token    : $(if ($secrets.GitHubToken) { 'found' } else { 'MISSING' })"
+    Write-Output "secrets password: $(if ($secrets.SecretsPassword) { 'found' } else { 'MISSING' })"
+    Write-Output "session path    : $(Get-MainframeSessionKeyPath)"
 }

@@ -25,23 +25,27 @@ with "n/a" in the windows column.
 
 ## vault and phone approval
 
-the core of the 1-tap flow. this is the part that is now provably identical.
+the core of the 1-tap flow. there is ONE implementation now - `vault-flow.ps1`
+and the two modules it uses - and both machines run it.
 
 | feature | windows | linux | verdict |
 |---|---|---|---|
-| 1-tap phone approval | `vault-approval.psm1` | `linux_real.py` → `obtain_master_password` | ✅ |
-| 2-digit number matching | ✅ | ✅ (`generate_tab_key`) | ✅ |
-| agent / model / host provenance | `Get-CallerIdentity` | `resolve_identity` | ✅ |
-| ADB auto-popup of the page | ✅ | ✅ | ✅ |
-| stale marker (`mf:expired`) | ✅ | ✅ | ✅ |
+| 1-tap phone approval | `vault-flow.ps1` → `vault-approval.psm1` | `vault-flow.ps1` → `vault-approval.psm1` | ✅ |
+| 2-digit number matching | ✅ | ✅ (same module) | ✅ |
+| agent / model / host provenance | `Get-CallerIdentity` | same module | ✅ |
+| ADB auto-popup of the page | ✅ | ✅ (same module) | ✅ |
+| stale marker (`mf:expired`) | ✅ | ✅ (same module) | ✅ |
 | relay-configurable server + page | env + config | env + config + `--ntfy-server/--ntfy-topic/--pages-base` | ✅ |
-| 1-hour session cache | `%APPDATA%\mainframe\accounts\bitwarden\session.key` | `<work_root>/vault/session.key` (mode 600) | ✅ |
+| 1-hour session cache | `%APPDATA%\mainframe\accounts\bitwarden\session.key` | `$XDG_CONFIG_HOME/mainframe/accounts/bitwarden/session.key` (mode 600) | ✅ |
 | TTL key + precedence | `vaultTtlMinutes` (env > config > 60) | same | ✅ |
-| expired session locks and purges | ✅ | ✅ | ✅ |
-| lock on demand | `vault-lock.ps1` | `--lock-vault` | ✅ |
+| expired session locks and purges | ✅ | ✅ (same module) | ✅ |
+| lock on demand | `vault-lock.ps1` | `--lock-vault` → `vault-flow.ps1 -Lock` | ✅ |
+| lock only when the session is stale | `vault-lock.ps1` variant | `vault-flow.ps1 -LockIfStale` | ✅ |
 | terminal password fallback | ✅ | ✅ (needs a tty) | ✅ |
 | **live-proven no-tap second run** | 1334 items read, no tap | 0 codes pushed, 0 asks, `failures: []` | ✅ |
-| one implementation of the flow | pwsh module | python module | ❌ **two codebases for one flow.** close: one shared contract fixture (same URL shape, same code rules, same cache layout, same expiry marker) that both implementations must satisfy, run against both in CI |
+| one implementation of the flow | pwsh modules + `vault-flow.ps1` | the same pwsh modules + the same cli | ✅ **one codebase.** the python copy is gone; linux shells out to `vault-flow.ps1` and reads its json document |
+| the powershell runtime | scoop | `pwsh_linux.py` - official tarball, pinned to two published digests, installed in isolation | ✅ |
+| one contract fixture both sides pass | `tests/vault-flow.Tests.ps1` | `tests/test_linux_real_vault_relay.py` drives the same module through pwsh | ✅ |
 
 ## backup (windows is the source)
 

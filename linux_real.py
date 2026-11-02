@@ -51,14 +51,9 @@ Via the one-liner (same shape as Windows):
 from __future__ import annotations
 
 import argparse
-import base64
-import getpass
 import hashlib
-import hmac
-import http.client
 import json
 import os
-import re
 import secrets
 import shlex
 import shutil
@@ -75,9 +70,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-BW_SERVER = "https://vaultwardenn.onrender.com"
 RELEASE_REPO = "FahadBinHussain/mainframe-production"
-GH_TOKEN_RE = re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")
 
 # Extras installed directly (outside the pinned plan) with the route that
 # was proven by hand on Ubuntu 24.04. Each returns (ok, note).
@@ -198,626 +191,151 @@ def ensure_bin_link(bin_dir: Path, target: Path, name: str) -> None:
 
 
 # ---------------------------------------------------------------- vault
+#
+# There is ONE vault flow now: vault-flow.ps1 (powershell). windows runs it
+# through the module, linux runs it through that cli. the approval, the
+# unseal, the session cache, the TTL and the item parsing all live in the
+# powershell implementation - there is no second python copy, so the two
+# platforms cannot drift apart.
+#
+# what linux still owns: making sure a pwsh and a bw CLI exist, and handing
+# the flow its arguments.
 
-def unseal_email(blob_path: Path, password: str) -> str:
-    """Unseal bw-email.enc.json: PBKDF2-HMAC-SHA256 + AES-256-CBC + HMAC.
-
-    Same construction as the PowerShell sealer (boot.ps1) and seal.html.
-    AES decryption goes through the openssl CLI so no third-party Python
-    package is needed; the key derivation and MAC check are stdlib.
-    """
-    blob = json.loads(blob_path.read_text())
-    if blob.get("v") != 1 or blob.get("kdf") not in ("PBKDF2-SHA256",
-                                                  "PBKDF2-HMAC-SHA256"):
-        raise ValueError(f"unsupported sealed-email blob (v={blob.get('v')}, "
-                         f"kdf={blob.get('kdf')})")
-    salt = base64.b64decode(blob["salt"])
-    iv = base64.b64decode(blob["iv"])
-    ct = base64.b64decode(blob["ct"])
-    mac = base64.b64decode(blob["mac"])
-    key = hashlib.pbkdf2_hmac("sha256", password.encode(), salt,
-                              int(blob["iter"]), dklen=64)
-    expect = hmac.new(key[32:], salt + iv + ct, hashlib.sha256).digest()
-    if not hmac.compare_digest(expect, mac):
-        raise ValueError("sealed-email MAC mismatch: wrong master password "
-                         "or a corrupted blob")
-    proc = subprocess.run(
-        ["openssl", "enc", "-d", "-aes-256-cbc",
-         "-K", key[:32].hex(), "-iv", iv.hex()],
-        input=ct, capture_output=True)
-    if proc.returncode != 0:
-        raise ValueError("openssl AES decryption failed: "
-                         + proc.stderr.decode(errors="replace")[-200:])
-    return proc.stdout.decode().strip()
-
-
-# ---------------------------------------------------------------- password tab
-# The agent running this script has no terminal the user can see, so a
-# plain getpass prompt is useless there: the user cannot type into it.
-# Instead, when stdin is not a tty, the script generates an ephemeral
-# RSA keypair, prints a tab URL for the static page docs/vault-tab.html
-# (served by GitHub Pages from this repo's main branch root), and waits
-# for the browser to download the encrypted password file into
-# ~/Downloads. The page makes no network requests: it encrypts in the
-# browser with the one-time public key (passed in the URL fragment) and
-# downloads only ciphertext. The private key never leaves this machine,
-# the ciphertext file is deleted after decryption, and the password
-# itself is never printed, logged, or sent anywhere. A human at a real
-# terminal still gets the plain getpass prompt (stdin is a tty there).
-
-TAB_CIPHER_NAME = "mainframe-vault-pass.enc"
-TAB_WAIT_SECONDS = 600
-DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+VAULT_FLOW_TIMEOUT_SECONDS = 1800
+PWSH_ROOT = Path("tools") / "pwsh"
+VAULT_RESULT_FILE = "vault-flow.json"
 # apt must not be able to stall the whole run (see the prereqs leg).
 APT_UPDATE_TIMEOUT_SECONDS = 120
 APT_INSTALL_TIMEOUT_SECONDS = 300
 
 
-def load_config(checkout: Path | None = None) -> dict[str, str]:
-    """Read mainframe.config.json if present from checkout or standard paths."""
-    candidates = []
-    if checkout:
-        candidates.append(checkout / "mainframe.config.json")
-    candidates.append(Path.cwd() / "mainframe.config.json")
-    try:
-        candidates.append(Path.home() / ".config" / "mainframe" / "mainframe.config.json")
-    except Exception:
-        pass
-    for p in candidates:
-        if p.is_file():
-            try:
-                # utf-8-sig, not utf-8: this file is written by powershell on
-                # windows (Set-Content/Out-File -Encoding utf8), which emits a
-                # BOM. plain utf-8 raises on the BOM, the except below swallows
-                # it, and the config silently reads as empty - no ntfy topic,
-                # no phone approval, no vault. powershell's own reader strips
-                # the BOM, so this only ever broke the linux side.
-                data = json.loads(p.read_text(encoding="utf-8-sig"))
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-    return {}
-
-
-def get_ntfy_topic(checkout: Path | None = None, explicit: str | None = None) -> str | None:
-    """Resolve ntfy topic: explicit arg > MAINFRAME_NTFY_TOPIC env > mainframe.config.json."""
-    if explicit and explicit.strip():
-        return explicit.strip()
-    from_env = os.environ.get("MAINFRAME_NTFY_TOPIC")
-    if from_env and from_env.strip():
-        return from_env.strip()
-    from_cfg = load_config(checkout).get("ntfyTopic")
-    if from_cfg and isinstance(from_cfg, str) and from_cfg.strip():
-        return from_cfg.strip()
+def pwsh_executable(work_root: Path) -> str | None:
+    """The pwsh this run may use: PATH first, then the local install."""
+    found = shutil.which("pwsh")
+    if found:
+        return found
+    local = work_root / PWSH_ROOT / "pwsh"
+    if local.is_file():
+        return str(local)
     return None
 
 
-def get_ntfy_server(checkout: Path | None = None, explicit: str | None = None) -> str:
-    """Resolve the approval relay base: explicit arg > MAINFRAME_NTFY_SERVER env
-    > ntfyServer in mainframe.config.json > https://ntfy.sh.
+def ensure_pwsh(work_root: Path) -> str:
+    """Make sure a pwsh exists; install the official linux build if not.
 
-    The relay only has to speak the ntfy HTTP api, so a machine whose egress
-    proxy denies ntfy.sh can point at any reachable ntfy-compatible endpoint
-    (a relay in front of ntfy.sh). the phone side keeps using the same ntfy
-    app and the same topic, so the approval experience is identical.
+    The installer is pwsh_linux: the archive is bounded, pinned to two
+    independently published digests, extracted into an isolated tree and
+    published into a destination that must not exist yet.
     """
-    if explicit and explicit.strip():
-        return explicit.strip().rstrip("/")
-    from_env = os.environ.get("MAINFRAME_NTFY_SERVER")
-    if from_env and from_env.strip():
-        return from_env.strip().rstrip("/")
-    from_cfg = load_config(checkout).get("ntfyServer")
-    if from_cfg and isinstance(from_cfg, str) and from_cfg.strip():
-        return from_cfg.strip().rstrip("/")
-    return DEFAULT_NTFY_SERVER
-
-
-def detect_caller_identity(explicit_agent: str | None = None, explicit_model: str | None = None) -> tuple[str, str | None]:
-    """Detect agent/harness and model identity from explicit args, env vars, or ground-truth transcript inspection."""
-    agent = explicit_agent or os.environ.get("MAINFRAME_AGENT_NAME") or os.environ.get("AGENT_NAME") or os.environ.get("AI_AGENT")
-    model = explicit_model or os.environ.get("MAINFRAME_MODEL_NAME") or os.environ.get("MODEL_NAME") or os.environ.get("AI_MODEL")
-
-    if not agent:
-        if os.environ.get("ANTIGRAVITY_AGENT") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID"):
-            agent = "antigravity"
-        elif os.environ.get("QODER_CLI") or os.environ.get("QODER_PRODUCT_ID") or os.environ.get("QODER_SESSION_TYPE"):
-            # qoder sets OPENCODE_DISABLE_CHANNEL_DB for compatibility, so it
-            # must be tested before the opencode branch or it reads as opencode
-            agent = "qoder"
-        elif os.environ.get("OPENCODE") or os.environ.get("OPENCODE_SESSION") or os.environ.get("OPENCODE_DISABLE_CHANNEL_DB"):
-            agent = "opencode"
-        elif os.environ.get("CLAUDE_CODE") or os.environ.get("CLAUDE_PROJECT_DIR"):
-            agent = "claude-code"
-        elif os.environ.get("CODEX") or os.environ.get("CODEX_MODEL"):
-            agent = "codex"
-        elif os.environ.get("AIDER_MODEL"):
-            agent = "aider"
-        else:
-            try:
-                ppid = os.getppid()
-                comm_path = Path(f"/proc/{ppid}/comm")
-                if comm_path.exists():
-                    comm = comm_path.read_text().strip().lower()
-                    for known in ("antigravity", "opencode", "qoder", "claude", "codex", "cursor", "windsurf", "aider"):
-                        if known in comm:
-                            agent = known if known != "claude" else "claude-code"
-                            break
-            except Exception:
-                pass
-
-    if not agent:
-        agent = "terminal"
-
-    # Resolve Model via Ground-Truth Thread Inspection or Environment
-    if not model:
-        if agent == "antigravity" and os.environ.get("ANTIGRAVITY_CONVERSATION_ID"):
-            convo_id = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
-            app_data = os.environ.get("ANTIGRAVITY_APP_DATA_DIR") or str(Path.home() / ".gemini" / "antigravity")
-            transcript = Path(app_data) / "brain" / convo_id / ".system_generated" / "logs" / "transcript.jsonl"
-            if transcript.exists():
-                try:
-                    file_size = transcript.stat().st_size
-                    read_size = min(file_size, 100000)
-                    with transcript.open("rb") as f:
-                        f.seek(file_size - read_size)
-                        tail_chunk = f.read().decode("utf-8", errors="ignore")
-                    matches = list(re.finditer(r"Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need", tail_chunk))
-                    if matches:
-                        model = matches[-1].group(1).strip()
-                    else:
-                        with transcript.open("r", encoding="utf-8", errors="ignore") as f:
-                            for _ in range(50):
-                                line = f.readline()
-                                if not line:
-                                    break
-                                m = re.search(r"Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need", line)
-                                if m:
-                                    model = m.group(1).strip()
-                                    break
-                except Exception:
-                    pass
-            if not model and os.environ.get("ANTIGRAVITY_MODEL"):
-                model = os.environ.get("ANTIGRAVITY_MODEL")
-        elif agent == "opencode":
-            if os.environ.get("OPENCODE_MODEL"):
-                model = os.environ.get("OPENCODE_MODEL")
-        elif agent == "claude-code":
-            if os.environ.get("ANTHROPIC_MODEL"):
-                model = os.environ.get("ANTHROPIC_MODEL")
-        elif agent == "codex":
-            if os.environ.get("CODEX_MODEL"):
-                model = os.environ.get("CODEX_MODEL")
-        elif agent == "aider":
-            if os.environ.get("AIDER_MODEL"):
-                model = os.environ.get("AIDER_MODEL")
-
-    return agent, model
-
-
-def dispatch_ntfy_unlock(ntfy_topic: str, url: str, hostname: str | None = None, code: str | None = None,
-                         agent: str | None = None, model: str | None = None,
-                         server: str | None = None) -> bool:
-    """Send phone approval push notification via ntfy with clickable link."""
-    host = hostname
-    if not host:
-        try:
-            host = os.uname().nodename
-        except Exception:
-            host = "linux-machine"
-    base = (server or DEFAULT_NTFY_SERVER).rstrip("/")
-    endpoint = ntfy_topic if ntfy_topic.startswith(("http://", "https://")) else f"{base}/{ntfy_topic}"
-    caller_tag = f"{host} - {agent}" if agent else host
-    title = f"Vault Unlock: Code [{code}] ({caller_tag})" if code else f"Vault Unlock ({caller_tag})"
-    action_title = f"Unlock [{code}]" if code else "Unlock Vault"
-    body_lines = [f"Request from {host}"]
-    if agent:
-        body_lines.append(f"Agent: {agent}")
-    if model:
-        body_lines.append(f"Model: {model}")
-    body_lines.extend([
-        "Action: vault restore",
-        f"Verification Code: [{code}]",
-        "Tap to verify matching number on terminal and approve."
-    ])
-    body = "\n".join(body_lines)
-    headers = {
-        "Title": title,
-        "Priority": "urgent",
-        "Tags": "lock,key",
-        "Click": url,
-        "Actions": f"view, {action_title}, {url}, clear=true",
-        # explicit text/plain: a relay in front of ntfy must be able to read
-        # the body back byte for byte, and urllib would otherwise default to
-        # application/x-www-form-urlencoded.
-        "Content-Type": "text/plain; charset=utf-8",
-    }
-    req = urllib.request.Request(endpoint, data=body.encode("utf-8"), headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.status in (200, 201)
-    except Exception as exc:
-        log(f"WARNING: ntfy dispatch to {ntfy_topic} failed: {exc}")
-        return False
-
-
-
-# The tab page lives in the public tool repo, NOT the private release store.
-TOOL_REPO = "FahadBinHussain/mainframe"
-
-
-def _pages_base(tool_repo: str = TOOL_REPO) -> str:
-    owner, repo = tool_repo.split("/", 1)
-    return f"https://{owner.lower()}.github.io/{repo}"
-
-
-def get_pages_base(checkout: Path | None = None, explicit: str | None = None,
-                   tool_repo: str = TOOL_REPO) -> str:
-    """Resolve the base url that serves docs/vault-tab.html.
-
-    explicit arg > MAINFRAME_PAGES_BASE env > pagesBase in
-    mainframe.config.json > the GitHub Pages url of the public tool repo.
-    the approval card is a static file, so any host that serves it works --
-    a first-party deployment keeps the tap link off a raw github.io path.
-    """
-    if explicit and explicit.strip():
-        return explicit.strip().rstrip("/")
-    from_env = os.environ.get("MAINFRAME_PAGES_BASE")
-    if from_env and from_env.strip():
-        return from_env.strip().rstrip("/")
-    from_cfg = load_config(checkout).get("pagesBase")
-    if from_cfg and isinstance(from_cfg, str) and from_cfg.strip():
-        return from_cfg.strip().rstrip("/")
-    return _pages_base(tool_repo)
-
-
-def generate_tab_key(work_root: Path, *, reply_topic: str | None = None,
-                     enable_relay: bool = True, context: str = "restore",
-                     agent: str | None = None, model: str | None = None,
-                     expires_in: int = 0, pages_base: str | None = None,
-                     relay_base: str | None = None) -> tuple[str, Path, str | None, str, str, str | None]:
-    """Generate an ephemeral RSA keypair; return (tab URL, private key path, reply_topic, code, agent, model)."""
-    resolved_agent, resolved_model = detect_caller_identity(agent, model)
-    tmp = work_root / "tmp"
-    mkdirs(tmp)
-    priv = tmp / "vault-tab.key"
-    if priv.exists():
-        priv.unlink()
-    proc = subprocess.run(
-        ["openssl", "genpkey", "-algorithm", "RSA",
-         "-pkeyopt", "rsa_keygen_bits:2048", "-out", str(priv)],
-        capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError("openssl key generation failed")
-    os.chmod(priv, 0o600)
-    proc = subprocess.run(
-        ["openssl", "pkey", "-pubout", "-outform", "DER", "-in", str(priv)],
-        capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError("openssl public key export failed")
-    pub = base64.urlsafe_b64encode(proc.stdout).decode().rstrip("=")
-    sid = reply_topic if reply_topic else (f"mf-vault-{secrets.token_hex(12)}" if enable_relay else None)
-    code = str(10 + secrets.randbelow(90))
-    host = ""
-    try:
-        host = os.uname().nodename
-    except Exception:
-        host = os.environ.get("HOSTNAME") or "linux-machine"
-    fragment = f"k={pub}&code={code}&host={urllib.parse.quote(host)}&ctx={urllib.parse.quote(context)}&agent={urllib.parse.quote(resolved_agent)}"
-    if resolved_model:
-        fragment += f"&model={urllib.parse.quote(resolved_model)}"
-    if sid:
-        fragment += f"&sid={sid}"
-    if expires_in > 0:
-        # how long this runner will keep waiting. the card stops offering a
-        # tap once this passes instead of sitting there looking approvable.
-        fragment += f"&exp={int(time.time()) + expires_in}"
-    if relay_base and relay_base.rstrip("/") != DEFAULT_NTFY_SERVER:
-        # the card has to post the ciphertext back to the same relay this
-        # runner reads. without this the page would hardcode ntfy.sh and a
-        # machine behind a relay would never see the approval land.
-        fragment += f"&srv={urllib.parse.quote(relay_base.rstrip('/'), safe='')}"
-    base = (pages_base or _pages_base()).rstrip("/")
-    return f"{base}/docs/vault-tab.html#{fragment}", priv, sid, code, resolved_agent, resolved_model
-
-
-def try_open_phone_adb(url: str) -> bool:
-    """If an Android phone is attached via ADB, wake screen and launch full-screen approval prompt."""
-    adb = shutil.which("adb")
-    if not adb:
-        return False
-    try:
-        proc = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=5)
-        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-        has_device = any(line.endswith("device") and not line.startswith("List") for line in lines)
-        if has_device:
-            log("phone attached via adb - popping up full-screen prompt on phone...")
-            subprocess.run([adb, "shell", "input", "keyevent", "KEYCODE_WAKEUP"], capture_output=True, timeout=5)
-            subprocess.run([adb, "shell", f"am start -a android.intent.action.VIEW -d '{url}'"], capture_output=True, timeout=5)
-            return True
-    except Exception as exc:
-        log(f"adb phone wakeup attempt failed: {exc}")
-    return False
-
-
-def _try_open_tab(url: str) -> None:
-    """Best effort: open the tab in a desktop browser. Agent runs ignore
-    failure here because the agent opens the printed URL itself."""
-    for cmd in (["xdg-open", url], ["open", url]):
-        try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-            return
-        except Exception:
-            continue
-
-
-def publish_request_expired(topic: str | None, *, host: str = "",
-                            code: str = "", server: str | None = None) -> bool:
-    """Tell the approval card the runner stopped waiting, so it goes stale.
-
-    Same marker shape the PowerShell module publishes: the card polls this
-    single-use topic and flips itself to "stale request" on seeing it."""
-    if not topic:
-        return False
-    body = json.dumps({"mf": "expired", "at": int(time.time()),
-                       "host": host, "code": code}, separators=(",", ":"))
-    base = (server or DEFAULT_NTFY_SERVER).rstrip("/")
-    req = urllib.request.Request(
-        f"{base}/{topic}", data=body.encode("utf-8"),
-        headers={"Title": "Vault Request Expired", "Priority": "low",
-                 "Tags": "hourglass",
-                 "Content-Type": "text/plain; charset=utf-8"})
-    try:
-        with urllib.request.urlopen(req, timeout=10):
-            return True
-    except Exception as exc:
-        log(f"could not publish the expired marker to '{topic}': {exc}")
-        return False
-
-
-def _decrypt_tab_password(priv: Path, raw_b64: str) -> str | None:
-    """Decrypt a relay payload, or None when it is not this request's ciphertext.
-
-    only a 256-byte RSA-2048 block this request's key can open is an approval.
-    markers, garbage, and another session's ciphertext are skipped so they
-    cannot end the wait.
-    """
-    try:
-        ct = base64.b64decode(raw_b64, validate=True)
-    except Exception:
-        return None
-    if len(ct) != 256:
-        return None
-    proc = subprocess.run(
-        ["openssl", "pkeyutl", "-decrypt", "-inkey", str(priv),
-         "-pkeyopt", "rsa_padding_mode:oaep",
-         "-pkeyopt", "rsa_oaep_md:sha256",
-         "-pkeyopt", "rsa_mgf1_md:sha256"],
-        input=ct, capture_output=True)
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.decode()
-
-
-def wait_for_tab_password(priv: Path, reply_topic: str | None = None, *,
-                          host: str = "", code: str = "",
-                          server: str | None = None) -> str:
-    """Poll for encrypted password from relay or ~/Downloads, decrypt, clean up."""
-    target = Path.home() / "Downloads" / TAB_CIPHER_NAME
-    if target.exists():
-        target.unlink()  # never decrypt a stale submission
-    deadline = time.time() + TAB_WAIT_SECONDS
-    base = (server or DEFAULT_NTFY_SERVER).rstrip("/")
-
-    if reply_topic:
-        log(f"waiting for password via phone approval relay ({reply_topic}) or ~/Downloads/{TAB_CIPHER_NAME} ...")
-    else:
-        log(f"waiting for password via ~/Downloads/{TAB_CIPHER_NAME} ...")
-
-    poll_delay = 2
-    while time.time() < deadline:
-        if target.exists() and target.stat().st_size > 0:
-            try:
-                candidate = target.read_text().strip()
-            finally:
-                target.unlink(missing_ok=True)
-            password = _decrypt_tab_password(priv, candidate)
-            if password is not None:
-                log(f"vault password ciphertext received via ~/Downloads/{TAB_CIPHER_NAME}")
-                return password
-            log(f"ignoring ~/Downloads/{TAB_CIPHER_NAME}: not a valid approval payload for this request")
-
-        if reply_topic:
-            try:
-                poll_url = f"{base}/{reply_topic}/raw?poll=1"
-                req = urllib.request.Request(poll_url)
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    if resp.status == 200:
-                        body = resp.read().decode("utf-8").strip()
-                        # raw returns every message, newline separated. the
-                        # expired marker and any noise fail the decrypt test,
-                        # so they are skipped rather than ending the wait.
-                        for line in reversed([ln.strip() for ln in body.splitlines() if ln.strip()]):
-                            password = _decrypt_tab_password(priv, line)
-                            if password is not None:
-                                log(f"vault password ciphertext received via ntfy relay ({reply_topic})")
-                                return password
-                poll_delay = 2
-            except urllib.error.HTTPError as exc:
-                if exc.code == 429:
-                    # ntfy rate-limits per ip. polling every 2 seconds on top
-                    # of another pending approval is enough to trip it, and a
-                    # tripped limit also eats the *push* - the phone then never
-                    # hears about the request at all. back off hard.
-                    poll_delay = 30
-                    log(f"WARNING: relay rate limit hit (429) - backing off to {poll_delay}s")
-                else:
-                    poll_delay = min(poll_delay * 2, 30)
-            except Exception:
-                poll_delay = min(poll_delay * 2, 30)
-
-        time.sleep(poll_delay)
-
-    publish_request_expired(reply_topic, host=host, code=code, server=base)
-    raise RuntimeError(
-        "no password arrived in the browser tab within "
-        f"{TAB_WAIT_SECONDS // 60} minutes")
-
-
-def obtain_master_password(work_root: Path, checkout: Path,
-                           ntfy_topic: str | None = None,
-                           agent: str | None = None,
-                           model: str | None = None,
-                           ntfy_server: str | None = None,
-                           pages_base: str | None = None) -> str:
-    """Obtain Bitwarden master password via 1-tap mobile biometric approval (Google-prompt style),
-    falling back loudly to terminal input only if phone approval fails or times out."""
-    resolved_topic = get_ntfy_topic(checkout, explicit=ntfy_topic)
-    if not resolved_topic:
+    existing = pwsh_executable(work_root)
+    if existing:
+        return existing
+    import pwsh_linux as pwsh_tools
+    destination = work_root / PWSH_ROOT
+    if destination.exists():
         raise RuntimeError(
-            "no ntfy topic configured: set MAINFRAME_NTFY_TOPIC, ntfyTopic in "
-            "mainframe.config.json, or pass --ntfy-topic. the approval push has "
-            "no default -- a public topic would expose every request.")
-    resolved_server = get_ntfy_server(checkout, explicit=ntfy_server)
-    resolved_pages = get_pages_base(checkout, explicit=pages_base)
-    url, priv, reply_topic, code, resolved_agent, resolved_model = generate_tab_key(
-        work_root, context="vault restore", agent=agent, model=model,
-        expires_in=TAB_WAIT_SECONDS, pages_base=resolved_pages,
-        relay_base=resolved_server
-    )
-    host = ""
-    try:
-        host = os.uname().nodename
-    except Exception:
-        host = os.environ.get("HOSTNAME") or "linux-machine"
-    caller_display = f"{resolved_agent} ({resolved_model}) @ {host}" if resolved_model else f"{resolved_agent} @ {host}"
-
-    try:
-        log("==================================================")
-        log(f"  VERIFICATION CODE: [ {code} ]")
-        log(f"  Caller: {caller_display}")
-        log("  Context: vault restore")
-        log(f"  (Ensure the number on your phone matches {code})")
-        log("==================================================")
-        log(f"==> 1-tap mobile approval for vault unlock: {url}")
-        (work_root / "vault-tab.url").write_text(url)
-
-        # 1. If phone is attached via ADB, wake and launch full screen immediately
-        opened_adb = try_open_phone_adb(url)
-
-        # 2. Dispatch urgent push notification via ntfy
-        if resolved_topic:
-            log(f"dispatching phone approval notification to ntfy topic: {resolved_topic}")
-            sent = dispatch_ntfy_unlock(
-                resolved_topic, url, hostname=host, code=code,
-                agent=resolved_agent, model=resolved_model, server=resolved_server
-            )
-            if sent:
-                log("push notification dispatched to phone successfully.")
-            else:
-                # rule 8: no silent degradation. without the push the phone
-                # never hears about this request, so waiting would burn the
-                # whole timeout and fail for a reason nobody was told about.
-                raise RuntimeError(
-                    "phone approval push failed, so the phone was never notified. "
-                    f"the request was NOT sent to the relay at {resolved_server}. "
-                    "check the relay (a 429 here means the ntfy rate limit is "
-                    "tripped - another pending approval polling every 2s is "
-                    "usually the cause). no approval can arrive now.")
-
-        # 3. Best-effort open local desktop browser if present
-        _try_open_tab(url)
-
-        # 4. Await decrypted password from phone relay or local download
-        try:
-            return wait_for_tab_password(priv, reply_topic=reply_topic,
-                                         host=host, code=code,
-                                         server=resolved_server)
-        except RuntimeError as exc:
-            # Rule 8: surface fallback loudly
-            log(f"WARNING: 1-tap mobile approval failed ({exc}). Falling back to MANUAL PASSWORD ENTRY.")
-            if sys.stdin.isatty():
-                return getpass.getpass("Bitwarden master password (unlocks the "
-                                       "sealed email, then the vault): ")
-            try:
-                # A human piping the one-liner may still have /dev/tty
-                with open("/dev/tty") as tty:
-                    return getpass.getpass("Bitwarden master password: ", stream=tty)
-            except Exception:
-                raise RuntimeError("1-tap mobile approval failed and no interactive terminal available") from exc
-    finally:
-        priv.unlink(missing_ok=True)
+            f"the PowerShell install root {destination} exists but has no usable pwsh - "
+            "remove it by hand and run again")
+    mkdirs(destination.parent)
+    log("installing the official PowerShell linux build for the vault step ...")
+    release = pwsh_tools.resolve_release("x86_64")
+    result = pwsh_tools.install_release(release, destination)
+    log(f"PowerShell {result['pwsh_version']} installed at {destination} (sha256 verified)")
+    return str(destination / "pwsh")
 
 
-DEFAULT_VAULT_TTL_MINUTES = 60
+def bw_executable(work_root: Path) -> str | None:
+    """The bw CLI this run may use: PATH first, then the local install."""
+    found = shutil.which("bw")
+    if found:
+        return found
+    local = work_root / "vault" / "bitwarden-cli" / "bw"
+    if local.is_file():
+        return str(local)
+    return None
 
 
-def get_vault_ttl_minutes(checkout: Path | None = None) -> int:
-    """Session TTL in minutes: env > config > 60.
+def ensure_bw(work_root: Path) -> str:
+    """Make sure the bw CLI exists; install the official linux build if not."""
+    existing = bw_executable(work_root)
+    if existing:
+        return existing
+    import bitwarden_cli_linux as bw_tools
+    destination = work_root / "vault" / "bitwarden-cli"
+    mkdirs(destination.parent)
+    log("installing the official Bitwarden CLI for the vault step ...")
+    release = bw_tools.resolve_release("x86_64")
+    bw_tools.install_release(release, destination)
+    return str(destination / "bw")
 
-    Same precedence, same key and same default as the windows side
-    (vault-secret.psm1 Get-VaultSessionTtlMinutes), so one config file drives
-    both machines.
+
+def vault_flow_command(checkout: Path, pwsh: str, bw: str, *,
+                       ntfy_topic: str | None = None,
+                       ntfy_server: str | None = None,
+                       pages_base: str | None = None,
+                       output_path: Path | None = None,
+                       lock: bool = False,
+                       lock_if_stale: bool = False) -> list[str]:
+    """The argv that runs the ONE vault flow."""
+    flow = Path(checkout) / "vault-flow.ps1"
+    if not flow.is_file():
+        raise RuntimeError(f"the vault flow cli is missing: {flow}")
+    cmd = [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(flow),
+           "-Json", "-Checkout", str(checkout), "-BwPath", bw]
+    if ntfy_topic:
+        cmd += ["-NtfyTopic", ntfy_topic]
+    if ntfy_server:
+        cmd += ["-Server", ntfy_server]
+    if pages_base:
+        cmd += ["-PagesBase", pages_base]
+    if output_path is not None:
+        cmd += ["-OutputPath", str(output_path)]
+    if lock:
+        cmd += ["-Lock"]
+    if lock_if_stale:
+        cmd += ["-LockIfStale"]
+    return cmd
+
+
+def vault_session(work_root: Path, checkout: Path,
+                  ntfy_topic: str | None = None,
+                  ntfy_server: str | None = None,
+                  pages_base: str | None = None) -> tuple[str, str]:
+    """Run the vault flow and return (github_token, secrets_password).
+
+    A fresh cached session means no phone approval and no master password -
+    the flow decides that, exactly like it does on windows.
     """
-    from_env = os.environ.get("MAINFRAME_VAULT_TTL_MINUTES")
-    if from_env:
-        try:
-            return int(from_env)
-        except ValueError:
-            pass
-    cfg = load_config(checkout) if checkout is not None else load_config()
-    for key in ("vaultTtlMinutes", "sessionTtlMinutes"):
-        value = cfg.get(key)
-        if value:
-            try:
-                return int(value)
-            except (TypeError, ValueError):
-                pass
-    return DEFAULT_VAULT_TTL_MINUTES
-
-
-def session_key_path(work_root: Path) -> Path:
-    """Where the cached bw session key lives (mirrors the windows session.key)."""
-    return work_root / "vault" / "session.key"
-
-
-def read_cached_session(work_root: Path, ttl_minutes: int) -> str | None:
-    """Return the cached session key if it is still inside the TTL."""
-    path = session_key_path(work_root)
-    if not path.is_file():
-        return None
+    pwsh = ensure_pwsh(work_root)
+    bw = ensure_bw(work_root)
+    result_file = work_root / "tmp" / VAULT_RESULT_FILE
+    mkdirs(result_file.parent)
+    if result_file.exists():
+        result_file.unlink()
+    cmd = vault_flow_command(checkout, pwsh, bw, ntfy_topic=ntfy_topic,
+                              ntfy_server=ntfy_server, pages_base=pages_base,
+                              output_path=result_file)
+    log("running the vault flow (vault-flow.ps1) ...")
+    run(cmd, timeout=VAULT_FLOW_TIMEOUT_SECONDS)
+    if not result_file.is_file():
+        raise RuntimeError("the vault flow produced no result document")
     try:
-        age_minutes = (time.time() - path.stat().st_mtime) / 60.0
-    except OSError:
-        return None
-    if ttl_minutes > 0 and age_minutes >= ttl_minutes:
-        return None
-    try:
-        key = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return key or None
+        payload = json.loads(result_file.read_text(encoding="utf-8-sig"))
+    except (ValueError, OSError) as exc:
+        raise RuntimeError(f"the vault flow result could not be read: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("the vault flow result is not a JSON object")
+    token = str(payload.get("githubToken") or "")
+    password = str(payload.get("secretsPassword") or "")
+    if not token:
+        raise RuntimeError("no GitHub token found in the vault; "
+                           "cannot download the release")
+    log(f"github token found; mainframe-production secrets password "
+        f"{'found' if password else 'MISSING'}")
+    return token, password
 
 
-def write_cached_session(work_root: Path, session: str) -> None:
-    """Cache the session key with owner-only permissions."""
-    path = session_key_path(work_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(session, encoding="utf-8")
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
-def clear_cached_session(work_root: Path) -> None:
-    """Drop the cached session key (expired or explicitly locked)."""
-    path = session_key_path(work_root)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
+TOOL_REPO = "FahadBinHussain/mainframe"
 
 
 def prereqs_present() -> list[str]:
@@ -833,126 +351,6 @@ def prereqs_present() -> list[str]:
     if not Path("/etc/ssl/certs/ca-certificates.crt").is_file():
         missing.append("ca-certificates")
     return missing
-
-
-def extract_vault_secrets(items: list) -> tuple[str, str]:
-    """Pull (github token, mainframe-production secrets password) out of the items."""
-    gh_token = ""
-    secrets_password = ""
-    repo_owner = RELEASE_REPO.split("/")[0].lower()
-    for item in items:
-        name = (item.get("name") or "").lower()
-        notes = (item.get("notes") or "")
-        match = GH_TOKEN_RE.search(notes)
-        if "github" in name and repo_owner in name and match and not gh_token:
-            gh_token = match.group(0)
-        if "mainframe-production" in name and not secrets_password:
-            secrets_password = notes.strip()
-    if not gh_token:
-        for item in items:
-            name = (item.get("name") or "").lower()
-            notes = (item.get("notes") or "")
-            match = GH_TOKEN_RE.search(notes)
-            if "github" in name and match and not gh_token:
-                gh_token = match.group(0)
-                break
-    log(f"vault: github token {'found' if gh_token else 'MISSING'}, "
-        f"secrets password {'found' if secrets_password else 'MISSING'}")
-    if not gh_token:
-        raise RuntimeError("no GitHub token found in the vault; "
-                           "cannot download the release")
-    return gh_token, secrets_password
-
-
-def vault_session(work_root: Path, checkout: Path,
-                  ntfy_topic: str | None = None,
-                  ntfy_server: str | None = None,
-                  pages_base: str | None = None) -> tuple[str, str]:
-    """Log in to Vaultwarden via bw, return (gh_token, secrets_password).
-
-    The master password is prompted once and reused for login + unlock,
-    exactly like the Windows sealed-email flow.
-
-    The session is cached the same way windows caches it: the raw bw session
-    key is written to <work_root>/vault/session.key and reused while it is
-    younger than the TTL, so a second run inside the TTL needs no phone
-    approval at all. an expired session is locked and purged, and the phone
-    is asked again.
-    """
-    import bitwarden_cli_linux as bw_tools
-    bw = shutil.which("bw")
-    if bw is None:
-        dest = work_root / "vault" / "bitwarden-cli"
-        mkdirs(dest.parent)
-        log("installing bw CLI for the vault step ...")
-        release = bw_tools.resolve_release("x86_64")
-        bw_tools.install_release(release, dest)
-        bw = str(dest / "bw")
-    else:
-        log(f"using existing bw at {bw}")
-    status = json.loads(run([bw, "status"]).stdout)
-    if status.get("serverUrl") != BW_SERVER:
-        if status.get("status") != "unauthenticated":
-            run([bw, "logout"], check=False)
-        run([bw, "config", "server", BW_SERVER])
-        status = json.loads(run([bw, "status"]).stdout)
-
-    ttl = get_vault_ttl_minutes(checkout)
-
-    # 1. a fresh cached session means no phone approval is needed at all
-    cached = read_cached_session(work_root, ttl)
-    if cached:
-        if status.get("status") == "unauthenticated":
-            log("cached vault session is useless while bw is logged out - asking the phone again")
-            clear_cached_session(work_root)
-        else:
-            try:
-                items = json.loads(run([bw, "list", "items", "--session", cached]).stdout)
-            except Exception as exc:
-                log(f"cached vault session is no longer usable ({exc}) - asking the phone again")
-                items = None
-            if items is not None:
-                log(f"vault: reusing the cached session (under the {ttl} minute TTL) - "
-                    "no phone approval needed")
-                return extract_vault_secrets(items)
-    elif session_key_path(work_root).exists():
-        # expired: lock and purge, exactly like the windows Lock-VaultSession
-        log("vault session expired - locking vault")
-        run([bw, "lock"], check=False)
-        clear_cached_session(work_root)
-
-    email = None
-    blob = checkout / "bw-email.enc.json"
-    if blob.exists():
-        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
-                                          ntfy_server=ntfy_server, pages_base=pages_base)
-        email = unseal_email(blob, password)
-        log("email unsealed from bw-email.enc.json")
-    else:
-        email = os.environ.get("MAINFRAME_BW_EMAIL") or load_config(checkout).get("bitwardenEmail")
-        if not email:
-            if not sys.stdin.isatty():
-                fail("headless run without bw-email.enc.json or bitwardenEmail config")
-            email = input("Bitwarden email: ").strip()
-        password = obtain_master_password(work_root, checkout, ntfy_topic=ntfy_topic,
-                                          ntfy_server=ntfy_server, pages_base=pages_base)
-    if status.get("status") == "unauthenticated":
-        log("bw login ...")
-        run([bw, "login", email, "--passwordenv", "BW_PASSWORD"],
-            env={"BW_PASSWORD": password})
-        run([bw, "lock"])
-    log("bw unlock ...")
-    session = run([bw, "unlock", "--raw", "--passwordenv", "BW_PASSWORD"],
-                  env={"BW_PASSWORD": password}).stdout.strip()
-    if not session:
-        raise RuntimeError("bw unlock produced no session key")
-    write_cached_session(work_root, session)
-    log(f"vault session cached at {session_key_path(work_root)} (TTL {ttl} minutes)")
-    try:
-        items = json.loads(run([bw, "list", "items", "--session", session]).stdout)
-    except Exception:
-        items = []
-    return extract_vault_secrets(items)
 
 
 def download_release(work_root: Path, token: str) -> Path:
@@ -1092,42 +490,29 @@ def run_planned_packages(work_root: Path) -> dict:
 # ---------------------------------------------------------------- extras
 
 def extra_pwsh(work_root: Path, bin_dir: Path) -> tuple[bool, str]:
-    """Current PowerShell: GitHub release tarball, hash verified against
-    Microsoft's hashes.sha256 (UTF-16LE-encoded -- the gotcha that broke
-    the pwsh metadata module)."""
-    rel = github_json("https://api.github.com/repos/PowerShell/PowerShell/releases/latest")
-    assets = {a["name"]: a for a in rel.get("assets", [])}
-    tar_name = "powershell-latest-linux-x64.tar.gz"
-    # The release asset is versioned; find the linux-x64 tarball by suffix.
-    tar = next((a for n, a in assets.items()
-                if n.endswith("-linux-x64.tar.gz")), None)
-    hashes = next((a for n, a in assets.items() if n == "hashes.sha256"), None)
-    if tar is None or hashes is None:
-        return False, "release assets missing tarball or hashes.sha256"
-    tmp = Path(tempfile.mkdtemp(prefix="mainframe-pwsh-"))
-    tar_path = download(tar["browser_download_url"], tmp / "pwsh.tar.gz")
-    raw = download(hashes["browser_download_url"], tmp / "hashes.sha256").read_bytes()
+    """Current PowerShell on linux, installed by pwsh_linux.
+
+    The installer is the same one the vault leg uses: the archive is bounded,
+    pinned to two independently published digests, extracted into an isolated
+    tree that refuses links and traversal, and published atomically into a
+    destination that must not exist yet. It never touches PATH, profiles or
+    credentials - the bin link is the only visible change.
+    """
+    import pwsh_linux as pwsh_tools
+    destination = work_root / PWSH_ROOT
+    if pwsh_tools.is_installed(destination):
+        ensure_bin_link(bin_dir, destination / "pwsh", "pwsh")
+        return True, f"already installed at {destination}"
+    if destination.exists():
+        return False, (f"the PowerShell install root {destination} exists but has no "
+                       "usable pwsh - remove it by hand and run again")
     try:
-        text = raw.decode("utf-16")
-    except UnicodeDecodeError:
-        text = raw.decode("utf-8", errors="replace")
-    want = None
-    for line in text.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1].strip("*") == tar["name"]:
-            want = parts[0].lower()
-    if want is None:
-        return False, "tarball not listed in hashes.sha256"
-    if sha256_file(tar_path) != want:
-        return False, "SHA-256 mismatch for pwsh tarball"
-    dest = work_root / "tools" / "pwsh"
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.mkdir(parents=True)
-    with tarfile.open(tar_path) as tf:
-        tf.extractall(dest, filter="data")
-    ensure_bin_link(bin_dir, dest / "pwsh", "pwsh")
-    return True, f"{rel.get('tag_name', '?')} (hash verified)"
+        release = pwsh_tools.resolve_release("x86_64")
+        result = pwsh_tools.install_release(release, destination)
+    except Exception as exc:
+        return False, f"the official PowerShell linux install failed: {exc}"
+    ensure_bin_link(bin_dir, destination / "pwsh", "pwsh")
+    return True, f"{result['version']} (sha256 verified, pwsh {result['pwsh_version']})"
 
 
 def dpkg_install(deb: Path) -> None:
@@ -1628,14 +1013,19 @@ def main(argv: list[str] | None = None) -> int:
     report: dict = {"work_root": str(work_root)}
 
     # --lock-vault: the linux twin of vault-lock.ps1. locks the cli and purges
-    # the cached session key, so the next run asks the phone again.
+    # the cached session key, so the next run asks the phone again. the rule
+    # lives in the ONE vault flow, so linux calls it instead of repeating it.
     if args.lock_vault:
-        bw = shutil.which("bw")
-        if bw:
-            run([bw, "lock"], check=False)
-        clear_cached_session(work_root)
-        log(f"vault locked and the cached session purged "
-            f"({session_key_path(work_root)})")
+        pwsh = pwsh_executable(work_root)
+        if not pwsh:
+            fail("no pwsh available to run the vault lock - the vault flow is the "
+                 "powershell implementation on both platforms, so install powershell "
+                 "first (the vault leg installs the official linux build for you)")
+        bw = bw_executable(work_root)
+        if not bw:
+            fail("no bw CLI found to lock the vault")
+        run(vault_flow_command(HERE, pwsh, bw, lock=True), timeout=120)
+        log("vault locked and the cached session purged")
         return 0
 
     # Prereqs (same set as --setup-tools, idempotent).
@@ -1659,18 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
     # Vault + release.
     backup_root = args.backup_root
     gh_token = ""
-    ntfy_topic = get_ntfy_topic(HERE, explicit=args.ntfy_topic)
-    if ntfy_topic and not args.skip_vault:
-        log(f"phone approval enabled via ntfy topic: {ntfy_topic}")
-        relay = get_ntfy_server(HERE, explicit=args.ntfy_server)
-        page = get_pages_base(HERE, explicit=args.pages_base)
-        if relay != DEFAULT_NTFY_SERVER:
-            log(f"phone approval relay: {relay}")
-        if page != _pages_base():
-            log(f"phone approval page base: {page}")
     if not args.skip_vault:
+        # the topic, the relay and the page base are resolved by the ONE vault
+        # flow, from the same config file windows reads. python passes only
+        # what the operator typed, so the precedence lives in one place and
+        # the two machines cannot drift apart.
         try:
-            gh_token, secrets_pw = vault_session(work_root, HERE, ntfy_topic=ntfy_topic,
+            gh_token, secrets_pw = vault_session(work_root, HERE,
+                                                 ntfy_topic=args.ntfy_topic,
                                                  ntfy_server=args.ntfy_server,
                                                  pages_base=args.pages_base)
             report["secrets_password_present"] = bool(secrets_pw)
@@ -1679,12 +1065,15 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"vault/release: {exc}")
             log(f"vault/release FAILED: {exc}")
         finally:
-            bw = shutil.which("bw")
             # a cached session stays usable - and the cli stays unlocked - until
             # the TTL lapses, exactly like the windows side. only lock when
-            # there is no fresh session to reuse.
-            if bw and not read_cached_session(work_root, get_vault_ttl_minutes(HERE)):
-                run([bw, "lock"], check=False)
+            # there is no fresh session to reuse - and THAT rule lives in the
+            # one vault flow, so linux asks it instead of repeating it.
+            pwsh = pwsh_executable(work_root)
+            bw = bw_executable(work_root)
+            if pwsh and bw:
+                run(vault_flow_command(HERE, pwsh, bw, lock_if_stale=True),
+                    timeout=120, check=False)
     elif backup_root is None:
         log("vault skipped and no --backup-root: restore leg skipped")
 
