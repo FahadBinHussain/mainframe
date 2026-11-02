@@ -4,7 +4,11 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\terabox'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'terabox'
 $currentFile = Join-Path $accountRoot 'current.json'
 $appId = '250528'
 $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.88 Safari/537.36'

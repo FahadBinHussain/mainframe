@@ -2,7 +2,11 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\notion'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'notion'
 $currentFile = Join-Path $accountRoot 'current.json'
 $apiEndpoint = 'https://api.notion.com'
 $apiVersion = '2026-03-11'

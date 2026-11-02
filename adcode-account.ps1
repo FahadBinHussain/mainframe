@@ -64,7 +64,11 @@ $launchWaitSec = 15
 # chain, and the app rewrites identity.json when it refreshes, which status
 # re-banks.
 $accountRoot = if ([string]::IsNullOrWhiteSpace($env:ADCODE_ACCOUNT_ROOT)) {
-    Join-Path $env:APPDATA 'mainframe\accounts\adcode'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+    Join-Path (Get-MainframeAccountsDir) 'adcode'
 } else {
     [IO.Path]::GetFullPath($env:ADCODE_ACCOUNT_ROOT.Trim())
 }

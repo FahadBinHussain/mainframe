@@ -1,7 +1,11 @@
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\gws'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'gws'
 $currentFile = Join-Path $accountRoot 'current.json'
 $defaultGwsConfig = Join-Path $env:USERPROFILE '.config\gws'
 

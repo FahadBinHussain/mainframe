@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\gcloud'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'gcloud'
 $currentFile = Join-Path $accountRoot 'current.json'
 $defaultConfigDir = Join-Path $env:APPDATA 'gcloud'
 

@@ -82,8 +82,9 @@ the core of the 1-tap flow. this is the part that is now provably identical.
 
 | feature | windows | linux | verdict |
 |---|---|---|---|
-| 17 `*-account.ps1` helpers | ✅ | ❌ **all of them are `%APPDATA%`-rooted**, so none works on linux | ❌ close: one XDG-aware profile root (`$XDG_CONFIG_HOME/mainframe/accounts`) used by both - then pwsh on linux runs the same helpers unchanged |
+| 17 `*-account.ps1` helpers | ✅ | ✅ **after the profile-root change** - all of them resolve their profile through `mainframe-paths.psm1` now | ✅ (the 12 helpers in `automata-private` still hardcode windows paths - see below) |
 | `account-contract.ps1` checker | ✅ | ✅ path-agnostic | ✅ |
+| the 12 helpers in `automata-private` | ✅ | ❌ they import `vault-secret.psm1` from an absolute windows path | ❌ close: resolve the mainframe checkout through `Get-MainframeCheckoutRoot` instead of `C:\Users\Admin\Downloads\...` |
 
 ## maintenance
 

@@ -2,7 +2,11 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
 
-$accountRoot = Join-Path $env:APPDATA 'mainframe\accounts\vercel'
+# the profile root is resolved by one shared module, so windows and linux
+# read the same place (see mainframe-paths.psm1).
+Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+
+$accountRoot = Join-Path (Get-MainframeAccountsDir) 'vercel'
 $currentFile = Join-Path $accountRoot 'current.json'
 $legacyCurrentFile = Join-Path $accountRoot 'current.txt'
 $apiBase = 'https://api.vercel.com'
