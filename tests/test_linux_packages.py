@@ -884,7 +884,7 @@ class LinuxPackagesTests(unittest.TestCase):
         mapped = {a.name for a in plan.actions if a.status == 'planned'}
         self.assertTrue({'qbittorrent', 'rclone', 'yt-dlp', 'syncplay', 'cloudflared', 'nodejs-lts'} <= mapped)
         for item in ('pwsh', 'discord'):
-            self.assertIn('not validated' if item == 'pwsh' else 'no validated', blocked[item])
+            self.assertIn('does not drive it' if item == 'pwsh' else 'no validated', blocked[item])
         self.assertIn('portapps/discord-portable', blocked['discord'])
         self.assertIn('no exact matching Linux package version/checksum', blocked['discord'])
         self.assertIn('No Snap/Flatpak substitution.', blocked['discord'])
