@@ -28,6 +28,63 @@ $script:DefaultSessionTtlMinutes = 60
 # the profile root is resolved by one shared module, so windows and linux read
 # the same place (see mainframe-paths.psm1).
 Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
+
+function Get-BwEmailKeyMaterial {
+    param([securestring]$Password, [byte[]]$Salt, [int]$Iterations)
+    $plain = [System.Net.NetworkCredential]::new('', $Password).Password
+    $pwBytes = [System.Text.Encoding]::UTF8.GetBytes($plain)
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($pwBytes, $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try { return ,$kdf.GetBytes(64) } finally { $kdf.Dispose() }
+}
+
+function Unseal-BwEmail {
+    <#
+    .SYNOPSIS
+        unseal the vault account email from bw-email.enc.json.
+
+    .DESCRIPTION
+        the blob in the repo is ciphertext only: PBKDF2-HMAC-SHA256 (600k
+        iterations) over the master password, AES-256-CBC, HMAC-SHA256 over
+        salt|iv|ciphertext. a fresh machine never has to type the email
+        address - the master password is enough.
+
+        it lives in this module so windows and linux unseal it the same way
+        (it used to be a pair of functions inside boot.ps1 only, and linux
+        had its own copy in python).
+    #>
+    param([string]$BlobPath, [securestring]$Password)
+    try {
+        $blob = Get-Content -LiteralPath $BlobPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $salt = [Convert]::FromBase64String([string]$blob.salt)
+        $iv = [Convert]::FromBase64String([string]$blob.iv)
+        $ct = [Convert]::FromBase64String([string]$blob.ct)
+        $macExpected = [Convert]::FromBase64String([string]$blob.mac)
+        $km = Get-BwEmailKeyMaterial -Password $Password -Salt $salt -Iterations ([int]$blob.iter)
+        $encKey = New-Object byte[] 32; [Array]::Copy($km, 0, $encKey, 0, 32)
+        $macKey = New-Object byte[] 32; [Array]::Copy($km, 32, $macKey, 0, 32)
+        $hmac = [System.Security.Cryptography.HMACSHA256]::new($macKey)
+        $macInput = New-Object byte[] ($salt.Length + $iv.Length + $ct.Length)
+        [Array]::Copy($salt, 0, $macInput, 0, $salt.Length)
+        [Array]::Copy($iv, 0, $macInput, $salt.Length, $iv.Length)
+        [Array]::Copy($ct, 0, $macInput, $salt.Length + $iv.Length, $ct.Length)
+        $macActual = $hmac.ComputeHash($macInput)
+        $hmac.Dispose()
+        if ($macExpected.Length -ne $macActual.Length) { return $null }
+        $diff = 0
+        for ($i = 0; $i -lt $macExpected.Length; $i++) { $diff = $diff -bor ($macExpected[$i] -bxor $macActual[$i]) }
+        if ($diff -ne 0) { return $null }
+        $aes = [System.Security.Cryptography.Aes]::Create()
+        $aes.Key = $encKey; $aes.IV = $iv
+        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $pt = $aes.CreateDecryptor().TransformFinalBlock($ct, 0, $ct.Length)
+        $aes.Dispose()
+        $email = [System.Text.Encoding]::UTF8.GetString($pt)
+        if ($email -match '^[^@\s]+@[^@\s]+\.[^@\s]+$') { return $email }
+        return $null
+    } catch { return $null }
+}
 
 function Get-VaultSessionTtlMinutes {
     if ($env:MAINFRAME_VAULT_TTL_MINUTES) {
@@ -36,7 +93,9 @@ function Get-VaultSessionTtlMinutes {
     $cfgCandidates = @(
         (Join-Path $PSScriptRoot 'mainframe.config.json'),
         (Join-Path (Get-Location) 'mainframe.config.json'),
-        (Join-Path $HOME '.config\mainframe\mainframe.config.json')
+        # the profile root, resolved the portable way - a literal
+        # '.config\mainframe' would never match on linux
+        (Join-Path (Get-MainframeProfileRoot) 'mainframe.config.json')
     )
     foreach ($cfgPath in $cfgCandidates) {
         if (Test-Path -LiteralPath $cfgPath) {
@@ -51,6 +110,7 @@ function Get-VaultSessionTtlMinutes {
 }
 
 function Lock-VaultSession {
+    param([string]$BwPath = 'bw')
     $sessionFile = Get-MainframeSessionKeyPath
     if (Test-Path -LiteralPath $sessionFile) {
         Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
@@ -58,7 +118,7 @@ function Lock-VaultSession {
     Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
     Clear-VaultSessionCache
     Clear-VaultItemsCache
-    & bw lock 2>$null | Out-Null
+    & $BwPath lock 2>$null | Out-Null
     Write-Host "Bitwarden vault locked." -ForegroundColor Green
 }
 
@@ -163,9 +223,7 @@ function Ensure-VaultSession {
                 $unlockOut = @(& bw unlock --raw --passwordenv BW_PASSWORD 2>&1)
                 $rawKey = $unlockOut | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z0-9+/=]{20,}$' } | Select-Object -Last 1
                 if ($rawKey) {
-                    $sessionFile = Get-MainframeSessionKeyPath
-                    New-Item -ItemType Directory -Force -Path (Split-Path $sessionFile) | Out-Null
-                    Set-Content -LiteralPath $sessionFile -Value $rawKey.Trim() -Encoding UTF8 -NoNewline
+                    $sessionFile = Set-VaultSessionKey -SessionKey $rawKey
                     $env:BW_SESSION = $rawKey.Trim()
                     Clear-VaultSessionCache
                     Clear-VaultItemsCache
@@ -184,8 +242,52 @@ function Ensure-VaultSession {
     return $false
 }
 
+function Set-VaultSessionKey {
+    <#
+    .SYNOPSIS
+        cache the raw bw session key, 0600, where both platforms look for it.
+
+    .DESCRIPTION
+        the file lives in the profile root (mainframe-paths.psm1), so windows
+        and linux share ONE session cache location - the same file, the same
+        TTL, the same rules.
+    #>
+    param([Parameter(Mandatory = $true)][string]$SessionKey)
+
+    $sessionFile = Get-MainframeSessionKeyPath
+    New-Item -ItemType Directory -Force -Path (Split-Path $sessionFile) | Out-Null
+    Set-Content -LiteralPath $sessionFile -Value $SessionKey.Trim() -Encoding UTF8 -NoNewline
+    # owner-only on the posix side; windows inherits the profile acl
+    if ($env:OS -ne 'Windows_NT') {
+        try {
+            $mode = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite
+            [System.IO.File]::SetUnixFileMode($sessionFile, $mode)
+        } catch {
+            Write-Warning "could not tighten the mode of $sessionFile - it may be readable by other users"
+        }
+    }
+    return $sessionFile
+}
+
 function Clear-VaultSessionCache {
     $script:VaultSessionOkSession = $null
+}
+
+function ConvertTo-VaultItemList {
+    <#
+    .SYNOPSIS
+        flatten the `bw list items` json into a plain list of items.
+
+    .DESCRIPTION
+        windows powershell 5.1 and pwsh 7 disagree here. 5.1 hands the whole
+        json array over as ONE object, 7 enumerates it. without this, every
+        consumer on 5.1 walks a NESTED array: $item.name then returns the
+        names of ALL items at once, and a lookup can quietly return the wrong
+        item. always go through here.
+    #>
+    param([AllowNull()][string]$Json)
+
+    return ConvertFrom-JsonArray -Json $Json
 }
 
 function Get-VaultItems {
@@ -198,7 +300,8 @@ function Get-VaultItems {
         return $script:VaultItemsCache
     }
 
-    $items = @(bw list items --session $env:BW_SESSION 2>$null | ConvertFrom-Json)
+    $raw = bw list items --session $env:BW_SESSION 2>$null | Out-String
+    $items = ConvertTo-VaultItemList -Json $raw
     $script:VaultItemsCache = $items
     $script:VaultItemsCacheSession = $session
     return $items
@@ -386,4 +489,4 @@ function Write-VaultSecretToExisting {
     return $item.id
 }
 
-Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot
+Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-BwEmailKeyMaterial, Unseal-BwEmail, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot

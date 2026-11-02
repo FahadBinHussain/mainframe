@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 # the profile root is resolved by one shared module, so windows and linux
 # read the same place (see mainframe-paths.psm1).
 Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
 
 $accountRoot = Join-Path (Get-MainframeAccountsDir) 'agent-browser'
 $currentFile = Join-Path $accountRoot 'current.json'
@@ -1144,7 +1145,7 @@ function Start-LiteBrowser {
     # (login form); adding .facebook.com copies makes the session stick.
     $importPath = $exportPath
     try {
-        $exportData = @(Get-Content -LiteralPath $exportPath -Raw | ConvertFrom-Json)
+        $exportData = @(ConvertFrom-JsonArray -Json (Get-Content -LiteralPath $exportPath -Raw))
         $needsDual = @($exportData | Where-Object { $_.domain -match '(^|\.)(messenger|facebook)\.com$' })
         if ($needsDual.Count -gt 0) {
             $dual = @()
@@ -1280,7 +1281,7 @@ function Show-CookieStatus {
 
     $cookies = @()
     try {
-        $cookies = @(Get-Content -LiteralPath $exportPath -Raw | ConvertFrom-Json)
+        $cookies = @(ConvertFrom-JsonArray -Json (Get-Content -LiteralPath $exportPath -Raw))
     } catch {}
 
     Write-Host "email: $normalized"
