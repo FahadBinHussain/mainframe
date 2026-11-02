@@ -66,10 +66,10 @@ and the two modules it uses - and both machines run it.
 | quick mode | `-Mode quick` | hardcoded quick | ✅ |
 | full mode | `-Mode full` | ❌ | ❌ **no full mode.** close: `--mode full\|quick` on `linux_real.py`, passed straight into `copy_recovery` |
 | pinned release | `-Pinned` | always the latest | ❌ close: a `--pinned` flag that pins the release tag |
-| secrets restore (manifest → decrypt → activate) | `restore-secrets.ps1` | password fetched, zip left raw in `recovered/` | ❌ **the documented next step.** close: implement the manifest mapping in `linux_restore.py` |
+| secrets restore (manifest → decrypt → activate) | `restore-secrets.ps1` | `linux_secrets.py` - same manifest, same 8 items, decrypts the AES-256 blob and maps each item to a Linux home path | ✅ |
 | repo selection | `-CloneRepos` hashtable | `--skip-private-repo` bool | ❌ close: repeatable `--clone-repo name=url`, so the same repo map drives both |
 | `$HOME/AGENTS.md` | restored | `--restore-global-agents` opt-in | ✅ (linux is stricter on purpose) |
-| `.agents/skills` | restored | blocked | ❌ close: map the skills tree the way `AGENTS.md` is mapped, same allowlist rules |
+| `.agents/skills` + `.skill-lock.json` | restored | staged and activated with the same `--yes` gate | ✅ |
 | activate into live home | always (after the F/Q mode prompt) | `--yes` | ✅ (linux is safer) |
 | overwritten files | **per-item and mixed**: some persist files are kept (fresh-box-only rule, warn loud), Edge's User Data is removed and replaced with no copy | **one rule**: the existing file is copied to `<work_root>/restore-backup/` before it is replaced | ❌ **two different policies for the same event.** close: adopt linux's rule on windows - copy the existing file aside before replacing it - so both sides keep a rollback copy instead of one keeping and one deleting |
 | portable conversion maps | n/a (source) | git, mpv, yt-dlp, flameshot, qbittorrent, obs, user-env | ✅ (linux-only by nature) |
