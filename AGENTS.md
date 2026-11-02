@@ -239,6 +239,31 @@ dir name. nothing errors: the profile looks healthy, mints fine, and simply serv
   and will keep serving the OLD mailbox until deleted. `profile.json`/`current.json` `updatedAt` is
   written by the helper's login, so a hand-run consent leaves it stale - bump it or `status-all` lies.
 
+### direct `gws` calls: never let the keyring backend default (2026-09-13)
+
+the helper always sets both env vars, but calling `gws` **yourself** without them makes the CLI
+look in the wrong place, decide the credentials are undecryptable, and **regenerate
+`.encryption_key`** - which permanently breaks the existing `credentials.enc` and
+`token_cache.json`. the profile then needs an interactive re-login, and there is no backup of the
+old key. so always set both, together, before any direct gws call:
+
+```powershell
+$env:GOOGLE_WORKSPACE_CLI_CONFIG_DIR = "$env:APPDATA\mainframe\accounts\gws\<email>"
+$env:GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND = 'file'
+```
+
+other notes:
+- if `gws` fails with `Cannot find module .../@googleworkspace/cli/run.js`, the global package is
+  simply uninstalled - `pnpm add -g @googleworkspace/cli` restores it in seconds (pnpm root -g =
+  `$env:LOCALAPPDATA\pnpm\global\v11`).
+- there is **no Google Drive/Docs connector** in the product marketplace, so gws is the only
+  route to Drive/Docs.
+- sharing a drive file **bumps its `modifiedTime` to now**, even though the content didn't change
+  - worth knowing before concluding a doc was recently edited.
+- for `.docx` files in drive, keep the full `webViewLink` from the api - the `rtpof=true` query
+  param is what makes drive open it in the docs editor instead of downloading it. a bare
+  `.../document/d/<id>/edit` may not behave the same.
+
 ## neon: list all projects for an account
 
 context: neon projects can be under personal accounts or organizations. `projects list` without `--org-id` only returns personal projects. org-owned projects require `--org-id`.
