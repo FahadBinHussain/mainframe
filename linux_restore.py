@@ -104,8 +104,18 @@ def classify(path, archive='', include_global_agents=False):
     if (include_global_agents and archive == 'mainframe-quick.zip'
             and path == 'AGENTS.md'):
         return 'native-staging', 'Exact top-level Windows global instructions; staged byte-for-byte as Linux HOME/AGENTS.md only by explicit opt-in.', 'AGENTS.md'
+    # The agent skill tree is the same relative path on both platforms
+    # (~/.agents/skills), and the lock is the only record of each skill's source
+    # and pinned version. Both are plain files an agent READS - nothing here is
+    # executed at restore time - so they are staged like any other config, then
+    # activated by the same --yes gate as the rest of the home.
+    if archive == 'mainframe-quick.zip' and (
+            path == '.agents/.skill-lock.json'
+            or path == '.agents/skills'
+            or path.startswith('.agents/skills/')):
+        return 'native-staging', 'Agent skills and their lock; identical relative path under $HOME, activated only with the rest of the home.', path
     if p.name.lower() in ('agents.md', 'agent.md') or low.startswith(('.agents/', 'userprofile/.agents/')):
-        return 'blocked', 'Agent instructions/skills are retained, never activated or written globally.', None
+        return 'blocked', 'Nested agent instruction files outside the skill tree are retained, never activated.', None
     if p.suffix.lower() in BINARY_SUFFIXES or p.suffix.lower() in {'.ps1', '.cmd', '.bat', '.reg'}:
         return 'blocked', 'Windows scripts/registry or platform-dependent binary require a native replacement.', None
     if low.startswith('scheduled-tasks/'):
