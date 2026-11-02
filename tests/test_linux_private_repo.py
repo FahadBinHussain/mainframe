@@ -178,32 +178,41 @@ class RestoreLegTests(unittest.TestCase):
 
 class ConfigAndTimeoutTests(unittest.TestCase):
     """Two defects the live container run exposed: a powershell-written config
-    carries a UTF-8 BOM, and a hung apt-get blocked the whole flow."""
+    carries a UTF-8 BOM, and a hung apt-get blocked the whole flow.
+
+    the config lookup itself now lives in mainframe-paths.psm1, so these drive
+    THAT through pwsh - the same code both machines run - instead of a python
+    copy that no longer exists.
+    """
+
+    def _config_value(self, config_bytes: bytes, key: str) -> str | None:
+        from vault_relay_harness import module_dir, run_pwsh_json
+        tmp = Path(tempfile.mkdtemp())
+        root = tmp / "profile"
+        (root / "accounts" / "bitwarden").mkdir(parents=True, exist_ok=True)
+        (root / "mainframe.config.json").write_bytes(config_bytes)
+        modules = module_dir()
+        # the config lookup lives in mainframe-paths.psm1, which vault-approval
+        # imports for its own use but does not re-export - import it directly.
+        result = run_pwsh_json(
+            f"Import-Module '{modules / 'mainframe-paths.psm1'}' -Force -DisableNameChecking; "
+            f"[ordered]@{{ v = Get-MainframeConfigValue -Key '{key}' }} | ConvertTo-Json -Compress",
+            env={"MAINFRAME_PROFILE_ROOT": str(root)}, modules=modules)
+        return result["v"]
 
     def test_a_bom_config_still_loads(self):
-        tmp = Path(tempfile.mkdtemp())
-        cfg = tmp / "mainframe.config.json"
         # exactly what powershell's Set-Content -Encoding utf8 writes
-        cfg.write_bytes(b"\xef\xbb\xbf" + json.dumps(
-            {"ntfyTopic": "topic-not-real", "bitwardenEmail": "a@b.c"}
-        ).encode("utf-8"))
-        with patch.object(lr, "Path", Path):
-            data = lr.load_config(tmp)
-        self.assertEqual(data.get("ntfyTopic"), "topic-not-real")
-        self.assertEqual(data.get("bitwardenEmail"), "a@b.c")
+        payload = b"\xef\xbb\xbf" + json.dumps(
+            {"ntfyTopic": "topic-not-real"}, ensure_ascii=False).encode("utf-8")
+        self.assertEqual(self._config_value(payload, "ntfyTopic"), "topic-not-real")
 
     def test_a_plain_config_still_loads(self):
-        tmp = Path(tempfile.mkdtemp())
-        (tmp / "mainframe.config.json").write_text(
-            json.dumps({"ntfyTopic": "topic-not-real"}), encoding="utf-8")
-        data = lr.load_config(tmp)
-        self.assertEqual(data.get("ntfyTopic"), "topic-not-real")
+        payload = json.dumps({"ntfyTopic": "topic-not-real"}).encode("utf-8")
+        self.assertEqual(self._config_value(payload, "ntfyTopic"), "topic-not-real")
 
     def test_the_ntfy_topic_resolves_from_a_bom_config(self):
-        tmp = Path(tempfile.mkdtemp())
-        (tmp / "mainframe.config.json").write_bytes(
-            b"\xef\xbb\xbf" + json.dumps({"ntfyTopic": "topic-not-real"}).encode())
-        self.assertEqual(lr.get_ntfy_topic(tmp), "topic-not-real")
+        payload = b"\xef\xbb\xbf" + json.dumps({"ntfyTopic": "topic-not-real"}).encode()
+        self.assertEqual(self._config_value(payload, "ntfyTopic"), "topic-not-real")
 
     def test_a_hung_command_times_out_loudly(self):
         start = time.time()
