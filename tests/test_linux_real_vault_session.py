@@ -154,6 +154,22 @@ class VaultSessionTests(unittest.TestCase):
 
 
 class PwshAndBwResolutionTests(unittest.TestCase):
+    def test_every_child_process_runs_with_powershell_telemetry_off(self):
+        # a freshly installed pwsh initialises on first start and would open a
+        # connection to Microsoft's telemetry endpoint, which on a governed
+        # container raises an approval card for something nobody asked for.
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch.object(lr.subprocess, "run", side_effect=fake_run):
+            lr.run(["/bin/true"])
+        env = captured.get("env") or {}
+        self.assertEqual(env.get("POWERSHELL_TELEMETRY_OPTOUT"), "1")
+        self.assertEqual(env.get("POWERSHELL_UPDATECHECK"), "Off")
+
     def test_pwsh_prefers_path(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)

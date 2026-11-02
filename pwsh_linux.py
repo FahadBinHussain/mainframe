@@ -547,15 +547,27 @@ def is_installed(destination: Path) -> bool:
 
 
 def runtime_check(destination: Path, *, env: Mapping[str, str] | None = None) -> str:
-    """Start the installed pwsh once and return its version; fail loudly if it cannot start."""
+    """Start the installed pwsh once and return its version; fail loudly if it cannot start.
+
+    The first start of a fresh PowerShell install also initialises its
+    behaviour and can emit telemetry. this is a headless restore tool on a
+    machine whose egress is governed, so telemetry is switched OFF in the same
+    env the check runs with: otherwise the very first run of a freshly
+    installed pwsh opens a connection to Microsoft's telemetry endpoint
+    (dc.services.visualstudio.com), which on a governed container raises an
+    approval card for something nobody asked for.
+    """
     executable = Path(destination) / "pwsh"
     if not executable.is_file():
         raise RuntimeError(f"PowerShell is not installed at {executable}")
+    merged = dict(os.environ if env is None else env)
+    merged["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
+    merged["POWERSHELL_UPDATECHECK"] = "Off"
     try:
         completed = subprocess.run(
             [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
              "$PSVersionTable.PSVersion.ToString()"],
-            capture_output=True, text=True, timeout=RUNTIME_TIMEOUT, env=env)
+            capture_output=True, text=True, timeout=RUNTIME_TIMEOUT, env=merged)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(f"PowerShell could not be started: {exc}") from exc
     if completed.returncode != 0:
