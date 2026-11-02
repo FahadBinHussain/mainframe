@@ -123,7 +123,11 @@ class RuntimeSeriesTests(unittest.TestCase):
             for name in ('../escape.patch', '/absolute.patch'):
                 with self.assertRaisesRegex(ValueError, 'member'):
                     verifier.checked_artifact({'path': name, 'sha256': digest})
-            link = root / 'link.patch'; link.symlink_to(artifact)
+            link = root / 'link.patch'
+            try:
+                link.symlink_to(artifact)
+            except (OSError, NotImplementedError):
+                self.skipTest('this account/platform cannot create symlinks')
             with self.assertRaisesRegex(ValueError, 'regular'):
                 verifier.checked_artifact({'path': link.name, 'sha256': digest})
 

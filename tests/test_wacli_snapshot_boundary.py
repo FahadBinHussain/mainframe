@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import os
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -36,6 +37,10 @@ def epoch(path):
         return con.execute('SELECT value FROM synthetic_epoch').fetchone()[0]
 
 
+# this contract needs the POSIX filesystem operations (O_NOFOLLOW, private
+# staging, hot rollback journals). windows has no such contract to test, so
+# these cases skip there instead of erroring out.
+@unittest.skipUnless(os.name == 'posix', 'this WACLI contract needs POSIX filesystem operations')
 class SnapshotBoundaryCounterexamples(unittest.TestCase):
     """Demonstrate unsafe source combinations without authorizing capture."""
 

@@ -7,6 +7,7 @@ from contextlib import closing
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -62,6 +63,8 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
         self.assertEqual(len(self.ledger(writer)), 96)
         # An integrity check is not a completeness check.
 
+    @unittest.skipUnless(os.name == 'posix',
+                         'a file name with ?#% is not creatable on windows')
     def test_online_backup_includes_every_committed_wal_row_and_schema(self):
         source, writer = self.fixture('escaped ?#% name.db')
         expected = self.ledger(writer)
@@ -195,8 +198,10 @@ class SQLiteSnapshotEvidence(unittest.TestCase):
         with self.assertRaises(ValueError):
             sqlite3.connect(str(self.root / 'bad\x00.db'))
 
+    @unittest.skipUnless(os.name == 'posix',
+                         'a real permission denial needs POSIX ownership semantics')
     def test_unreadable_database_and_wal_fail_instead_of_immutable_retry(self):
-        if __import__('os').geteuid() == 0:
+        if os.geteuid() == 0:
             self.skipTest('Real permission denial requires an unprivileged POSIX test runner')
         source, writer = self.fixture()
         for path in (source, source.with_name(source.name + '-wal')):

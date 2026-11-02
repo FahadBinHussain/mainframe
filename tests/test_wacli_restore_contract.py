@@ -2,6 +2,7 @@
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import stat
@@ -18,6 +19,10 @@ import wacli_state as ws
 from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 
+# The restore path opens archives through linux_restore.secure_directory, which
+# uses the POSIX-only os.O_DIRECTORY / os.O_NOFOLLOW flags. On windows there is
+# no such contract to test, so these cases skip instead of erroring out.
+@unittest.skipUnless(os.name == 'posix', 'the WACLI restore contract needs the POSIX open flags')
 class WacliRestoreContractTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='wacli-parity-fixture-')

@@ -31,12 +31,24 @@ def run(args, cwd, *, env=None, output=False):
 
 def checked_artifact(entry):
     name = entry['path']
-    if not isinstance(name, str) or Path(name).is_absolute() or '..' in Path(name).parts:
+    # a member must be a plain relative name. Path.is_absolute() is not enough:
+    # on windows '/absolute.patch' is ROOT-RELATIVE, not absolute, so it would
+    # slip past that check and resolve inside the patch directory instead.
+    if not isinstance(name, str) or not name:
+        raise ValueError('Invalid runtime patch member')
+    relative = Path(name)
+    if (relative.is_absolute() or relative.drive or name.startswith(('/', '\\'))
+            or '..' in relative.parts):
         raise ValueError('Invalid runtime patch member')
     path = PATCHES / name
     if path.is_symlink() or not path.is_file():
         raise ValueError('Runtime patch must be a regular file')
-    if hashlib.sha256(path.read_bytes()).hexdigest() != entry['sha256']:
+    # hash the CANONICAL form of the artifact. the pin is over the committed
+    # (LF) content, but a windows checkout has CRLF in the working tree, so
+    # hashing the raw bytes there could never match. normalising the line
+    # endings keeps the pin on the content itself instead of on the checkout.
+    canonical = path.read_bytes().replace(b'\r\n', b'\n')
+    if hashlib.sha256(canonical).hexdigest() != entry['sha256']:
         raise ValueError('Runtime patch digest mismatch')
     return path
 

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import os
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +29,10 @@ def blocked_plan():
     }
 
 
+# this contract needs the POSIX filesystem operations (O_NOFOLLOW, private
+# staging, hot rollback journals). windows has no such contract to test, so
+# these cases skip there instead of erroring out.
+@unittest.skipUnless(os.name == 'posix', 'this WACLI contract needs POSIX filesystem operations')
 class ProducerProtocolTests(unittest.TestCase):
     def encode(self, value):
         return json.dumps(value).encode('utf-8')
