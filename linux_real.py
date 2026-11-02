@@ -90,6 +90,13 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None,
         check: bool = True, input_text: str | None = None,
         timeout: float | None = None) -> subprocess.CompletedProcess:
     merged = dict(os.environ)
+    # a freshly installed pwsh initialises on its first start and would open a
+    # connection to Microsoft's telemetry endpoint (dc.services.visualstudio.com).
+    # this runner drives pwsh for the vault flow on a machine whose egress is
+    # governed, so telemetry is off for every child - the flow should never
+    # raise an approval card for something nobody asked for.
+    merged["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
+    merged["POWERSHELL_UPDATECHECK"] = "Off"
     if env:
         merged.update(env)
     try:
