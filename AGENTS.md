@@ -2309,3 +2309,75 @@ against a local ntfy-compatible relay: the topic/relay/page precedence, the
 backoff and the expired marker. `tests/test_linux_real_vault_session.py` pins
 the linux side of the contract: the argv, the result document and the failure
 modes - plus a guard that the python duplicate stays deleted.
+
+## the secrets archive and the skill tree on linux (2026-11-02)
+
+`tool-secrets.zip` used to reach linux and stop: the mainframe-production
+password was fetched and then dropped, so a fresh linux box came back with no
+ssh keys, no account profiles and no skill tree. both halves are mapped now.
+
+### the blob is WinZip AE-2, and python cannot open it
+
+`publish-backup.ps1` wraps the manifest's own archive with
+`7z a -tzip -mem=AES256`, and appends it to quick as the entry
+`mainframe-secrets.zip`. those entries are `compress_type 99`, which
+**`zipfile` refuses to hand over** - `zf.open(info).read()` raises, and there is
+no way to ask for the raw ciphertext. `linux_secrets.read_zip` therefore walks
+the central directory itself and reads the payload out of the LOCAL file header
+(only the local header's name/extra lengths are right for the data offset; the
+central one's differ).
+
+- **the PBKDF2 order is `key | mac | verifier`, NOT `key | verifier | mac`.**
+  getting it backwards still produces a plausible-looking 2-byte "verifier", so
+  the failure reads as "wrong password" on a CORRECT password. verified against
+  a real 7z archive, byte by byte.
+- the cipher is the `openssl` CLI (`enc -aes-256-ecb -K <hex> -nopad`) fed a
+  little-endian 16-byte counter keystream. `openssl` is already a hard prereq of
+  the linux flow, and it takes the key from a pipe, so **the password never
+  reaches argv** - which is why `7z` is not used for the decrypt even though it
+  wrote the file.
+- the format is pinned against a **real 7z archive** in
+  `tests/test_linux_secrets.py`; a synthetic fixture would not prove the writer's
+  layout, which is exactly what bit us on `pwsh_linux`'s CRLF release notes.
+
+### the mapping is PATH based, and one path is translated
+
+`UserProfile/...` maps to the **identical** relative path. that is deliberate:
+`linux_restore.classify()` already stages those same files when they arrive
+loose inside quick, so a file restored from the encrypted blob and the same file
+restored from the quick tree land in exactly ONE place. the single translation
+is `AppData/Roaming/mainframe/accounts` -> the profile root, which is the rule
+`mainframe-paths.psm1` already encodes (`$XDG_CONFIG_HOME/mainframe` on linux).
+
+- an `XDG_CONFIG_HOME` pointing OUTSIDE `$HOME` is **refused**, not ignored:
+  activation copies staging INTO the live home, so the profiles would otherwise
+  land somewhere no helper looks.
+- anything with no reviewed destination is reported blocked with a reason -
+  never guessed. there is no "copy it anyway" flag.
+
+### everything in the archive is treated as private
+
+the group/world bits are always stripped and **0600 is the floor**; a narrower
+archived mode (0400) is kept, a wider one (0644) is not. an ssh private key at
+0644 is one openssh then REFUSES to use, and the accounts profiles carry oauth
+tokens. the mode is asserted from the report rather than the disk, because
+**windows silently ignores chmod beyond the read-only bit** - a disk check there
+measures the platform, not the code.
+
+### nothing writes the live home directly
+
+mapped files land in `<staging>/secrets-staging`, beside `home-staging`, and the
+ONE `activate()` covers both trees. that is what makes the overwrite backup, the
+symlink refusal and the byte-for-byte `AGENTS.md` check apply to secrets too,
+instead of growing a second copy path. `run_restore` logs the counts and any
+blocked/missing item by name.
+
+### the skill tree stages like any other config
+
+`.agents/skills` + `.agents/.skill-lock.json` used to be blocked as "retained,
+never activated". they are the same relative path on both platforms and they are
+files an agent READS (nothing in the tree is executed at restore time), so they
+now stage and activate behind the same `--yes` gate as everything else. the lock
+rides along because it is the ONLY record of each skill's source and pinned
+version - without it `restore-from-lock.ps1` / `npx skills update -g` cannot work
+on a fresh box. nested instruction files OUTSIDE the tree stay blocked.
