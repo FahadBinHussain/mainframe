@@ -2381,3 +2381,62 @@ now stage and activate behind the same `--yes` gate as everything else. the lock
 rides along because it is the ONLY record of each skill's source and pinned
 version - without it `restore-from-lock.ps1` / `npx skills update -g` cannot work
 on a fresh box. nested instruction files OUTSIDE the tree stay blocked.
+## the two adapters that produced nothing against a real release (2026-11-02)
+
+both of these LOOKED implemented, passed their own tests, and produced empty
+output against today's real `mainframe-quick.zip`. the reason they were never
+noticed is the same every time: **the tests used synthetic values that happened
+to be the ones the adapter supported.**
+
+### `.gitconfig` converted 0 of 17 real keys
+
+the adapter's `RULES` allowed only six cosmetic enums (`core.autocrlf`,
+`core.eol`, `diff.algorithm`, ...). a real gitconfig is mostly `[user]`,
+`[credential ...]` and `[filter "lfs"]`, so `accepted_settings` was **0** and the
+converter returned `no-supported-settings`. every commit on a restored box was
+then authored by a hostname placeholder.
+
+the fix carries `user.name` / `user.email` - the only free-form values the
+adapter writes, and therefore the only place arbitrary text can reach generated
+output. guard rails that exist because of that:
+
+- **a newline is a config INJECTION.** a git config is line- and
+  section-structured, so `name = x\n[credential]` would open a real section.
+  control characters, NUL, empty, overlong and non-address values are REFUSED,
+  never escaped. `_validated_identity` is the single choke point.
+- **duplicates are refused, not guessed**: a wrong author on every commit is
+  worse than an obviously missing one.
+- **identity reaches the generated config and NEVER the audit record.** the
+  audit record is what gets logged and shown; `IdentityAdapterTests` pins that
+  the name and address appear in the file and not in the report.
+- **the credential subsections stay blocked, and that is load-bearing**: the
+  live gitconfig carries a real token in `[credential "https://huggingface.co"]`
+  sitting immediately next to the identity. if the identity allowlist is ever
+  widened, that is the test that has to keep failing.
+
+### `user-env.reg` mapped only `LESS`, which this machine does not set
+
+the adapter carried a LESS pager option set. the real export has **41 Windows
+path variables and no LESS at all**, so it also produced nothing. the three
+cross-platform flags whose values are enums are carried now
+(`OPENCODE_DISABLE_CHANNEL_DB`, `NOTION_MANAGER_AGENTS_MD`,
+`CODEX_SPARKLE_ENABLED`); every `SCOOP` / `JAVA_HOME` / `PG_*` style path stays
+raw because there is no Linux destination to guess at.
+
+`AGENT_BROWSER_ARGS` is deliberately **still raw** even though it is
+cross-platform and the stealth flags matter: its value is a free-form string
+written into `environment.d`, which systemd reads as KEY=VALUE shell-ish lines.
+a free-form value there is an arbitrary-content surface, so it needs its own
+review rather than an enum entry.
+
+### the general lesson
+
+`tools/` note rules apply: a converter that has only ever been fed its own
+fixture proves nothing about the real file. run it against the ACTUAL release
+payload before believing it works -
+
+    gh release download --repo FahadBinHussain/mainframe-production \
+      --pattern mainframe-quick.zip --dir C:\tmp\realquick --clobber
+
+then feed the real `.gitconfig` / `user-env.reg` straight into the adapter and
+read `accepted_settings`. the number was 0 for both.
