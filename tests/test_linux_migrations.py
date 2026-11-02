@@ -53,6 +53,10 @@ class GitAdapterTests(unittest.TestCase):
         self.assertLess(first[0].find(b'[core]'), first[0].find(b'[diff]'))
 
     def test_unknown_sensitive_keys_and_values_never_echoed(self):
+        # `user.name`/`user.email` are deliberately NOT in this marker set any
+        # more: carrying identity is the point of the adapter (see
+        # IdentityAdapterTests). everything that can hold a CREDENTIAL - or a
+        # path, or a command - is still asserted to never reach output or audit.
         marker = 'SYNTHETIC_PRIVATE_MARKER'
         config = f'''[core]
  autocrlf = true
@@ -64,8 +68,6 @@ class GitAdapterTests(unittest.TestCase):
 [includeIf "gitdir:/{marker}/"]
  path = /nonexistent-{marker}
 [user]
- name = {marker}
- email = {marker}@example.invalid
  signingkey = {marker}
 [gpg]
  program = {marker}
@@ -78,9 +80,22 @@ class GitAdapterTests(unittest.TestCase):
         self.assertNotIn(marker, output.decode())
         self.assertNotIn(marker, json.dumps(result))
         self.assertEqual(result['accepted_settings'], 1)
-        self.assertEqual(result['blocked_settings'], 10)
+        self.assertEqual(result['blocked_settings'], 8)
         self.assertNotIn(b'include', output)
         self.assertEqual(result['decisions'][0]['reason'], 'unmapped-or-sensitive-setting')
+
+    def test_credential_sections_are_never_carried_even_with_identity_allowed(self):
+        # a real-world config puts a token in a credential subsection, and it
+        # sits right next to the identity the adapter now DOES carry. the token
+        # must not ride along.
+        token = 'hf_SYNTHETICTOKENVALUE000000000000000000'
+        config = (f'[user]\n name = Probe\n email = probe@example.invalid\n'
+                  f'[credential "https://huggingface.co"]\n'
+                  f' username = {token}\n provider = generic\n')
+        output, result = self.convert(config)
+        self.assertIn(b'name = Probe', output)
+        self.assertNotIn(token.encode(), output)
+        self.assertNotIn(token, json.dumps(result))
 
     def test_duplicates_case_variants_and_invalid_values_are_blocked(self):
         output, result = self.convert('[core]\n AutoCRLF=true\n autocrlf=false\n eol=private-unsupported-value\n')
@@ -114,7 +129,10 @@ class GitAdapterTests(unittest.TestCase):
         self.assertEqual(result['blocked_settings'], len(marker_values))
 
     def test_unknown_empty_and_bare_values_produce_no_output(self):
-        for config in ('', '[user]\n email = example@example.invalid\n', '[core]\n autocrlf\n'):
+        # an email on its own IS now a supported setting (identity is carried),
+        # so it is no longer in this list - only genuinely empty/unusable input is.
+        for config in ('', '[core]\n autocrlf\n', '[user]\n email = not-an-address\n',
+                       '[user]\n name =    \n'):
             output, result = self.convert(config)
             self.assertIsNone(output)
             self.assertEqual(result['reason'], 'no-supported-settings')
@@ -165,6 +183,78 @@ class GitAdapterTests(unittest.TestCase):
         self.assertNotIn(b'[diff]', output)
         self.assertEqual(result['accepted_settings'], 1)
         self.assertEqual(result['blocked_settings'], 2)
+
+
+class IdentityAdapterTests(unittest.TestCase):
+    """`user.name` / `user.email` are carried, under strict validation.
+
+    Without them every commit on a restored box is authored by a hostname
+    placeholder, which is a manual fix on the machine you just restored. They
+    are the only free-form values the adapter writes, so each rejection path is
+    pinned here - a newline in particular is a config INJECTION, since it can
+    open a new section.
+    """
+
+    def convert(self, text):
+        return lm.convert_git_config(text.encode())
+
+    def test_identity_is_carried_into_the_generated_config(self):
+        output, result = self.convert('[user]\n name = Probe Person\n email = probe@example.invalid\n')
+        self.assertIn(b'[user]', output)
+        self.assertIn(b'\tname = Probe Person\n', output)
+        self.assertIn(b'\temail = probe@example.invalid\n', output)
+        self.assertEqual(result['accepted_settings'], 2)
+        self.assertEqual(result['status'], 'converted-subset')
+
+    def test_identity_never_appears_in_the_audit_record(self):
+        # the audit record is what gets logged and shown; the identity belongs in
+        # the generated file, never in the report.
+        audit_only = json.dumps(
+            self.convert('[user]\n name = Probe Person\n email = probe@example.invalid\n')[1])
+        self.assertNotIn('Probe Person', audit_only)
+        self.assertNotIn('probe@example.invalid', audit_only)
+        self.assertIn('user.name', audit_only)
+
+    def test_a_newline_in_identity_cannot_open_a_new_section(self):
+        # `name = x\n[credential]` would inject a section into the output
+        for config in ('[user]\n name = Probe\n email = probe@example.invalid\n',
+                       '[user]\n name = "line\\nbreak"\n email = probe@example.invalid\n'):
+            output, result = self.convert(config)
+            if output is not None:
+                self.assertNotIn(b'[credential]', output)
+                # exactly one [user] section, never a smuggled one
+                self.assertEqual(output.count(b'[user]'), 1)
+
+    def test_invalid_identity_values_are_blocked_not_written(self):
+        cases = {
+            'not-an-address': '[user]\n email = not-an-address\n',
+            'empty-identity': '[user]\n name =    \n',
+            'identity-too-long': '[user]\n email = ' + ('a' * 250) + '@example.invalid\n',
+        }
+        for reason, config in cases.items():
+            with self.subTest(reason=reason):
+                output, result = self.convert(config)
+                self.assertIsNone(output)
+                self.assertEqual(result['reason'], 'no-supported-settings')
+                self.assertEqual(result['accepted_settings'], 0)
+
+    def test_duplicate_identity_is_blocked_rather_than_guessed(self):
+        output, result = self.convert('[user]\n name = One\n name = Two\n email = probe@example.invalid\n')
+        # the email alone still converts; the duplicated name is refused
+        self.assertIn(b'email = probe@example.invalid', output)
+        self.assertNotIn(b'name = One', output)
+        self.assertNotIn(b'name = Two', output)
+        self.assertIn('duplicate-setting', json.dumps(result))
+
+    def test_a_local_identity_without_a_dot_in_the_domain_is_allowed(self):
+        output, result = self.convert('[user]\n email = root@localhost\n')
+        self.assertIn(b'email = root@localhost\n', output)
+        self.assertEqual(result['accepted_settings'], 1)
+
+    def test_identity_and_enums_can_coexist(self):
+        output, result = self.convert('[core]\n autocrlf = true\n[user]\n name = P\n email = p@e.invalid\n')
+        self.assertIn(b'\tautocrlf = input\n', output)
+        self.assertIn(b'\tname = P\n', output)
 
 
 class MpvAdapterTests(unittest.TestCase):
@@ -702,6 +792,60 @@ class UserEnvironmentAdapterTests(unittest.TestCase):
         self.assertEqual(result['blocked_settings'], 1)
         self.assertEqual(result['decisions'][0]['reason'],
                          'unmapped-or-sensitive-environment-variable')
+
+    def test_portable_cross_platform_flags_are_carried(self):
+        # the real export carries 41 Windows paths and almost nothing portable;
+        # these three are the cross-platform tool flags that survive the trip
+        output, result = self.convert(
+            '"OPENCODE_DISABLE_CHANNEL_DB"="1"',
+            '"NOTION_MANAGER_AGENTS_MD"="1"',
+            '"CODEX_SPARKLE_ENABLED"="false"',
+        )
+        self.assertEqual(output.decode(),
+                         'CODEX_SPARKLE_ENABLED=false\n'
+                         'NOTION_MANAGER_AGENTS_MD=1\n'
+                         'OPENCODE_DISABLE_CHANNEL_DB=1\n')
+        self.assertEqual(result['accepted_settings'], 3)
+        self.assertEqual(result['blocked_settings'], 0)
+
+    def test_a_windows_path_variable_is_never_carried(self):
+        # every SCOOP/JAVA_HOME/PG_* style value is a Windows path: no Linux
+        # destination exists and none may be guessed.
+        output, result = self.convert(
+            r'"JAVA_HOME"="C:\\Users\\Fixture\\scoop\\apps\\temurin21-jdk\\current"',
+            r'"PGDATA"="C:\\Users\\Fixture\\scoop\\apps\\postgresql\\current\\data"',
+            r'"PATH"="C:\\Users\\Fixture\\scoop\\shims"',
+        )
+        self.assertIsNone(output)
+        self.assertEqual(result['reason'], 'no-supported-settings')
+        self.assertEqual(result['blocked_settings'], 3)
+        self.assertNotIn('Fixture', json.dumps(result))
+
+    def test_an_unsupported_value_for_a_portable_flag_is_blocked(self):
+        output, result = self.convert('"OPENCODE_DISABLE_CHANNEL_DB"="yes-please"')
+        self.assertIsNone(output)
+        self.assertIn('unsupported-value', json.dumps(result))
+        self.assertNotIn('yes-please', json.dumps(result))
+
+    def test_agent_browser_args_stays_raw_because_it_is_free_form(self):
+        # it is cross-platform and useful, but its value is an arbitrary flag
+        # string written into environment.d - a free-form value does not pass.
+        marker = '--disable-blink-features=SYNTHETIC_MARKER'
+        output, result = self.convert(f'"AGENT_BROWSER_ARGS"="{marker}"')
+        self.assertIsNone(output)
+        self.assertNotIn('SYNTHETIC_MARKER', json.dumps(result))
+
+    def test_the_real_export_shape_produces_a_portable_subset(self):
+        # UTF-16LE + BOM is what regedit writes; the parser must accept it and
+        # still carry only the enum flags.
+        raw = ('Windows Registry Editor Version 5.00\r\n\r\n'
+               '[HKEY_CURRENT_USER\\Environment]\r\n'
+               '"OPENCODE_DISABLE_CHANNEL_DB"="1"\r\n'
+               r'"JAVA_HOME"="C:\\Users\\Fixture\\jdk"' + '\r\n')
+        output, result = lm.convert_user_environment(raw.encode('utf-16'))
+        self.assertIn(b'OPENCODE_DISABLE_CHANNEL_DB=1', output)
+        self.assertNotIn(b'Fixture', output)
+        self.assertEqual(result['accepted_settings'], 1)
 
         output, result = self.convert('"LESS"=hex(2):2d,00,46,00,00,00')
         self.assertIsNone(output)

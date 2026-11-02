@@ -73,6 +73,25 @@ RULES = {
     'merge.conflictstyle': {v: v for v in ('merge', 'diff3', 'zdiff3')},
     'color.ui': {v: v for v in ('auto', 'always', 'never', 'true', 'false')},
 }
+# Identity is free-form text, not an enum, so it needs its own adapter. It is
+# the one setting group whose absence is felt immediately: without it every
+# commit on a restored box is authored by a hostname-derived placeholder, and
+# the fix is a manual `git config --global` on a machine you just restored.
+#
+# It is carried under strict per-key validation rather than a blanket allow:
+# the source value may contain anything, and this writes to a config a shell
+# will later read. Newlines, control characters, NUL and overlong values are
+# refused outright. Credentials never live here (they are in
+# `[credential ...]` subsections, which stay blocked), so identity is the only
+# free-form group that is safe to carry.
+IDENTITY_RULES = {
+    'user.name': {'max_length': 128, 'label': 'name'},
+    'user.email': {'max_length': 254, 'label': 'email'},
+}
+# A `user.email` is written verbatim into commit metadata, so it is validated as
+# an address rather than merely "some string". Local addresses (no dot in the
+# domain) are legal git identities and stay allowed.
+EMAIL_RE = re.compile(r'[^@\s]+@[^@\s]+')
 MPV_BOOLEAN_OPTIONS = frozenset({
     'fullscreen', 'force-window', 'input-default-bindings', 'osc',
     'save-position-on-quit',
@@ -120,6 +139,46 @@ FLAMESHOT_ALLOWED_OPTIONS = (FLAMESHOT_COLOR_OPTIONS | FLAMESHOT_BOOLEAN_OPTIONS
 LESS_ALLOWED_OPTION_SETS = frozenset({
     '-F', '-R', '-X', '-FR', '-FX', '-RX', '-FRX',
 })
+# `user-env.reg` is almost entirely Windows paths (SCOOP, JAVA_HOME, PG_LIB_DIR
+# and friends), which have no meaning on Linux and must never be guessed at.
+# The exceptions are cross-platform tool flags whose VALUES are portable: they
+# are enums, so only the literal documented values can pass.
+#
+# `AGENT_BROWSER_ARGS` is deliberately NOT here even though it is cross-tool:
+# its value is a free-form flag string, and a free-form string written into
+# environment.d is an arbitrary-code surface (the file is read as shell-ish
+# KEY=VALUE by systemd, and a malformed value can change how a later line is
+# parsed). It stays in the raw source and is reported.
+PORTABLE_ENV_ENUMS = {
+    'OPENCODE_DISABLE_CHANNEL_DB': {'0', '1'},
+    'NOTION_MANAGER_AGENTS_MD': {'0', '1'},
+    'CODEX_SPARKLE_ENABLED': {'true', 'false'},
+}
+
+
+def _validated_identity(raw, label, max_length):
+    """A `user.name` / `user.email` value that is safe to write into a config.
+
+    The source is free-form, so this is the only place arbitrary text can reach
+    generated output. A git config is line- and section-structured, which makes
+    an embedded newline an INJECTION (it could open a new section such as
+    `[credential]`), and control characters can corrupt the file outright. Both
+    are refused, as are empty and overlong values. Anything with invalid UTF-8
+    is refused rather than replaced, because a silently mangled name is worse
+    than a missing one.
+    """
+    if raw is None:
+        raise ValueError('empty-identity')
+    value = raw.decode('utf-8', errors='strict')
+    if not value or value != value.strip():
+        raise ValueError('empty-identity')
+    if len(value) > max_length:
+        raise ValueError('identity-too-long')
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ValueError('identity-control-characters')
+    if label == 'email' and not EMAIL_RE.fullmatch(value):
+        raise ValueError('invalid-email')
+    return value
 
 
 def convert_git_config(payload, runner=subprocess.run):
@@ -162,7 +221,9 @@ def convert_git_config(payload, runner=subprocess.run):
         return None, dict(result, reason='invalid-config')
     counts = Counter(key for key, _ in records)
     accepted = {}
-    unknown = sum(1 for key, _ in records if key not in RULES)
+    identity = {}
+    unknown = sum(1 for key, _ in records
+                  if key not in RULES and key not in IDENTITY_RULES)
     if unknown:
         result['decisions'].append({'status': 'blocked', 'reason': 'unmapped-or-sensitive-setting', 'count': unknown})
     for key in sorted(counts.keys() & RULES.keys()):
@@ -179,9 +240,26 @@ def convert_git_config(payload, runner=subprocess.run):
                 decision.update(status='converted' if accepted[key] != value else 'retained',
                                 reason='native-line-endings' if accepted[key] != value else 'portable-enum')
         result['decisions'].append(decision)
-    result['accepted_settings'] = len(accepted)
+    for key in sorted(counts.keys() & IDENTITY_RULES.keys()):
+        rule = IDENTITY_RULES[key]
+        decision = {'key': key}
+        if counts[key] != 1:
+            # two identities in one config cannot pick a winner: a wrong
+            # author on every commit is worse than an obviously missing one
+            decision.update(status='blocked', reason='duplicate-setting', count=counts[key])
+        else:
+            raw = next(value for name, value in records if name == key)
+            try:
+                value = _validated_identity(raw, rule['label'], rule['max_length'])
+            except ValueError as exc:
+                decision.update(status='blocked', reason=str(exc))
+            else:
+                identity[key] = value
+                decision.update(status='converted', reason='portable-identity')
+        result['decisions'].append(decision)
+    result['accepted_settings'] = len(accepted) + len(identity)
     result['blocked_settings'] = sum(d.get('count', 1) for d in result['decisions'] if d['status'] == 'blocked')
-    if not accepted:
+    if not accepted and not identity:
         return None, dict(result, reason='no-supported-settings')
     lines = ['# Portable subset generated offline; original config is preserved separately.']
     section = None
@@ -191,8 +269,14 @@ def convert_git_config(payload, runner=subprocess.run):
             lines.append(f'[{group}]')
             section = group
         lines.append(f'\t{option} = {value}')
+    if identity:
+        # user.* last so the identity block is the readable tail of the file
+        if section != 'user':
+            lines.append('[user]')
+        for key in sorted(identity):
+            lines.append(f'\t{key.split(".", 1)[1]} = {identity[key]}')
     result['status'] = 'converted-subset'
-    return ('\n'.join(lines) + '\n').encode('ascii'), result
+    return ('\n'.join(lines) + '\n').encode('utf-8'), result
 
 
 def convert_yt_dlp_config(payload):
@@ -742,10 +826,39 @@ def convert_user_environment(payload):
                           blocked_settings=1)
 
     less_entries = []
+    enum_entries = {}
     unmapped_count = 0
     for name, value_type, value in entries:
-        if name is not None and name.casefold() == 'less':
+        if name is None:
+            unmapped_count += 1
+            continue
+        folded = name.casefold()
+        if folded == 'less':
             less_entries.append((value_type, value))
+        elif name in PORTABLE_ENV_ENUMS or folded in {k.casefold() for k in PORTABLE_ENV_ENUMS}:
+            canonical = next(k for k in PORTABLE_ENV_ENUMS if k.casefold() == folded)
+            if value_type != 'string':
+                result['decisions'].append({
+                    'key': canonical, 'status': 'blocked',
+                    'reason': 'unsupported-registry-type'})
+                unmapped_count += 1
+            elif value.lower() not in PORTABLE_ENV_ENUMS[canonical]:
+                result['decisions'].append({
+                    'key': canonical, 'status': 'blocked',
+                    'reason': 'unsupported-value'})
+                unmapped_count += 1
+            elif canonical in enum_entries:
+                # two records for one variable: no winner can be picked
+                result['decisions'].append({
+                    'key': canonical, 'status': 'blocked',
+                    'reason': 'duplicate-setting', 'count': 2})
+                enum_entries.pop(canonical, None)
+                unmapped_count += 1
+            else:
+                enum_entries[canonical] = value.lower()
+                result['decisions'].append({
+                    'key': canonical, 'status': 'retained',
+                    'reason': 'documented-cross-platform-flag'})
         else:
             unmapped_count += 1
     blocked_count = unmapped_count
@@ -777,12 +890,17 @@ def convert_user_environment(payload):
                                 reason='documented-less-pager-options')
         result['decisions'].append(decision)
 
-    result['accepted_settings'] = int(accepted is not None)
+    result['accepted_settings'] = int(accepted is not None) + len(enum_entries)
     result['blocked_settings'] = blocked_count
-    if accepted is None:
+    if accepted is None and not enum_entries:
         return None, dict(result, reason='no-supported-settings')
+    lines = []
+    if accepted is not None:
+        lines.append(f'LESS={accepted}')
+    for name in sorted(enum_entries):
+        lines.append(f'{name}={enum_entries[name]}')
     result['status'] = 'converted-subset'
-    return f'LESS={accepted}\n'.encode('ascii'), result
+    return ('\n'.join(lines) + '\n').encode('ascii'), result
 
 
 def convert_mpv_config(payload):
