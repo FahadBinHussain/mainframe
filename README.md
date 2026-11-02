@@ -108,6 +108,9 @@ hand at any time with `python3 linux_real.py --lock-vault` — the Linux twin of
 and a package planner, not a complete operational Windows-to-Linux restore.**
 See the [item-by-item coverage inventory](docs/linux-restore-coverage.md) for every
 persist app, Windows restore action, secret boundary, and remaining blocker.
+The [windows/linux parity table](docs/windows-linux-parity.md) compares every
+feature of this repo side by side, with a tick or a cross per row and the
+shortest way to close each gap.
 Windows DPAPI/browser logins, Windows-only apps, services, task XML, registry,
 private build patchers, and live account-helper activation are not ported. Global
 agent instructions are unchanged by default; `linux_real.py --restore-global-agents`
