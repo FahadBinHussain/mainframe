@@ -2280,6 +2280,15 @@ install and a failure to start is a loud error, never a silent skip.
 - **the linux config file lookup also checks the working directory**, so a test
   that runs a driver script must run it in a folder without a
   `mainframe.config.json`.
+- **caller identity resolution must inspect ancestry and context before environment variables**:
+  agent session environment variables (`ANTIGRAVITY_CONVERSATION_ID`, `OPENCODE_SESSION`, etc.)
+  leak down process trees to long-running services (like the automata monitor).
+  When a web dashboard spawns a helper to request vault approval, relying on inherited
+  environment variables misidentifies the browser request as coming from the agent that
+  spawned the server. `Get-CallerIdentity` in `vault-approval.psm1` checks prompt context
+  and process ancestry (e.g. `node.exe` running `monitor`/`server.ts`) first, guaranteeing
+  that browser/dashboard triggers are tagged as `browser` with `Model = $null` and an
+  appropriate browser icon (`🌐`) rather than an AI agent.
 
 ## the vault contract tests
 

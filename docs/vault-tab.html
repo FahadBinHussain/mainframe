@@ -719,6 +719,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (agent) {
       const el = document.getElementById('meta-agent');
+      const icon = el.querySelector('.tag-icon');
+      if (icon) {
+        icon.textContent = (agent.toLowerCase().includes('browser') || agent.toLowerCase().includes('monitor')) ? '🌐' : '🤖';
+      }
       el.querySelector('.tag-text').textContent = agent;
       el.style.display = 'inline-flex';
     }
