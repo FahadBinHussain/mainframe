@@ -983,7 +983,7 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 
 `agent-rules-sync.ps1` is the logon task `AgentsMdSync`. it watches `~/AGENTS.md` and copies it into each tool's global rules path. grok's copy is a plain file at `~/.grok/rules/AGENTS.md` (no yaml header — grok loads every `*.md` in that directory as instructions and does not strip frontmatter). the running task holds the script in memory, so after editing the script restart `AgentsMdSync` or the new target stays dark until the next logon.
 
-## skills dir nesting guard
+## skills dir: lock file + nesting guard
 
 `~/.agents/skills` was once copied into itself multiple levels deep
 (`skills\skills\skills\...`) by a botched skill install/sync, duplicating ~25 MB and
@@ -992,21 +992,24 @@ a self-healing guard in `agent-rules-sync.ps1` (runs at every logon): if
 `~/.agents\skills\skills\skills` (depth >= 2) exists, the whole nested chain is a copy
 artifact and gets deleted, keeping only the top-level tree.
 
-**2026-09-02 update: each skill is now a git repo with sparse-checkout.**
-All 53 sourced skills under `~/.agents/skills/` are shallow git clones of their upstream
-repos, with sparse-checkout set to track only the skill's path within the repo. This
-creates a legitimate nested `skills\<name>\` subdirectory inside many skill folders (from
-the sparse path like `skills/agent-browser`). `backup.ps1` was updated to exclude `.git`
-instead of `skills` when archiving `~/.agents\skills`:
-- `/XD .git` replaces the old `/XD skills` — the nested `skills\` dirs now hold real
-  git-tracked content and must be included.
-- `.git` is excluded (~1.1 GB of fetched history, reproducible from remotes).
-- `agent-rules-sync.ps1`'s guard is unaffected — it checks `~/.agents\skills\skills\skills`
-  (top-level depth >= 2), not the per-skill nested `skills\` dirs.
-- `restore.ps1` restores skills as plain folders (no `.git`). To recover git connectivity:
-  re-clone each skill's folder from its known remote URL (sparse-checkout the skill path).
-  the per-skill remote URLs are recorded in `git remote -v` inside each folder before
-  backup, and in the `skills-changelog.md` report.
+**2026-11-02 update: npx-skills era - folders are plain, the lock is the record.**
+The old "each skill is a git repo with sparse-checkout" shape is gone: the `npx skills`
+CLI copies plain folders, so there are **0 `.git` dirs** under `~/.agents/skills` and no
+per-skill remote to recover from. The ONLY record of each skill's source + pinned version
+is `~/.agents\.skill-lock.json` (`skillFolderHash` = git tree SHA for github sources).
+
+- `backup.ps1` copies `.agents\skills` with `/XD .git` (defensive) **and
+  `/XD node_modules`** (reinstallable deps - reanimate's playwright/ffmpeg tree was
+  ~99 MB of the 112.5 MB total; `reanimate\scripts\setup.sh` reinstalls it after a
+  restore), **plus `~/.agents\.skill-lock.json`** itself (added 2026-11-02 - without it
+  a restored box has folders nothing can update or restore-pin).
+- `restore.ps1` `Restore-AgentInstructionsAndSkills` restores the lock FIRST, then the
+  folders; a backup without the lock warns loud (pre-2026-11-02 archives).
+- recovery paths on a restored box: `automata-private\skills\restore-from-lock.ps1`
+  (byte-exact re-pin from the recorded source+tree) and `npx skills update -g`
+  (moves everything to source HEAD, rewriting the lock).
+- `agent-rules-sync.ps1`'s guard is unaffected - it checks `~/.agents\skills\skills\skills`
+  (top-level depth >= 2), not per-skill subdirs.
 
 ## uptimerobot: status page + monitor helper
 

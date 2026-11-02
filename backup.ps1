@@ -894,16 +894,26 @@ $agentSkills = Join-Path $env:USERPROFILE '.agents\skills'
 if (Test-Path -LiteralPath $agentSkills) {
     $dest = Join-Path $OutputDir '.agents\skills'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
-    # Skills are git repos (each folder has a .git + optional nested 'skills\'
-    # sparse-checkout subdir). Exclude .git (reproducible from remotes, ~1.1 GB
-    # of fetched history) but INCLUDE the nested 'skills\' dirs, which now hold
-    # real git-tracked skill content. The old recursion guard (/XD skills) is
-    # gone: the top-level skills\skills\skills chain it protected no longer
-    # exists, and it would now wrongly strip sparse-checkout content.
+    # Skills are plain folders since the npx-skills era (no .git anywhere,
+    # .skill-lock.json is the only version/source record - copied below).
+    # /XD .git stays defensive (a hand-re-cloned skill would carry one);
+    # /XD node_modules drops reinstallable deps (reanimate's playwright/ffmpeg
+    # tree is ~99 MB; its scripts\setup.sh reinstalls them after a restore).
     Invoke-RobocopyLockedAware -RobocopyArgs @(
-        $agentSkills, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', '.git'
+        $agentSkills, $dest, '/E', '/COPYALL', '/R:1', '/W:1', '/NP', '/NDL', '/NFL', '/XD', '.git', 'node_modules'
     ) -Context '.agents\skills'
     Write-Host 'Copied .agents\skills'
+}
+
+# .skill-lock.json is the ONLY record of each skill's source + pinned version
+# (the folders carry no metadata, .git is not shipped). without it,
+# restore-from-lock.ps1 and `npx skills update -g` cannot work on a fresh box.
+$skillLock = Join-Path $env:USERPROFILE '.agents\.skill-lock.json'
+if (Test-Path -LiteralPath $skillLock) {
+    $lockDest = Join-Path $OutputDir '.agents'
+    New-Item -ItemType Directory -Force -Path $lockDest | Out-Null
+    Copy-Item -LiteralPath $skillLock -Destination (Join-Path $lockDest '.skill-lock.json') -Force
+    Write-Host 'Copied .agents\.skill-lock.json'
 }
 
 $gitconfig = Join-Path $env:USERPROFILE '.gitconfig'
