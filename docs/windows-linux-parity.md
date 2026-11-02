@@ -73,6 +73,8 @@ and the two modules it uses - and both machines run it.
 | activate into live home | always (after the F/Q mode prompt) | `--yes` | ✅ (linux is safer) |
 | overwritten files | **per-item and mixed**: some persist files are kept (fresh-box-only rule, warn loud), Edge's User Data is removed and replaced with no copy | **one rule**: the existing file is copied to `<work_root>/restore-backup/` before it is replaced | ❌ **two different policies for the same event.** close: adopt linux's rule on windows - copy the existing file aside before replacing it - so both sides keep a rollback copy instead of one keeping and one deleting |
 | portable conversion maps | n/a (source) | git, mpv, yt-dlp, flameshot, qbittorrent, obs, user-env | ✅ (linux-only by nature) |
+| git identity on a restored box | `user.name`/`user.email` in `.gitconfig` | carried by the git adapter (strict validation: no control characters, duplicates refused) | ✅ |
+| user environment variables | the full `HKCU\Environment` set | only the enum-valued cross-platform flags (`OPENCODE_DISABLE_CHANNEL_DB`, `NOTION_MANAGER_AGENTS_MD`, `CODEX_SPARKLE_ENABLED`); every Windows path stays raw | ✅ (partial by design) |
 
 ## packages and tools
 
