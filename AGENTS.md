@@ -2198,9 +2198,77 @@ if a lock ever looks wedged (a bogus far-future `expiresAt` from a suspended
 process), deleting the file is safe - it only serialises prompts, it never holds
 a secret. normally nothing needs doing: the deadline handles it.
 
-**known gap**: `linux_real.py` still carries its own python approval path
-(`obtain_master_password` + `dispatch_ntfy_unlock`) and defines `vault_session`
-twice, so the python one is the effective definition until that path is deleted
-in favour of `vault-flow.ps1`. it does not read the lock. once linux runs the
-pwsh flow (the stated end state) it is covered automatically, because the lock
-lives in `Get-VaultMasterPassword`, which the cli calls.
+## one vault flow, one implementation
+
+the python copy of the vault flow is GONE. `linux_real.py` no longer has
+`obtain_master_password`, `unseal_email`, `generate_tab_key`,
+`wait_for_tab_password`, `read_cached_session`, `session_key_path`,
+`extract_vault_secrets`, `dispatch_ntfy_unlock` or `detect_caller_identity`.
+everything lives in `vault-secret.psm1` + `vault-approval.psm1`, and both
+machines drive it through `vault-flow.ps1`:
+
+    pwsh -NoProfile -File vault-flow.ps1 -Json [-Checkout DIR] [-BwPath PATH]
+         [-NtfyTopic T] [-Server URL] [-PagesBase URL] [-OutputPath FILE]
+         [-Lock | -LockIfStale]
+
+- `-Json` prints the result document on stdout and logs to stderr. the master
+  password is NEVER in the output.
+- `-OutputPath` writes the same document to a file. the linux runner uses it,
+  so it never has to parse a stream.
+- `-Lock` always locks and purges the cached session. `-LockIfStale` locks only
+  when the cached session is NOT fresh - so a run inside the TTL leaves the
+  vault unlocked and the next run needs no phone. THAT rule lives here, so
+  linux does not grow a second copy of it.
+- the topic, the relay and the page base are resolved by the module from the
+  same `mainframe.config.json` windows reads. the linux runner passes only
+  what the operator typed on the command line.
+
+linux needs a `pwsh` before the vault leg can run. `pwsh_linux.py` installs
+the official linux tarball: bounded download, pinned to two independently
+published digests (the release asset's `digest` AND the release notes), no
+links and no traversal in the archive, an isolated staging tree, and an atomic
+`renameat2(RENAME_NOREPLACE)` publication into a destination that must not
+exist yet. the same installer is used by the extras leg. it needs glibc 2.28
+or newer and libicu; the installed binary is started once at the end of the
+install and a failure to start is a loud error, never a silent skip.
+
+## platform gotchas found while doing this
+
+- **`Write-Warning` lands on STDOUT in pwsh 7 when the output is redirected.**
+  that corrupts a machine-readable stdout. the vault modules therefore warn
+  through `Write-MainframeWarning` (in `mainframe-paths.psm1`), which writes to
+  stderr. never use `Write-Warning` in a module that a cli reads stdout from.
+- **`Write-Host` is the information stream, not the success stream.** a cli
+  that prints its result document must use `Write-Output`, or a caller that
+  captures stdout gets nothing.
+- **a literal `'.config\mainframe'` never matches on linux.** the profile root
+  has to be resolved through `mainframe-paths.psm1` (`Get-MainframeProfileRoot`,
+  `Get-MainframeConfigValue`). the same goes for `Join-Path $HOME "Downloads\$file"`
+  - on linux that looks for a file NAMED `Downloads\file` inside `$HOME`. use
+  two joins.
+- **the config lookup checks the module's own folder first.** a test that
+  copies the modules into a temporary directory keeps the checkout's own
+  `mainframe.config.json` from shadowing the test's profile root.
+- **`ConvertFrom-Json` on a JSON array returns ONE object in Windows
+  PowerShell 5.1** and many in pwsh 7. `mainframe-json.psm1`
+  (`ConvertFrom-JsonArray`) is the one place that difference is handled.
+- **the linux config file lookup also checks the working directory**, so a test
+  that runs a driver script must run it in a folder without a
+  `mainframe.config.json`.
+
+## the vault contract tests
+
+`tests/vault-flow.Tests.ps1` pins the cli contract (cached session -> no
+phone, the json shape, the session key never in the output) and
+`tests/vault-approval-lock.Tests.ps1` pins the single-flight queue. both run
+under BOTH runtimes:
+
+    pwsh -NoProfile -File tests/vault-flow.Tests.ps1
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests/vault-flow.Tests.ps1
+
+`tests/test_linux_real_vault_relay.py` drives the SAME module through pwsh
+against a local ntfy-compatible relay: the topic/relay/page precedence, the
+`srv=` hint in the tap link, the noise rejection, the `?poll=1` poll, the 429
+backoff and the expired marker. `tests/test_linux_real_vault_session.py` pins
+the linux side of the contract: the argv, the result document and the failure
+modes - plus a guard that the python duplicate stays deleted.

@@ -90,23 +90,29 @@ function Get-VaultSessionTtlMinutes {
     if ($env:MAINFRAME_VAULT_TTL_MINUTES) {
         try { return [int]$env:MAINFRAME_VAULT_TTL_MINUTES } catch {}
     }
-    $cfgCandidates = @(
-        (Join-Path $PSScriptRoot 'mainframe.config.json'),
-        (Join-Path (Get-Location) 'mainframe.config.json'),
-        # the profile root, resolved the portable way - a literal
-        # '.config\mainframe' would never match on linux
-        (Join-Path (Get-MainframeProfileRoot) 'mainframe.config.json')
-    )
-    foreach ($cfgPath in $cfgCandidates) {
-        if (Test-Path -LiteralPath $cfgPath) {
-            try {
-                $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
-                if ($cfg.vaultTtlMinutes) { return [int]$cfg.vaultTtlMinutes }
-                if ($cfg.sessionTtlMinutes) { return [int]$cfg.sessionTtlMinutes }
-            } catch {}
-        }
+    # the config lookup lives in mainframe-paths.psm1, so linux reads the
+    # profile root the same way windows does.
+    foreach ($key in @('vaultTtlMinutes', 'sessionTtlMinutes')) {
+        $value = Get-MainframeConfigValue -Key $key
+        if ($value) { try { return [int]$value } catch {} }
     }
     return $script:DefaultSessionTtlMinutes
+}
+
+function Get-VaultBwServer {
+    <#
+    .SYNOPSIS
+        the bitwarden server the CLI has to talk to.
+
+    .DESCRIPTION
+        one place, so windows and linux point the CLI at the same vault:
+        $env:MAINFRAME_BW_SERVER wins, then bwServer in mainframe.config.json,
+        then the self-hosted vaultwarden instance.
+    #>
+    if ($env:MAINFRAME_BW_SERVER) { return $env:MAINFRAME_BW_SERVER.TrimEnd('/') }
+    $configured = Get-MainframeConfigValue -Key 'bwServer'
+    if ($configured) { return $configured.TrimEnd('/') }
+    return 'https://vaultwardenn.onrender.com'
 }
 
 function Lock-VaultSession {
@@ -230,7 +236,7 @@ function Ensure-VaultSession {
                     Write-Host "vault unlocked successfully with fresh 1-hour session" -ForegroundColor Green
                     return $true
                 } else {
-                    Write-Warning "bw unlock did not return a valid session key: $($unlockOut -join ' ')"
+                    Write-MainframeWarning "bw unlock did not return a valid session key: $($unlockOut -join ' ')"
                 }
             } finally {
                 Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
@@ -263,7 +269,7 @@ function Set-VaultSessionKey {
             $mode = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite
             [System.IO.File]::SetUnixFileMode($sessionFile, $mode)
         } catch {
-            Write-Warning "could not tighten the mode of $sessionFile - it may be readable by other users"
+            Write-MainframeWarning "could not tighten the mode of $sessionFile - it may be readable by other users"
         }
     }
     return $sessionFile
@@ -489,4 +495,4 @@ function Write-VaultSecretToExisting {
     return $item.id
 }
 
-Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-BwEmailKeyMaterial, Unseal-BwEmail, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot
+Export-ModuleMember -Function Get-VaultSession, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultBwServer, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-BwEmailKeyMaterial, Unseal-BwEmail, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot

@@ -82,9 +82,65 @@ function Get-MainframeCheckoutRoot {
     return $null
 }
 
+function Get-MainframeConfigValue {
+    <#
+    .SYNOPSIS
+        read one key out of mainframe.config.json.
+
+    .DESCRIPTION
+        one config file drives both machines, so the lookup lives HERE and
+        every consumer asks this function. the candidates are the checkout,
+        the working directory and the profile root - all resolved through
+        this module, so linux never gets a windows-only path (a literal
+        '.config\mainframe' never matches on linux).
+
+        returns $null when the key is absent or the file is unreadable.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+    $candidates = @(
+        (Join-Path $PSScriptRoot 'mainframe.config.json')
+        (Join-Path (Get-Location) 'mainframe.config.json')
+        (Join-Path (Get-MainframeProfileRoot) 'mainframe.config.json')
+    )
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) { continue }
+        if (Test-Path -LiteralPath $candidate) {
+            try {
+                $json = Get-Content -LiteralPath $candidate -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $value = $json.$Key
+                if ($value) { return ([string]$value).Trim() }
+            } catch {}
+        }
+    }
+    return $null
+}
+
+function Write-MainframeWarning {
+    <#
+    .SYNOPSIS
+        write a warning to stderr, never to stdout.
+
+    .DESCRIPTION
+        stdout belongs to the machine: vault-flow.ps1 prints its result
+        document there, and a caller reads stdout as json. a Write-Warning
+        lands on stdout in pwsh 7 when the output is redirected, so it would
+        corrupt that document - warnings go to stderr instead.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    [Console]::Error.WriteLine("vault: $Message")
+}
+
 Export-ModuleMember -Function `
     Get-MainframeProfileRoot, `
     Get-MainframeAccountsDir, `
     Get-MainframeAccountDir, `
     Get-MainframeSessionKeyPath, `
-    Get-MainframeCheckoutRoot
+    Get-MainframeCheckoutRoot, `
+    Get-MainframeConfigValue, `
+    Write-MainframeWarning

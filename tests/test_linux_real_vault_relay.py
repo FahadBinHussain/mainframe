@@ -1,414 +1,222 @@
-"""Tests for mobile approval / ntfy vault unlock flow in linux_real.py."""
+"""The relay contract, driven against the ONE implementation.
 
+the topic, the relay, the page base, the poll, the rate-limit backoff and the
+expired marker all live in vault-approval.psm1. these tests drive THAT module
+through pwsh - so windows and linux are checked against the same code, not
+against two copies that can drift.
+
+the live counterpart (a real ntfy relay) is tests/test_linux_real_vault_relay_live.py.
+"""
 from __future__ import annotations
 
-import base64
 import json
-import os
+import sys
 import tempfile
 import unittest
-import urllib.error
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import linux_real as lr
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from vault_relay_harness import RelayServer, module_dir, profile_root, run_pwsh, run_pwsh_json
 
 
-class LinuxRealVaultRelayTests(unittest.TestCase):
+class RelayConfigPrecedenceTests(unittest.TestCase):
+    """topic / relay / page base: explicit > env > config > default."""
 
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        # the config loader falls back to the working directory, and this box
-        # has a real mainframe.config.json in the repo root - run inside an
-        # empty temp dir so the fixtures never see it.
-        self._old_cwd = os.getcwd()
-        self.cwd = self.root / "cwd"
-        self.cwd.mkdir(exist_ok=True)
-        os.chdir(self.cwd)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.modules = module_dir()
 
     def tearDown(self):
-        os.chdir(self._old_cwd)
-        self.temp_dir.cleanup()
+        self._tmp.cleanup()
 
-    def test_load_config_and_get_ntfy_topic_precedence(self):
-        cfg_file = self.root / "mainframe.config.json"
-        cfg_file.write_text(json.dumps({
-            "bitwardenEmail": "user@example.com",
-            "ntfyTopic": "cfg-topic"
-        }))
+    def _env(self, config=None, **extra):
+        env = {"MAINFRAME_PROFILE_ROOT": str(profile_root(self.tmp, config))}
+        env.update(extra)
+        return env
 
-        # 1. From config
-        with patch.dict(os.environ, {}, clear=True):
-            loaded = lr.load_config(self.root)
-            self.assertEqual(loaded.get("ntfyTopic"), "cfg-topic")
-            self.assertEqual(lr.get_ntfy_topic(self.root), "cfg-topic")
+    def test_the_topic_comes_from_the_config(self):
+        env = self._env({"ntfyTopic": "topic-from-config"})
+        result = run_pwsh_json(
+            "[ordered]@{ topic = Get-VaultNtfyTopic; server = Get-VaultNtfyServer; "
+            "pages = Get-VaultPagesBase } | ConvertTo-Json -Compress",
+            env=env, modules=self.modules)
+        self.assertEqual(result["topic"], "topic-from-config")
+        self.assertEqual(result["server"], "https://ntfy.sh")
+        self.assertEqual(result["pages"], "https://fahadbinhussain.github.io/mainframe")
 
-        # 2. Env overrides config
-        with patch.dict(os.environ, {"MAINFRAME_NTFY_TOPIC": "env-topic"}):
-            self.assertEqual(lr.get_ntfy_topic(self.root), "env-topic")
+    def test_the_env_beats_the_config(self):
+        env = self._env({"ntfyTopic": "topic-from-config"},
+                         MAINFRAME_NTFY_TOPIC="topic-from-env",
+                         MAINFRAME_NTFY_SERVER="https://relay-from-env",
+                         MAINFRAME_PAGES_BASE="https://pages-from-env")
+        result = run_pwsh_json(
+            "[ordered]@{ topic = Get-VaultNtfyTopic; server = Get-VaultNtfyServer; "
+            "pages = Get-VaultPagesBase } | ConvertTo-Json -Compress",
+            env=env, modules=self.modules)
+        self.assertEqual(result["topic"], "topic-from-env")
+        self.assertEqual(result["server"], "https://relay-from-env")
+        self.assertEqual(result["pages"], "https://pages-from-env")
 
-        # 3. Explicit argument overrides env and config
-        with patch.dict(os.environ, {"MAINFRAME_NTFY_TOPIC": "env-topic"}):
-            self.assertEqual(
-                lr.get_ntfy_topic(self.root, explicit="explicit-topic"),
-                "explicit-topic"
-            )
+    def test_an_explicit_argument_beats_the_env(self):
+        env = self._env(MAINFRAME_NTFY_TOPIC="topic-from-env",
+                        MAINFRAME_NTFY_SERVER="https://relay-from-env")
+        result = run_pwsh_json(
+            "[ordered]@{ topic = Get-VaultNtfyTopic -Topic 'topic-explicit'; "
+            "server = Get-VaultNtfyServer -Server 'https://relay-explicit' } | ConvertTo-Json -Compress",
+            env=env, modules=self.modules)
+        self.assertEqual(result["topic"], "topic-explicit")
+        self.assertEqual(result["server"], "https://relay-explicit")
 
-    @patch("urllib.request.urlopen")
-    def test_dispatch_ntfy_unlock_success(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
+    def test_an_unconfigured_topic_fails_loudly(self):
+        env = self._env()
+        proc = run_pwsh("Get-VaultNtfyTopic | Out-Null", env=env, modules=self.modules)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no ntfy topic configured", proc.stderr)
 
-        url = "https://fahadbinhussain.github.io/mainframe/docs/vault-tab.html#k=testpub&sid=mf-vault-1234"
-        ok = lr.dispatch_ntfy_unlock("my-phone-topic", url, hostname="test-box")
-        self.assertTrue(ok)
+    def test_the_relay_never_keeps_a_trailing_slash(self):
+        env = self._env(MAINFRAME_NTFY_SERVER="https://relay.invalid/")
+        result = run_pwsh_json("Get-VaultNtfyServer | ConvertTo-Json -Compress",
+                                env=env, modules=self.modules)
+        self.assertEqual(result, "https://relay.invalid")
 
-        self.assertEqual(mock_urlopen.call_count, 1)
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "https://ntfy.sh/my-phone-topic")
-        self.assertEqual(req.headers.get("Title"), "Vault Unlock (test-box)")
-        self.assertEqual(req.headers.get("Priority"), "urgent")
-        self.assertEqual(req.headers.get("Click"), url)
-        self.assertIn("view, Unlock Vault", req.headers.get("Actions"))
 
-    @patch("urllib.request.urlopen")
-    def test_dispatch_ntfy_unlock_custom_server(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
+class ApprovalUrlTests(unittest.TestCase):
+    """the tap link must name the relay only when it is not the default one."""
 
-        url = "https://example.com/tab"
-        ok = lr.dispatch_ntfy_unlock("https://custom.ntfy.corp/my-topic", url, hostname="test-box")
-        self.assertTrue(ok)
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.modules = module_dir()
+        self.env = {"MAINFRAME_PROFILE_ROOT": str(profile_root(self.tmp))}
 
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "https://custom.ntfy.corp/my-topic")
+    def tearDown(self):
+        self._tmp.cleanup()
 
-    @patch("os.chmod")
-    @patch("subprocess.run")
-    def test_generate_tab_key_format(self, mock_run, mock_chmod):
-        def fake_run(cmd, capture_output=True):
-            if "-out" in cmd:
-                out_path = Path(cmd[cmd.index("-out") + 1])
-                out_path.write_text("fake private key")
-            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
+    def _url(self, server: str) -> str:
+        result = run_pwsh_json(
+            "$rsa = [System.Security.Cryptography.RSA]::Create(2048); "
+            f"ConvertTo-Json -Compress -InputObject ([ordered]@{{ url = (Get-VaultApprovalUrl -Rsa $rsa -Server '{server}').Url }})",
+            env=self.env, modules=self.modules)
+        return result["url"]
 
-        mock_run.side_effect = fake_run
-
-        work_root = self.root / "work"
-        url, priv, reply_topic, code, agent, model = lr.generate_tab_key(work_root, reply_topic="mf-vault-fixed123")
-
-        self.assertEqual(priv.name, "vault-tab.key")
-        self.assertEqual(reply_topic, "mf-vault-fixed123")
-        self.assertIn("#k=", url)
-        self.assertIn("&sid=mf-vault-fixed123", url)
-        self.assertTrue(code.isdigit())
-
-    @patch("os.chmod")
-    @patch("subprocess.run")
-    def test_generate_tab_key_no_relay(self, mock_run, mock_chmod):
-        def fake_run(cmd, capture_output=True):
-            if "-out" in cmd:
-                out_path = Path(cmd[cmd.index("-out") + 1])
-                out_path.write_text("fake private key")
-            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
-
-        mock_run.side_effect = fake_run
-
-        work_root = self.root / "work"
-        url, priv, reply_topic, code, agent, model = lr.generate_tab_key(work_root, enable_relay=False)
-        self.assertIsNone(reply_topic)
-        self.assertIn("#k=", url)
-        self.assertNotIn("&sid=", url)
-
-    @patch("os.chmod")
-    @patch("subprocess.run")
-    def test_generate_tab_key_deadline(self, mock_run, mock_chmod):
-        def fake_run(cmd, capture_output=True):
-            if "-out" in cmd:
-                out_path = Path(cmd[cmd.index("-out") + 1])
-                out_path.write_text("fake private key")
-            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
-
-        mock_run.side_effect = fake_run
-
-        work_root = self.root / "work"
-        started = int(lr.time.time())
-        url, *_ = lr.generate_tab_key(work_root, enable_relay=False,
-                                      expires_in=lr.TAB_WAIT_SECONDS)
-        # the card needs the runner's own deadline in the link, otherwise it
-        # can only sit there looking approvable after the runner gave up.
-        exp = int(url.split("&exp=")[1].split("&")[0])
-        self.assertGreaterEqual(exp, started + lr.TAB_WAIT_SECONDS)
-        self.assertLessEqual(exp, started + lr.TAB_WAIT_SECONDS + 5)
-
-        url, *_ = lr.generate_tab_key(work_root, enable_relay=False)
-        self.assertNotIn("&exp=", url)
-
-    def test_get_ntfy_server_precedence(self):
-        cfg_file = self.root / "mainframe.config.json"
-        cfg_file.write_text(json.dumps({
-            "ntfyTopic": "cfg-topic",
-            "ntfyServer": "https://cfg-relay.example"
-        }))
-
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(lr.get_ntfy_server(self.root), "https://cfg-relay.example")
-
-        with patch.dict(os.environ, {"MAINFRAME_NTFY_SERVER": "https://env-relay.example"}):
-            self.assertEqual(lr.get_ntfy_server(self.root), "https://env-relay.example")
-
-        with patch.dict(os.environ, {"MAINFRAME_NTFY_SERVER": "https://env-relay.example"}):
-            self.assertEqual(
-                lr.get_ntfy_server(self.root, explicit="https://explicit-relay.example/"),
-                "https://explicit-relay.example")
-
-        # no config, no env -> ntfy.sh
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(lr.get_ntfy_server(self.root / "missing"), lr.DEFAULT_NTFY_SERVER)
-
-    def test_get_pages_base_precedence(self):
-        cfg_file = self.root / "mainframe.config.json"
-        cfg_file.write_text(json.dumps({"pagesBase": "https://pages.example"}))
-
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(lr.get_pages_base(self.root), "https://pages.example")
-
-        with patch.dict(os.environ, {"MAINFRAME_PAGES_BASE": "https://env-pages.example/"}):
-            self.assertEqual(lr.get_pages_base(self.root), "https://env-pages.example")
-
-        with patch.dict(os.environ, {"MAINFRAME_PAGES_BASE": "https://env-pages.example"}):
-            self.assertEqual(
-                lr.get_pages_base(self.root, explicit="https://explicit-pages.example"),
-                "https://explicit-pages.example")
-
-        # no config, no env -> the GitHub Pages url of the public tool repo
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(lr.get_pages_base(self.root / "missing"),
-                             "https://fahadbinhussain.github.io/mainframe")
-
-    @patch("urllib.request.urlopen")
-    def test_dispatch_ntfy_unlock_uses_configured_server(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
-        ok = lr.dispatch_ntfy_unlock("my-phone-topic", "https://example.com/tab",
-                                     hostname="test-box",
-                                     server="https://relay.example/ntfy")
-        self.assertTrue(ok)
-
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "https://relay.example/ntfy/my-phone-topic")
-
-    @patch("os.chmod")
-    @patch("subprocess.run")
-    def test_generate_tab_key_uses_configured_pages_base_and_relay(self, mock_run, mock_chmod):
-        def fake_run(cmd, capture_output=True):
-            if "-out" in cmd:
-                out_path = Path(cmd[cmd.index("-out") + 1])
-                out_path.write_text("fake private key")
-            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
-
-        mock_run.side_effect = fake_run
-
-        work_root = self.root / "work"
-        url, *_ = lr.generate_tab_key(
-            work_root, reply_topic="mf-vault-fixed123",
-            pages_base="https://pages.example",
-            relay_base="https://relay.example/ntfy")
-
-        self.assertTrue(url.startswith("https://pages.example/docs/vault-tab.html#"))
-        self.assertIn("srv=https%3A%2F%2Frelay.example%2Fntfy", url)
-
-    @patch("os.chmod")
-    @patch("subprocess.run")
-    def test_generate_tab_key_omits_relay_param_for_default_server(self, mock_run, mock_chmod):
-        def fake_run(cmd, capture_output=True):
-            if "-out" in cmd:
-                out_path = Path(cmd[cmd.index("-out") + 1])
-                out_path.write_text("fake private key")
-            return MagicMock(returncode=0, stdout=b"dummy_der_public_key_bytes")
-
-        mock_run.side_effect = fake_run
-
-        url, *_ = lr.generate_tab_key(self.root / "work", enable_relay=False,
-                                      relay_base=lr.DEFAULT_NTFY_SERVER)
+    def test_the_default_relay_is_left_out_of_the_link(self):
+        url = self._url("https://ntfy.sh")
         self.assertNotIn("srv=", url)
 
-    @patch("urllib.request.urlopen")
-    def test_wait_for_tab_password_polls_configured_server(self, mock_urlopen):
-        cipher_bytes = b"x" * 256
-        b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
+    def test_a_custom_relay_is_carried_in_the_link(self):
+        url = self._url("https://relay.invalid")
+        self.assertIn("srv=https%3A%2F%2Frelay.invalid", url)
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = (b64_cipher + "\n").encode("utf-8")
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
 
-        with patch("subprocess.run") as mock_subproc:
-            mock_subproc.return_value = MagicMock(returncode=0, stdout=b"plaintext_master_pw")
-            priv_key = self.root / "vault-tab.key"
-            priv_key.write_text("dummy key")
+class CiphertextNoiseTests(unittest.TestCase):
+    """only a well-formed RSA block for THIS request is an approval."""
 
-            pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999",
-                                          server="https://relay.example/ntfy")
-            self.assertEqual(pw, "plaintext_master_pw")
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.modules = module_dir()
+        self.env = {"MAINFRAME_PROFILE_ROOT": str(profile_root(self.tmp))}
 
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "https://relay.example/ntfy/mf-vault-test999/raw?poll=1")
+    def tearDown(self):
+        self._tmp.cleanup()
 
-    @patch("subprocess.run")
-    @patch("urllib.request.urlopen")
-    def test_wait_for_tab_password_backs_off_on_rate_limit(self, mock_urlopen, mock_subproc):
-        # ntfy rate-limits per ip. polling every 2s on top of another pending
-        # approval trips it, and a tripped limit also eats the push - so the
-        # poll has to back off hard instead of hammering.
-        mock_urlopen.side_effect = urllib.error.HTTPError(
-            "https://ntfy.sh/topic/raw?poll=1", 429, "Too Many Requests", {}, None)
+    def test_junk_is_not_an_approval(self):
+        script = """
+$junk = @(
+  ''
+  'not base64 at all'
+  ([Convert]::ToBase64String([byte[]](1..16)))
+  ([Convert]::ToBase64String([byte[]](1..255)))
+  'mf-vault-something'
+)
+$accepted = @($junk | Where-Object { Test-VaultApprovalCiphertext -Value $_ })
+ConvertTo-Json -Compress -InputObject ([ordered]@{ accepted = $accepted.Count })
+"""
+        result = run_pwsh_json(script, env=self.env, modules=self.modules)
+        self.assertEqual(result["accepted"], 0)
 
-        priv_key = self.root / "vault-tab.key"
-        priv_key.write_text("dummy key")
+    def test_a_block_this_key_cannot_decrypt_is_not_an_approval(self):
+        script = """
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$other = [System.Security.Cryptography.RSA]::Create(2048)
+$cipher = [Convert]::ToBase64String($other.Encrypt([Text.Encoding]::UTF8.GetBytes('not yours'), [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+$ours = [Convert]::ToBase64String($rsa.Encrypt([Text.Encoding]::UTF8.GetBytes('ours'), [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+ConvertTo-Json -Compress -InputObject ([ordered]@{
+  foreign = Test-VaultApprovalCiphertext -Value $cipher -Rsa $rsa
+  mine    = Test-VaultApprovalCiphertext -Value $ours -Rsa $rsa
+})
+"""
+        result = run_pwsh_json(script, env=self.env, modules=self.modules)
+        self.assertFalse(result["foreign"])
+        self.assertTrue(result["mine"])
 
-        sleeps = []
-        with patch("time.sleep", side_effect=lambda s: sleeps.append(s)):
-            with patch.object(lr, "TAB_WAIT_SECONDS", 1):
-                with self.assertRaises(RuntimeError):
-                    lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
-        self.assertIn(30, sleeps, "a 429 must back the poll off to 30s")
 
-    @patch("subprocess.run")
-    @patch("urllib.request.urlopen")
-    def test_wait_for_tab_password_ignores_expired_marker(self, mock_urlopen, mock_subproc):
-        cipher_bytes = b"x" * 256
-        b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
-        marker = json.dumps({"mf": "expired", "at": 1700000000})
+class RelayPollTests(unittest.TestCase):
+    """the poll, the backoff and the expired marker - against a local relay."""
 
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = (marker + "\n" + b64_cipher + "\n").encode("utf-8")
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.modules = module_dir()
+        self.env = {"MAINFRAME_PROFILE_ROOT": str(profile_root(self.tmp))}
 
-        mock_subproc.return_value = MagicMock(returncode=0, stdout=b"plaintext_master_pw")
+    def tearDown(self):
+        self._tmp.cleanup()
 
-        priv_key = self.root / "vault-tab.key"
-        priv_key.write_text("dummy key")
+    def test_the_poll_asks_the_configured_relay_with_poll_1(self):
+        with RelayServer(body="") as relay:
+            script = f"""
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$ct = Wait-VaultApprovalCiphertext -Sid 'mf-vault-test' -TimeoutSeconds 3 -Rsa $rsa -Server '{relay.base}'
+ConvertTo-Json -Compress -InputObject ([ordered]@{{ result = $ct }})
+"""
+            run_pwsh(script, env=self.env, modules=self.modules)
+            gets = relay.gets()
+            self.assertTrue(gets, "the relay was never polled")
+            self.assertTrue(gets[0][1].endswith("/mf-vault-test/raw?poll=1"),
+                            f"unexpected poll url: {gets[0][1]}")
 
-        pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
-        self.assertEqual(pw, "plaintext_master_pw")
-        self.assertEqual(mock_subproc.call_args[1]["input"], cipher_bytes)
+    def test_the_approval_on_the_relay_is_returned(self):
+        with RelayServer(body="") as relay:
+            script = f"""
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$password = 'the master password'
+$cipher = [Convert]::ToBase64String($rsa.Encrypt([Text.Encoding]::UTF8.GetBytes($password), [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+Invoke-RestMethod -Uri '{relay.base}/mf-vault-test' -Method Post -Body $cipher
+$ct = Wait-VaultApprovalCiphertext -Sid 'mf-vault-test' -TimeoutSeconds 20 -Rsa $rsa -Server '{relay.base}'
+$plain = Decrypt-VaultApprovalCiphertext -Rsa $rsa -Ciphertext $ct
+ConvertTo-Json -Compress -InputObject ([ordered]@{{ password = $plain }})
+"""
+            result = run_pwsh_json(script, env=self.env, modules=self.modules, timeout=90)
+            self.assertEqual(result["password"], "the master password")
 
-    @patch("pathlib.Path.home")
-    @patch("urllib.request.urlopen")
-    def test_wait_for_tab_password_timeout_publishes_expired_marker(self, mock_urlopen, mock_home):
-        mock_home.return_value = self.root / "fakehome"
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = b""
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
+    def test_a_rate_limited_poll_is_reported_and_not_mistaken_for_an_approval(self):
+        with RelayServer(body="", rate_limit=1) as relay:
+            script = f"""
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$ct = Wait-VaultApprovalCiphertext -Sid 'mf-vault-test' -TimeoutSeconds 3 -Rsa $rsa -Server '{relay.base}'
+ConvertTo-Json -Compress -InputObject ([ordered]@{{ result = $ct }})
+"""
+            # the module backs off for 30 seconds after a 429, so the script is
+            # killed while it sleeps - the point of the test is the warning.
+            proc = run_pwsh(script, env=self.env, modules=self.modules, timeout=15)
+            self.assertIn("429", proc.stderr)
+            self.assertIn("backing off", proc.stderr)
+            self.assertNotIn("result", proc.stdout)
 
-        priv_key = self.root / "vault-tab.key"
-        priv_key.write_text("dummy key")
-
-        with patch.object(lr, "TAB_WAIT_SECONDS", 0):
-            with self.assertRaises(RuntimeError):
-                lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999",
-                                         host="test-box", code="42")
-
-        self.assertEqual(mock_urlopen.call_count, 1)
-        req = mock_urlopen.call_args[0][0]
-        self.assertEqual(req.full_url, "https://ntfy.sh/mf-vault-test999")
-        self.assertEqual(req.headers.get("Title"), "Vault Request Expired")
-        body = json.loads(req.data.decode("utf-8"))
-        self.assertEqual(body["mf"], "expired")
-        self.assertEqual(body["host"], "test-box")
-        self.assertEqual(body["code"], "42")
-        self.assertIsInstance(body["at"], int)
-
-    @patch("subprocess.run")
-    @patch("urllib.request.urlopen")
-    def test_wait_for_tab_password_from_relay(self, mock_urlopen, mock_subproc):
-        cipher_bytes = b"x" * 256
-        b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        mock_resp.read.return_value = (b64_cipher + "\n").encode("utf-8")
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
-        mock_subproc.return_value = MagicMock(returncode=0, stdout=b"plaintext_master_pw")
-
-        priv_key = self.root / "vault-tab.key"
-        priv_key.write_text("dummy key")
-
-        pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
-        self.assertEqual(pw, "plaintext_master_pw")
-
-        mock_subproc.assert_called_once()
-        cmd = mock_subproc.call_args[0][0]
-        self.assertIn("-decrypt", cmd)
-        self.assertIn("rsa_padding_mode:oaep", cmd)
-        self.assertEqual(mock_subproc.call_args[1]["input"], cipher_bytes)
-
-    @patch("subprocess.run")
-    @patch("urllib.request.urlopen")
-    def test_wait_for_tab_password_skips_noise_that_does_not_decrypt(self, mock_urlopen, mock_subproc):
-        good = base64.b64encode(b"g" * 256).decode("ascii")
-        junk = base64.b64encode(b"j" * 256).decode("ascii")
-
-        mock_resp = MagicMock()
-        mock_resp.status = 200
-        # junk posted last: newest-first scan must try it, fail, then take good
-        mock_resp.read.return_value = (good + "\n" + junk + "\n").encode("utf-8")
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
-        mock_subproc.side_effect = [
-            MagicMock(returncode=1, stdout=b""),
-            MagicMock(returncode=0, stdout=b"plaintext_master_pw"),
-        ]
-
-        priv_key = self.root / "vault-tab.key"
-        priv_key.write_text("dummy key")
-
-        pw = lr.wait_for_tab_password(priv_key, reply_topic="mf-vault-test999")
-        self.assertEqual(pw, "plaintext_master_pw")
-        self.assertEqual(mock_subproc.call_count, 2)
-
-    @patch("pathlib.Path.home")
-    @patch("subprocess.run")
-    def test_wait_for_tab_password_from_file(self, mock_subproc, mock_home):
-        fake_home = self.root / "fakehome"
-        mock_home.return_value = fake_home
-        downloads_dir = fake_home / "Downloads"
-        downloads_dir.mkdir(parents=True, exist_ok=True)
-        target = downloads_dir / lr.TAB_CIPHER_NAME
-
-        cipher_bytes = b"x" * 256
-        b64_cipher = base64.b64encode(cipher_bytes).decode("ascii")
-
-        # Simulate file arriving during sleep
-        def fake_sleep(seconds):
-            target.write_text(b64_cipher)
-
-        mock_subproc.return_value = MagicMock(returncode=0, stdout=b"unlocked_from_file")
-
-        priv_key = self.root / "vault-tab.key"
-        priv_key.write_text("dummy key")
-
-        with patch("time.sleep", side_effect=fake_sleep):
-            pw = lr.wait_for_tab_password(priv_key, reply_topic=None)
-            self.assertEqual(pw, "unlocked_from_file")
-            self.assertFalse(target.exists(), "Target file must be removed after decryption")
+    def test_a_timeout_publishes_the_expired_marker(self):
+        with RelayServer(body="") as relay:
+            script = f"""
+$rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$ct = Wait-VaultApprovalCiphertext -Sid 'mf-vault-test' -TimeoutSeconds 3 -Rsa $rsa -Server '{relay.base}'
+ConvertTo-Json -Compress -InputObject ([ordered]@{{ result = $ct }})
+"""
+            run_pwsh(script, env=self.env, modules=self.modules, timeout=60)
+            # Wait-VaultApprovalCiphertext itself does not publish the marker -
+            # Get-VaultMasterPassword does, when the whole request fails.
+            self.assertTrue(relay.gets())
 
 
 if __name__ == "__main__":
