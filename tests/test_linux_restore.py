@@ -111,12 +111,28 @@ class LinuxRestoreTests(unittest.TestCase):
         self.assertEqual((self.dest / 'recovered/mainframe-quick.zip/mainframe-secrets.zip').read_bytes(), cipher)
         self.assertFalse(any((self.dest / 'home-staging').iterdir()))
 
-    def test_windows_and_instruction_items_never_staged(self):
-        files = ['AGENTS.md', '.agents/skills/example/SKILL.md', 'UserProfile/AGENTS.md', 'UserProfile/.agents/skills/a', 'native/winget-persist/AnyDesk/service.conf', 'edge-profile/Default/Bookmarks', 'scheduled-tasks/job.xml', 'persist/ditto/Ditto.db', 'UserProfile/.opencode/tool.exe']
-        self.archive([(p, b'fixture') for p in files])
+    def test_windows_items_never_staged_but_skills_are(self):
+        # the skill tree and its lock are the same relative path on both
+        # platforms, so they stage; everything below is genuinely windows-only.
+        windows_only = ['UserProfile/AGENTS.md', 'UserProfile/.agents/skills/a',
+                        'native/winget-persist/AnyDesk/service.conf',
+                        'edge-profile/Default/Bookmarks', 'scheduled-tasks/job.xml',
+                        'persist/ditto/Ditto.db', 'UserProfile/.opencode/tool.exe']
+        skills = ['.agents/skills/example/SKILL.md', '.agents/.skill-lock.json']
+        self.archive([(p, b'fixture') for p in windows_only + skills])
         report = self.recover(True)
-        self.assertTrue(all(e['category'] == 'blocked' for e in report['entries']))
-        self.assertFalse(any((self.dest / 'home-staging').iterdir()))
+        by_path = {e['normalized_path']: e for e in report['entries']}
+        for path in windows_only:
+            with self.subTest(path=path):
+                self.assertEqual(by_path[path]['category'], 'blocked')
+        for path in skills:
+            with self.subTest(path=path):
+                self.assertEqual(by_path[path]['category'], 'native-staging')
+                self.assertEqual(by_path[path]['native_target'], path)
+        staged = (self.dest / 'home-staging')
+        self.assertTrue((staged / '.agents/skills/example/SKILL.md').is_file())
+        self.assertTrue((staged / '.agents/.skill-lock.json').is_file())
+        self.assertFalse((staged / 'UserProfile/AGENTS.md').exists())
 
     def test_opt_in_restores_only_exact_top_level_global_agents_file(self):
         exact = b'# user instructions\r\nkeep these bytes exactly\r\n'
@@ -139,6 +155,8 @@ class LinuxRestoreTests(unittest.TestCase):
             b'pre-existing instructions')
         self.assertFalse((home / 'UserProfile/AGENTS.md').exists())
         self.assertFalse((home / '.ssh/id_fixture').exists())
+        # the opt-in authorizes the top-level file ONLY: the skills tree stays
+        # staged until --yes, exactly like every other portable candidate
         self.assertFalse((home / '.agents/skills/example/SKILL.md').exists())
         self.assertIn('AGENTS.md', result['activation']['activated'])
         self.assertIn('other candidate(s) remain staged', result['note'])

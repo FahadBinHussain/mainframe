@@ -714,39 +714,57 @@ def confirm_activation(file_count: int) -> bool:
 
 def activate(staging: Path, home: Path, work_root: Path,
              only_paths: set[str] | None = None) -> dict:
-    """Copy home-staging into live HOME. Overwritten files are backed up
-    first; symlinks in staging are refused; symlink targets in HOME are
-    recorded, not followed."""
-    src_root = staging / "home-staging"
-    files = sorted(p for p in src_root.rglob("*") if p.is_file() or p.is_symlink())
+    """Copy home-staging AND secrets-staging into live HOME. Overwritten files
+    are backed up first; symlinks in staging are refused; symlink targets in
+    HOME are recorded, not followed.
+
+    Both staging trees land in the same place on purpose: a secret restored
+    from the encrypted archive and the same file restored from the quick tree
+    must end up at exactly one path, with the same overwrite policy.
+    """
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     backup_root = work_root / "restore-backup" / stamp
     activated: list[str] = []
     backed_up: list[str] = []
     refused: list[str] = []
-    for src in files:
-        rel = src.relative_to(src_root)
-        if only_paths is not None and rel.as_posix() not in only_paths:
+    for source_root in (staging / "home-staging", staging / "secrets-staging"):
+        if not source_root.is_dir():
             continue
-        target = home / rel
-        if src.is_symlink():
-            refused.append(str(rel))
-            continue
-        if target.is_symlink():
-            (backup_root / "symlink-targets.txt").parent.mkdir(parents=True, exist_ok=True)
-            with open(backup_root / "symlink-targets.txt", "a") as fh:
-                fh.write(f"{rel} -> {os.readlink(target)}\n")
-            target.unlink()
-        elif target.exists():
-            dest = backup_root / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(target, dest)
-            backed_up.append(str(rel))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
-        if rel.as_posix() == "AGENTS.md" and sha256_file(src) != sha256_file(target):
-            raise RuntimeError("AGENTS.md activation failed byte-for-byte verification")
-        activated.append(str(rel))
+        files = sorted(p for p in source_root.rglob("*")
+                       if p.is_file() or p.is_symlink())
+        for src in files:
+            rel = src.relative_to(source_root)
+            if only_paths is not None and rel.as_posix() not in only_paths:
+                continue
+            target = home / rel
+            if src.is_symlink():
+                refused.append(str(rel))
+                continue
+            if target.is_symlink():
+                (backup_root / "symlink-targets.txt").parent.mkdir(parents=True, exist_ok=True)
+                with open(backup_root / "symlink-targets.txt", "a") as fh:
+                    fh.write(f"{rel} -> {os.readlink(target)}\n")
+                target.unlink()
+            elif target.exists():
+                dest = backup_root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, dest)
+                backed_up.append(str(rel))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+            # a secret's recorded mode has to survive activation: an ssh private
+            # key that lands world-readable is one openssh then refuses to use.
+            mode = src.stat().st_mode & 0o777
+            try:
+                target.chmod(mode)
+            except OSError:
+                pass
+            if rel.as_posix() == "AGENTS.md" and sha256_file(src) != sha256_file(target):
+                raise RuntimeError("AGENTS.md activation failed byte-for-byte verification")
+            activated.append(str(rel))
+    if refused:
+        log(f"refused {len(refused)} symlink(s) in staging (never activated): "
+            f"{', '.join(sorted(refused)[:5])}")
     return {"activated": activated, "backed_up": backed_up,
             "refused_symlinks": refused,
             "backup_dir": str(backup_root) if backed_up else ""}
@@ -867,8 +885,37 @@ def sync_automata_private(work_root: Path, token: str | None) -> dict:
             "credential_source": source, "action": action}
 
 
+def stage_secrets_into(backup_root: Path, staging: Path,
+                       password: str) -> dict:
+    """Decrypt the secrets blob that travels inside mainframe-quick.zip and
+    stage it beside the portable tree, so one activate() covers both.
+
+    The blob is the AES-256 archive publish-backup.ps1 appends to quick as
+    `mainframe-secrets.zip`. Nothing is written to the live home here.
+    """
+    import linux_secrets as secrets_map
+    quick = Path(backup_root) / "mainframe-quick.zip"
+    # the release's own quick zip is the source of truth; an already-extracted
+    # blob is a fallback for a backup root that only carries the blob
+    blob = None
+    if quick.is_file():
+        blob = secrets_map.extract_secrets_blob(
+            quick, Path(staging) / "secrets-blob" / "mainframe-secrets.zip")
+    else:
+        blob = secrets_map.find_blob(backup_root)
+    if blob is None:
+        raise secrets_map.SecretsError(
+            f"no mainframe-secrets.zip found in {backup_root} or inside "
+            f"{quick.name}; this backup cannot restore secrets")
+    manifest = HERE / "tool-secrets.manifest.json"
+    return secrets_map.stage_secrets(
+        blob, manifest, password, staging,
+        home=Path.home(), environment=dict(os.environ))
+
+
 def run_restore(backup_root: Path, work_root: Path, yes: bool,
-                restore_global_agents: bool = False) -> dict:
+                restore_global_agents: bool = False,
+                secrets_password: str | None = None) -> dict:
     import linux_restore as lr
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     staging = work_root / "restore-staging" / stamp
@@ -877,13 +924,40 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool,
     report = lr.copy_recovery(backup_root, staging, apply_portable=True,
                               mode="quick", convert_portable=True,
                               include_global_agents=restore_global_agents)
+    # The encrypted secrets blob rides INSIDE quick on both platforms. Staging
+    # it into the same tree means the same activate() gate, the same overwrite
+    # backups and the same symlink refusal apply - there is no second code path.
+    secrets_report: dict = {}
+    if secrets_password:
+        try:
+            secrets_report = stage_secrets_into(backup_root, staging,
+                                                secrets_password)
+            staged_secrets = len(secrets_report.get("staged", []))
+            log(f"secrets: decrypted and staged {staged_secrets} file(s) "
+                f"from the encrypted archive")
+            for row in secrets_report.get("blocked", []):
+                log(f"secrets: kept out of HOME - {row['name']}: {row['reason']}")
+            for row in secrets_report.get("missing", []):
+                log(f"secrets: item not present in the archive - {row['name']}")
+        except Exception as exc:
+            # a failed secrets leg must not silently ship an unauthenticated
+            # machine: the restore still runs, and the failure is named
+            secrets_report = {"error": str(exc)}
+            log(f"secrets FAILED: {exc}")
+    else:
+        log("secrets: no secrets password in this run - the encrypted archive "
+            "was not decrypted (run without --skip-vault to fetch it)")
     staged = sorted(str(p.relative_to(staging / "home-staging"))
                     for p in (staging / "home-staging").rglob("*")
                     if p.is_file() or p.is_symlink()) \
         if (staging / "home-staging").exists() else []
-    log(f"staged {len(staged)} portable file(s); "
-        f"recovered members kept under {staging / 'recovered'} (not activated: "
-        f"Windows paths do not map to Linux home)")
+    secrets_staged = sorted(str(p.relative_to(staging / "secrets-staging"))
+                            for p in (staging / "secrets-staging").rglob("*")
+                            if p.is_file()) \
+        if (staging / "secrets-staging").exists() else []
+    log(f"staged {len(staged)} portable file(s) and {len(secrets_staged)} "
+        f"secret file(s); recovered members kept under {staging / 'recovered'} "
+        f"(not activated: Windows paths do not map to Linux home)")
     if restore_global_agents:
         # This explicit option authorizes only the root-level instructions file.
         # Other candidates stay staged unless the existing --yes flag authorizes all.
@@ -901,25 +975,26 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool,
             log(note)
         return {"staged": staged, "activation": activation,
                 "staging": str(staging), "status": report.get("operational_status"),
-                "note": note}
-    if not staged:
-        return {"staged": [], "activation": None,
+                "secrets": secrets_report, "note": note}
+    if not staged and not secrets_staged:
+        return {"staged": [], "activation": None, "secrets": secrets_report,
                 "note": "no portable conversions; nothing to activate"}
-    if not yes and not confirm_activation(len(staged)):
-        return {"staged": staged, "activation": None,
+    if not yes and not confirm_activation(len(staged) + len(secrets_staged)):
+        return {"staged": staged, "activation": None, "secrets": secrets_report,
                 "note": "activation declined or no terminal; staging kept at "
                         f"{staging}"}
     activation = activate(staging, Path.home(), work_root)
     log(f"activated {len(activation['activated'])} file(s) into live HOME; "
         f"backed up {len(activation['backed_up'])} overwritten file(s)")
-    return {"staged": staged, "activation": activation,
+    return {"staged": staged, "activation": activation, "secrets": secrets_report,
             "staging": str(staging),
             "status": report.get("operational_status")}
 
 
 def run_restore_leg(backup_root: Path | None, work_root: Path, *,
                     yes: bool, restore_global_agents: bool,
-                    skip_private_repo: bool, gh_token: str | None
+                    skip_private_repo: bool, gh_token: str | None,
+                    secrets_password: str | None = None
                     ) -> tuple[dict, list[str]]:
     """Sync the private checkout, then restore. Returns (report, failures).
 
@@ -955,7 +1030,8 @@ def run_restore_leg(backup_root: Path | None, work_root: Path, *,
         return report, failures
     try:
         report["restore"] = run_restore(
-            backup_root, work_root, yes, restore_global_agents)
+            backup_root, work_root, yes, restore_global_agents,
+            secrets_password=secrets_password)
     except Exception as exc:
         failures.append(f"restore: {exc}")
         log(f"restore FAILED: {exc}")
@@ -1056,6 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
     # Vault + release.
     backup_root = args.backup_root
     gh_token = ""
+    secrets_pw = ""
     if not args.skip_vault:
         # the topic, the relay and the page base are resolved by the ONE vault
         # flow, from the same config file windows reads. python passes only
@@ -1102,7 +1179,8 @@ def main(argv: list[str] | None = None) -> int:
     restore_report, restore_failures = run_restore_leg(
         backup_root, work_root, yes=args.yes,
         restore_global_agents=args.restore_global_agents,
-        skip_private_repo=args.skip_private_repo, gh_token=gh_token)
+        skip_private_repo=args.skip_private_repo, gh_token=gh_token,
+        secrets_password=secrets_pw)
     report.update(restore_report)
     failures.extend(restore_failures)
 
