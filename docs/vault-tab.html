@@ -263,6 +263,80 @@
     cursor: pointer;
   }
   .checkbox-row input { cursor: pointer; }
+  .ttl-box {
+    margin-bottom: 1.15rem;
+  }
+  .ttl-row {
+    background: rgba(31, 111, 235, 0.08);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.65rem 0.85rem;
+    margin: 0;
+    transition: all 0.2s ease;
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .ttl-row:hover {
+    border-color: var(--focus);
+    background: rgba(31, 111, 235, 0.14);
+  }
+  .ttl-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .ttl-row input:checked ~ .ttl-text {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .ttl-row input:checked ~ .ttl-text .ttl-tag {
+    background: var(--accent);
+    color: #ffffff;
+    border-color: var(--accent);
+  }
+  .ttl-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.92rem;
+    cursor: pointer;
+    flex: 1;
+  }
+  .ttl-icon-wrap {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+  }
+  .ttl-icon-svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+    color: var(--accent-blue);
+    animation: ttl-clock 3s ease-in-out infinite alternate;
+  }
+  @keyframes ttl-clock {
+    0% { transform: rotate(0deg) scale(1); }
+    50% { transform: rotate(18deg) scale(1.12); }
+    100% { transform: rotate(0deg) scale(1); }
+  }
+  .ttl-tag {
+    margin-left: auto;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 0.15rem 0.45rem;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    letter-spacing: 0.05em;
+    transition: all 0.2s ease;
+  }
   #msg {
     margin-top: 1rem;
     font-weight: 500;
@@ -341,6 +415,22 @@
 
   <!-- how much of this request's wait window is left (empty for old links) -->
   <div id="expiry-line" class="expiry-line" style="display:none"></div>
+
+  <!-- 12-Hour Extended Session Checkbox -->
+  <div id="ttl-box" class="ttl-box" style="display:none">
+    <label class="checkbox-row ttl-row" id="ttl-row">
+      <input type="checkbox" id="ttl-12h">
+      <span class="ttl-text">
+        <span class="ttl-icon-wrap">
+          <svg class="ttl-icon-svg" viewBox="0 0 24 24">
+            <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10 10-4.5 10-10S17.5 2 12 2zm4.2 14.2L11 13V7h1.5v5.2l4.5 2.7-.8 1.3z"/>
+          </svg>
+        </span>
+        Keep unlocked for 12 hours
+        <span class="ttl-tag">12h</span>
+      </span>
+    </label>
+  </div>
 
   <!-- 1-Tap Biometric Approval Section -->
   <div id="bio-section" style="display:none">    <button id="bio-btn" type="button">
@@ -436,7 +526,7 @@ function goStale(reason) {
     line.style.display = 'block';
     line.textContent = 'request closed';
   }
-  for (const id of ['f', 'bio-section']) {
+  for (const id of ['f', 'bio-section', 'ttl-box']) {
     const el = document.getElementById(id);
     if (el) el.style.display = 'none';
   }
@@ -580,7 +670,7 @@ async function encryptForRunner(plaintext, spkiPubBase64) {
   return bytesToB64(new Uint8Array(ct));
 }
 
-async function transmitCiphertext(b64, sid) {
+async function transmitCiphertext(b64, sid, is12h = false) {
   // a tap can land exactly on the deadline; refusing here is the difference
   // between "sent" and "sent into a topic nobody is reading"
   if (REQUEST.stale) {
@@ -599,11 +689,12 @@ async function transmitCiphertext(b64, sid) {
     show('Transmitting encrypted password via relay...', 'waiting');
     const res = await fetch(`${NTFY_BASE}/${encodeURIComponent(sid)}`, {
       method: 'POST',
-      headers: { 'Title': 'Vault Ciphertext' },
+      headers: { 'Title': is12h ? 'Vault Ciphertext (12h)' : 'Vault Ciphertext' },
       body: b64
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    show(`Ciphertext sent to ${REQUEST.host || 'the runner'} — it unlocks within a few seconds. You can close this tab.`, 'success');
+    const durMsg = is12h ? ' (12-hour session)' : '';
+    show(`Ciphertext sent to ${REQUEST.host || 'the runner'}${durMsg} — it unlocks within a few seconds. You can close this tab.`, 'success');
     document.getElementById('icon-container').className = 'icon-wrap';
     document.getElementById('bio-btn').disabled = true;
   } else {
@@ -614,7 +705,8 @@ async function transmitCiphertext(b64, sid) {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    show('Encrypted file downloaded. Restoring unattended.', 'success');
+    const durMsg = is12h ? ' (12-hour session)' : '';
+    show(`Encrypted file downloaded${durMsg}. Restoring unattended.`, 'success');
   }
 }
 
@@ -773,6 +865,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const bioSection = document.getElementById('bio-section');
   const formSection = document.getElementById('f');
   const clearBtn = document.getElementById('clear-bio');
+  const ttlBox = document.getElementById('ttl-box');
+
+  if (ttlBox) {
+    ttlBox.style.display = 'block';
+  }
 
   if (isEnrolled && window.PublicKeyCredential) {
     bioSection.style.display = 'block';
@@ -811,8 +908,10 @@ document.addEventListener('DOMContentLoaded', () => {
     show('Verifying fingerprint...', 'waiting');
     try {
       const password = await approveWithBiometrics();
-      const b64Cipher = await encryptForRunner(password, k);
-      await transmitCiphertext(b64Cipher, sid);
+      const is12h = !!document.getElementById('ttl-12h')?.checked;
+      const payload = is12h ? JSON.stringify({ pw: password, ttl: 720, ttlMinutes: 720 }) : password;
+      const b64Cipher = await encryptForRunner(payload, k);
+      await transmitCiphertext(b64Cipher, sid, is12h);
     } catch (err) {
       const errDetail = (err && (err.message || err.name || String(err))) || 'unknown error';
       show(`Biometric approval failed: ${errDetail}`, 'error');
@@ -843,8 +942,10 @@ document.addEventListener('DOMContentLoaded', () => {
           console.warn('Biometric enrollment skipped:', bioErr);
         }
       }
-      const b64Cipher = await encryptForRunner(pw, k);
-      await transmitCiphertext(b64Cipher, sid);
+      const is12h = !!document.getElementById('ttl-12h')?.checked;
+      const payload = is12h ? JSON.stringify({ pw: pw, ttl: 720, ttlMinutes: 720 }) : pw;
+      const b64Cipher = await encryptForRunner(payload, k);
+      await transmitCiphertext(b64Cipher, sid, is12h);
       document.getElementById('pw').value = '';
     } catch (err) {
       const errDetail = (err && (err.message || err.name || String(err))) || 'unknown error';

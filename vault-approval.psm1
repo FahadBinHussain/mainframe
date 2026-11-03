@@ -618,7 +618,41 @@ function Decrypt-VaultApprovalCiphertext {
     }
     $cipherBytes = [Convert]::FromBase64String($Ciphertext)
     $plainBytes = $Rsa.Decrypt($cipherBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
-    return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+    $plain = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+
+    $pw = $plain
+    $ttlMinutes = 0
+    if ($plain.StartsWith('{') -and $plain.EndsWith('}')) {
+        try {
+            $parsed = $plain | ConvertFrom-Json
+            if ($parsed.pw) {
+                $pw = [string]$parsed.pw
+                if ($parsed.ttl) { $ttlMinutes = [int]$parsed.ttl }
+                elseif ($parsed.ttlMinutes) { $ttlMinutes = [int]$parsed.ttlMinutes }
+            }
+        } catch {}
+    }
+
+    if ($ttlMinutes -gt 0) {
+        $env:MAINFRAME_VAULT_APPROVED_TTL = [string]$ttlMinutes
+        $script:LastApprovedTtlMinutes = $ttlMinutes
+        Write-Host "mobile approval requested extended session: $ttlMinutes minutes ($([math]::Round($ttlMinutes / 60)) hours)" -ForegroundColor Green
+    } else {
+        Remove-Item Env:MAINFRAME_VAULT_APPROVED_TTL -ErrorAction SilentlyContinue
+        $script:LastApprovedTtlMinutes = $null
+    }
+
+    return $pw
+}
+
+function Get-VaultApprovedTtlMinutes {
+    if ($env:MAINFRAME_VAULT_APPROVED_TTL) {
+        try { return [int]$env:MAINFRAME_VAULT_APPROVED_TTL } catch {}
+    }
+    if ($script:LastApprovedTtlMinutes) {
+        return [int]$script:LastApprovedTtlMinutes
+    }
+    return 0
 }
 
 # --- single flight: one phone prompt at a time -------------------------------
@@ -1083,6 +1117,7 @@ Export-ModuleMember -Function `
     Test-VaultApprovalCiphertext, `
     Wait-VaultApprovalCiphertext, `
     Decrypt-VaultApprovalCiphertext, `
+    Get-VaultApprovedTtlMinutes, `
     Get-VaultMasterPassword, `
     Get-VaultApprovalLockPath, `
     Read-VaultApprovalLock, `

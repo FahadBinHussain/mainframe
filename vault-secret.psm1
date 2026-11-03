@@ -87,6 +87,17 @@ function Unseal-BwEmail {
 }
 
 function Get-VaultSessionTtlMinutes {
+    # 1. Check if the active session specifies a custom TTL (e.g. 12-hour mobile approval = 720m)
+    $sessionFile = Get-MainframeSessionKeyPath
+    if ($sessionFile) {
+        $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
+        if (Test-Path -LiteralPath $ttlFile) {
+            try {
+                $val = [int]((Get-Content -LiteralPath $ttlFile -Raw).Trim())
+                if ($val -gt 0) { return $val }
+            } catch {}
+        }
+    }
     if ($env:MAINFRAME_VAULT_TTL_MINUTES) {
         try { return [int]$env:MAINFRAME_VAULT_TTL_MINUTES } catch {}
     }
@@ -121,7 +132,12 @@ function Lock-VaultSession {
     if (Test-Path -LiteralPath $sessionFile) {
         Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
     }
+    $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
+    if (Test-Path -LiteralPath $ttlFile) {
+        Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
+    Remove-Item -Path 'Env:\MAINFRAME_VAULT_APPROVED_TTL' -ErrorAction SilentlyContinue
     Clear-VaultSessionCache
     Clear-VaultItemsCache
     & $BwPath lock 2>$null | Out-Null
@@ -233,7 +249,13 @@ function Ensure-VaultSession {
                     $env:BW_SESSION = $rawKey.Trim()
                     Clear-VaultSessionCache
                     Clear-VaultItemsCache
-                    Write-Host "vault unlocked successfully with fresh 1-hour session" -ForegroundColor Green
+                    $activeTtl = Get-VaultSessionTtlMinutes
+                    $sessionDesc = if ($activeTtl -gt 60) {
+                        "$([math]::Round($activeTtl / 60))-hour session ($activeTtl minutes TTL)"
+                    } else {
+                        "1-hour session"
+                    }
+                    Write-Host "vault unlocked successfully with fresh $sessionDesc" -ForegroundColor Green
                     return $true
                 } else {
                     Write-MainframeWarning "bw unlock did not return a valid session key: $($unlockOut -join ' ')"
@@ -258,16 +280,35 @@ function Set-VaultSessionKey {
         and linux share ONE session cache location - the same file, the same
         TTL, the same rules.
     #>
-    param([Parameter(Mandatory = $true)][string]$SessionKey)
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionKey,
+        [int]$TtlMinutes = 0
+    )
+
+    if ($TtlMinutes -le 0 -and $env:MAINFRAME_VAULT_APPROVED_TTL) {
+        try { $TtlMinutes = [int]$env:MAINFRAME_VAULT_APPROVED_TTL } catch {}
+    }
 
     $sessionFile = Get-MainframeSessionKeyPath
     New-Item -ItemType Directory -Force -Path (Split-Path $sessionFile) | Out-Null
     Set-Content -LiteralPath $sessionFile -Value $SessionKey.Trim() -Encoding UTF8 -NoNewline
+
+    $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
+    if ($TtlMinutes -gt 0) {
+        Set-Content -LiteralPath $ttlFile -Value ([string]$TtlMinutes) -Encoding UTF8 -NoNewline
+        Write-Host "session TTL set to $TtlMinutes minutes ($([math]::Round($TtlMinutes / 60)) hours) at $ttlFile" -ForegroundColor Green
+    } else {
+        Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
+    }
+
     # owner-only on the posix side; windows inherits the profile acl
     if ($env:OS -ne 'Windows_NT') {
         try {
             $mode = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite
             [System.IO.File]::SetUnixFileMode($sessionFile, $mode)
+            if ($TtlMinutes -gt 0 -and (Test-Path -LiteralPath $ttlFile)) {
+                [System.IO.File]::SetUnixFileMode($ttlFile, $mode)
+            }
         } catch {
             Write-MainframeWarning "could not tighten the mode of $sessionFile - it may be readable by other users"
         }
