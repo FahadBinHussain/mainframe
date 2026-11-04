@@ -1088,6 +1088,23 @@ function Get-VaultMasterPassword {
             # no queued waiter beats it to a second prompt.
             $approved = $true
             Write-Host "password decrypted successfully via 1-tap biometric approval" -ForegroundColor Green
+            try {
+                $accountsDir = Join-Path (Get-MainframeAccountsDir) 'bitwarden'
+                if (-not (Test-Path -LiteralPath $accountsDir)) {
+                    $null = New-Item -ItemType Directory -Force -Path $accountsDir -ErrorAction SilentlyContinue
+                }
+                $lastApprovalFile = Join-Path $accountsDir 'last-approval.json'
+                $lastApproval = [ordered]@{
+                    at      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+                    agent   = $resolvedAgent
+                    model   = $resolvedModel
+                    context = $PromptContext
+                    host    = $HostName
+                    code    = $code
+                    state   = 'approved'
+                }
+                $lastApproval | ConvertTo-Json -Compress | Set-Content -LiteralPath $lastApprovalFile -Encoding UTF8 -Force
+            } catch {}
             return $pw
         } else {
             $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer
