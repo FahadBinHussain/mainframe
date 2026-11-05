@@ -11,6 +11,59 @@
 # the same place (see mainframe-paths.psm1).
 Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
 
+function Get-MiniMaxSessionId {
+    # The MiniMax Code desktop app gives each session an id that shows up in
+    # two places: an env var when the runtime sets one, and the session
+    # workspace path the agent runs in. The v2 session tree on disk is keyed
+    # by that id, which is how the active model can be read back ground-truth.
+    foreach ($name in @('MINIMAX_SESSION_ID', 'MAVIS_SESSION_ID', 'MINIMAX_CODE_SESSION_ID', 'MINIMAX_CONVERSATION_ID')) {
+        $v = [Environment]::GetEnvironmentVariable($name)
+        if ($v) { return $v.Trim() }
+    }
+    try {
+        $cwd = (Get-Location).Path
+        if ($cwd -match 'sessions[\\/](mvs_[A-Za-z0-9]+)') { return $matches[1] }
+    } catch {}
+    return $null
+}
+
+function Get-MiniMaxModelFromDisk {
+    param([string]$SessionId = $null)
+
+    # Ground truth: MiniMax Code writes the request payload of every LLM call
+    # to <data>/v2/sessions/<yyyy>/<mm>/<dd>/<hh-mm-ss-mmm>-session_<b64url-id>/llm-call.json
+    # and that file carries the model the call actually used.
+    $root = Join-Path $HOME '.minimax\v2\sessions'
+    if (-not (Test-Path -LiteralPath $root)) { return $null }
+
+    $files = @()
+    if ($SessionId) {
+        $enc = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($SessionId)).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        $files = @(Get-ChildItem -LiteralPath $root -Recurse -Filter 'llm-call.json' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Directory.Name -like "*_${enc}" })
+        # an explicitly asked-for session is authoritative: if it has no
+        # llm-call.json then the model is simply unknown. falling back to
+        # another session here would put the wrong model on the phone card.
+        if ($files.Count -eq 0) { return $null }
+    } else {
+        # No session id to scope with: fall back to the session that wrote an
+        # llm-call.json most recently. The window is short on purpose - a
+        # finished session must not keep claiming the tag after the agent
+        # moved on.
+        $cutoff = (Get-Date).AddMinutes(-15)
+        $files = @(Get-ChildItem -LiteralPath $root -Recurse -Filter 'llm-call.json' -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -ge $cutoff })
+    }
+    if ($files.Count -eq 0) { return $null }
+
+    $f = $files | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    try {
+        $j = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($j.model) { return ([string]$j.model).Trim() }
+    } catch {}
+    return $null
+}
+
 function Get-CallerIdentity {
     param(
         [string]$Agent,
@@ -26,11 +79,9 @@ function Get-CallerIdentity {
         }
     }
 
+    # 2. An explicit operator override wins over everything else.
     if (-not $Agent) {
         $Agent = $env:MAINFRAME_AGENT_NAME
-        if (-not $Agent) { $Agent = $env:AGENT_NAME }
-        if (-not $Agent) { $Agent = $env:AI_AGENT }
-        if (-not $Agent) { $Agent = $env:HARNESS_NAME }
     }
     if (-not $Model) {
         $Model = $env:MAINFRAME_MODEL_NAME
@@ -38,39 +89,55 @@ function Get-CallerIdentity {
         if (-not $Model) { $Model = $env:AI_MODEL }
     }
 
-    # 2. Check process ancestry FIRST before trusting inherited env vars
+    # 3. Process ancestry BEFORE the generic environment variables.
+    #    Two things make the env vars untrustworthy on their own:
+    #      - a harness env var leaks DOWN into long-lived services (the
+    #        monitor api inherits the agent that started it), and
+    #      - a compatibility flag can lie: MiniMax Code sets
+    #        OPENCODE_DISABLE_CHANNEL_DB for opencode compatibility, so the
+    #        env branch read every MiniMax Code request as 'opencode'.
+    #    The process tree cannot be inherited wrongly, so it decides first.
     if (-not $Agent) {
-        try {
-            $p = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent
-            while ($p) {
-                $name = $p.ProcessName.ToLower()
-                # If running under node.exe serving the monitor, it's the browser
-                if ($name -match 'node') {
-                    $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)" -ErrorAction SilentlyContinue).CommandLine
-                    if ($cmd -match 'monitor' -or $cmd -match 'server\.ts') {
-                        $Agent = 'browser'
-                        break
-                    }
+        $p = $null
+        try { $p = (Get-Process -Id $PID -ErrorAction SilentlyContinue).Parent } catch { $p = $null }
+        while ($p) {
+            $name = ''
+            try { $name = $p.ProcessName.ToLower() } catch { $name = '' }
+            # If running under node.exe serving the monitor, it's the browser
+            if ($name -match 'node') {
+                $cmd = ''
+                try { $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId = $($p.Id)" -ErrorAction SilentlyContinue).CommandLine } catch { $cmd = '' }
+                if ($cmd -match 'monitor' -or $cmd -match 'server\.ts') {
+                    $Agent = 'browser'
+                    break
                 }
-                if ($name -match 'qoder') { $Agent = 'qoder'; break }
-                if ($name -match 'claude') { $Agent = 'claude-code'; break }
-                if ($name -match 'opencode') { $Agent = 'opencode'; break }
-                if ($name -match 'cursor') { $Agent = 'cursor'; break }
-                if ($name -match 'windsurf') { $Agent = 'windsurf'; break }
-                if ($name -match 'codex') { $Agent = 'codex'; break }
-                if ($name -match 'antigravity') { $Agent = 'antigravity'; break }
-                $p = $p.Parent
             }
-        } catch {}
+            if ($name -match 'minimax|mcode') { $Agent = 'minimax-code'; break }
+            if ($name -match 'qoder') { $Agent = 'qoder'; break }
+            if ($name -match 'claude') { $Agent = 'claude-code'; break }
+            if ($name -match 'opencode') { $Agent = 'opencode'; break }
+            if ($name -match 'cursor') { $Agent = 'cursor'; break }
+            if ($name -match 'windsurf') { $Agent = 'windsurf'; break }
+            if ($name -match 'codex') { $Agent = 'codex'; break }
+            if ($name -match 'antigravity') { $Agent = 'antigravity'; break }
+            try { $p = $p.Parent } catch { $p = $null }
+        }
     }
 
-    # 3. Environment variables fallback only if ancestry didn't resolve
+    # 4. The named agent env vars, now only as a fallback.
+    if (-not $Agent) {
+        $Agent = $env:AGENT_NAME
+        if (-not $Agent) { $Agent = $env:AI_AGENT }
+        if (-not $Agent) { $Agent = $env:HARNESS_NAME }
+    }
+
+    # 5. Environment variables, last resort.
     if (-not $Agent) {
         if ($env:QODER_CLI -or $env:QODER_PRODUCT_ID -or $env:QODER_SESSION_TYPE) {
             # qoder sets OPENCODE_DISABLE_CHANNEL_DB for compatibility, so it
             # must be tested before the opencode branch or it reads as opencode
             $Agent = 'qoder'
-        } elseif ($env:OPENCODE -or $env:OPENCODE_SESSION -or $env:OPENCODE_DISABLE_CHANNEL_DB) {
+        } elseif ($env:OPENCODE -or $env:OPENCODE_SESSION) {
             $Agent = 'opencode'
         } elseif ($env:CLAUDE_CODE -or $env:CLAUDE_PROJECT_DIR) {
             $Agent = 'claude-code'
@@ -80,6 +147,11 @@ function Get-CallerIdentity {
             $Agent = 'aider'
         } elseif ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
             $Agent = 'antigravity'
+        } elseif ($env:OPENCODE_DISABLE_CHANNEL_DB) {
+            # the compat flag ALONE, with no harness-specific marker. it is
+            # the weakest signal there is - MiniMax Code sets it as well - so
+            # it goes last, after every marker above has had its chance.
+            $Agent = 'opencode'
         } else {
             $Agent = 'terminal'
         }
@@ -130,6 +202,18 @@ function Get-CallerIdentity {
             }
         } elseif ($Agent -eq 'opencode') {
             if ($env:OPENCODE_MODEL) { $Model = $env:OPENCODE_MODEL }
+        } elseif ($Agent -eq 'minimax-code') {
+            # MiniMax Code exposes no model env var, so the ground truth is
+            # the session tree on disk: every LLM call writes llm-call.json
+            # into the session's folder, and the folder name carries the
+            # session id (base64url). Reading the model back from the file
+            # that the call itself wrote beats guessing.
+            if ($env:MINIMAX_MODEL) { $Model = $env:MINIMAX_MODEL }
+            elseif ($env:MINIMAX_MODEL_NAME) { $Model = $env:MINIMAX_MODEL_NAME }
+            elseif ($env:MAVIS_MODEL) { $Model = $env:MAVIS_MODEL }
+            if (-not $Model) {
+                $Model = Get-MiniMaxModelFromDisk -SessionId (Get-MiniMaxSessionId)
+            }
         } elseif ($Agent -eq 'claude-code') {
             if ($env:ANTHROPIC_MODEL) { $Model = $env:ANTHROPIC_MODEL }
         } elseif ($Agent -eq 'codex') {
@@ -1121,6 +1205,8 @@ function Get-VaultMasterPassword {
 
 Export-ModuleMember -Function `
     Get-CallerIdentity, `
+    Get-MiniMaxSessionId, `
+    Get-MiniMaxModelFromDisk, `
     Get-VaultConfigValue, `
     Get-VaultNtfyTopic, `
     Get-VaultNtfyServer, `
