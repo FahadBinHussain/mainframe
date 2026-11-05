@@ -2293,12 +2293,22 @@ the fix does not depend on the topic name at all:
   `test/relay-lock.test.mjs` and `test/page-signature.test.mjs` in
   `automata-private\vercel.com\mainframe-vault-relay`.
 
-what is still open: the phone reads the wake-up topic on ntfy.sh directly, so
-somebody who knows the topic name can still push a FAKE notification to the
-phone (it cannot make the card sign anything - the card refuses a forged link
-- but it can point the victim at a page of their own). closing that needs the
-phone to read through an authenticated channel (the relay with a credential,
-or a self-hosted ntfy over tailscale with `auth-default-access: deny-all`).
+what is still open: nothing about the master password - a leaked topic name
+buys an attacker nothing there. the phone now reads the wake-up topic
+**through the relay**, with the credential, so the only notifications it can
+see are the ones the runner signed (the relay drops the rest). the ntfy.sh
+subscription for that topic was removed from the phone on 2026-11-05 - a
+phone that keeps both still gets the attacker-pushed ones from ntfy.sh. the
+cost: ntfy.sh pushes over FCM (instant), a relay subscription is a poll every
+~8s, so a request reaches the phone in seconds instead of instantly.
+
+what is left, and it is not a hole in the flow: the ntfy account itself. its
+topic is still public on ntfy.sh, so anybody who knows the topic name can
+still READ the notifications (the code and the link - the link is signed, so
+it buys them nothing) and WRITE to the topic (the relay refuses to forward
+those, and the phone does not read ntfy.sh any more). a true lock on the
+topic itself needs ntfy Pro (paid, not bought here) or a self-hosted ntfy
+over tailscale with `auth-default-access: deny-all`.
 
 ### one phone prompt at a time (single-flight approval, 2026-11-02)
 
