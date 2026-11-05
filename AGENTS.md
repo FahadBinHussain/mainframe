@@ -2092,6 +2092,30 @@ and post garbage that killed a live approval.
   `mainframe.config.json` (script dir, cwd, `~/.config/mainframe/`), and throws
   with the searched paths when nothing is set. never reintroduce a literal topic
   in code -- it runs on a public server.
+- **a random topic name is UNGUESSABLE, not private.** the topic lives on
+  ntfy.sh, where every topic is readable by anyone who knows its name. a
+  32-char random name is unguessable, but it leaks through a backup, a
+  screenshot or a log -- and a reader of the topic sees the verification code,
+  so they can also forge a request that MATCHES the number on the terminal.
+  the number check only protects against someone who cannot read the requests.
+- **a PROTECTED topic is the actual lock.** `Get-VaultNtfyToken` resolves
+  `-Token` -> `MAINFRAME_NTFY_TOKEN` -> `ntfyToken` in `mainframe.config.json`,
+  and `Send-VaultApprovalNotification` sends it as `Authorization: Bearer` on
+  the push. ntfy then refuses an anonymous read of the topic, so a leaked
+  topic name buys an attacker nothing.
+  - **ntfy tokens are NOT topic-scoped** -- a token grants full access to its
+    ntfy account, so it belongs in the local (gitignored) config and nowhere
+    else.
+  - the credential goes on the MAIN topic only. the per-request `mf-vault-<hex>`
+    topic stays anonymous-readable, because the approval CARD is a public
+    static page and cannot hold a secret. that is safe: the card only ever
+    carries an RSA ciphertext, and `Test-VaultApprovalCiphertext` rejects
+    anything that does not decrypt with the request's own key.
+  - **a refused push must say so.** ntfy answers 403 to a protected topic when
+    the credential is missing and drops the message, so the only symptom would
+    be a phone that never buzzes. `Send-VaultApprovalNotification` names the
+    status and the setting to fix. `tests/vault-approval-token.Tests.ps1` pins
+    all of it against a local listener.
 - **one resolver, both runners.** `monitor/apps/api/vault-unlock.ps1` calls the
   module resolver instead of duplicating env->hardcode. it also passes
   `-Agent`/`-Model` from the session to `Send-VaultApprovalNotification`; without

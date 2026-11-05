@@ -275,6 +275,30 @@ function Get-VaultNtfyServer {
     return $Server.TrimEnd('/')
 }
 
+function Get-VaultNtfyToken {
+    param([string]$Token = $null)
+
+    # The credential of a PROTECTED ntfy topic.
+    #
+    # A topic on ntfy.sh is public by default: anyone who knows the name can
+    # read every request on it and post their own. A random name makes it
+    # unguessable, but "unguessable" is not "private" - the name leaks through
+    # a backup, a screenshot or a log, and a reader of the topic sees the
+    # verification code, so they can also forge a request that matches what
+    # the terminal shows.
+    #
+    # Protecting the topic closes that: ntfy refuses an anonymous read, so
+    # only a holder of the credential sees the requests at all.
+    #
+    # The credential is an ntfy access token (tk_...). ntfy tokens are NOT
+    # topic-scoped - a token grants full access to its account - so it lives
+    # only in the local, gitignored config, exactly like the topic name.
+    if (-not $Token) { $Token = $env:MAINFRAME_NTFY_TOKEN }
+    if (-not $Token) { $Token = Get-VaultConfigValue -Key 'ntfyToken' }
+    if ($Token) { return $Token.Trim() }
+    return $null
+}
+
 function Get-VaultPagesBase {
     param(
         [string]$PagesBase = $null,
@@ -479,10 +503,16 @@ function Send-VaultApprovalNotification {
         [string]$PromptContext = "vault access",
         [string]$Agent = $null,
         [string]$Model = $null,
-        [string]$Server = $null
+        [string]$Server = $null,
+        [string]$Token = $null,
+        [switch]$NoToken
     )
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
+    # -NoToken forces an anonymous publish, which is what a PUBLIC topic
+    # needs. without it the credential comes from the config, because a
+    # PROTECTED topic refuses an anonymous one.
+    $resolvedToken = if ($NoToken) { $null } else { Get-VaultNtfyToken -Token $Token }
     try {
         $callerTag = if ($Agent) { "$HostName - $Agent" } else { $HostName }
         $title = if ($Code) { "Vault Unlock: Code [$Code] ($callerTag)" } else { "Vault Unlock ($callerTag)" }
@@ -497,6 +527,11 @@ function Send-VaultApprovalNotification {
             # read the body back byte for byte.
             'Content-Type' = 'text/plain; charset=utf-8'
         }
+        # A PROTECTED topic needs the credential. Without it ntfy answers 403
+        # and the push is simply dropped - the phone never hears about the
+        # request, so the runner would sit there until it times out with
+        # nothing to explain the silence.
+        if ($resolvedToken) { $headers['Authorization'] = "Bearer $resolvedToken" }
         $bodyParts = @("Request from $HostName")
         if ($Agent) { $bodyParts += "Agent: $Agent" }
         if ($Model) { $bodyParts += "Model: $Model" }
@@ -508,7 +543,16 @@ function Send-VaultApprovalNotification {
         $null = Invoke-RestMethod -Uri "$resolvedServer/$Topic" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
     } catch {
-        Write-MainframeWarning "ntfy push dispatch to topic '$Topic' failed: $_"
+        $status = 0
+        try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = 0 }
+        if ($status -eq 401 -or $status -eq 403) {
+            # the topic is protected and the credential is missing or wrong.
+            # ntfy answers 403 and drops the message, so without this the only
+            # symptom is a phone that never buzzes.
+            Write-MainframeWarning "ntfy refused the push to topic '$Topic' (HTTP $status): the topic is protected and the credential is missing or wrong. set 'ntfyToken' in mainframe.config.json (or MAINFRAME_NTFY_TOKEN) to the ntfy access token that owns the topic."
+        } else {
+            Write-MainframeWarning "ntfy push dispatch to topic '$Topic' failed: $_"
+        }
         return $false
     }
 }
@@ -1210,6 +1254,7 @@ Export-ModuleMember -Function `
     Get-VaultConfigValue, `
     Get-VaultNtfyTopic, `
     Get-VaultNtfyServer, `
+    Get-VaultNtfyToken, `
     Get-VaultPagesBase, `
     ConvertTo-SubjectPublicKeyInfo, `
     ConvertTo-SubjectPublicKeyInfoManual, `
