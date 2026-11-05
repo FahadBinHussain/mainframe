@@ -25,3 +25,6 @@ __pycache__/
 
 # per-user project config (see mainframe.config.example.json) - never commit
 mainframe.config.json
+
+# the approval signing key - it signs every approval link, so it never goes into git
+mainframe.approval-signing.key
