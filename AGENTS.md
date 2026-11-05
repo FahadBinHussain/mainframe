@@ -2101,6 +2101,35 @@ and post garbage that killed a live approval.
   reported `opencode` with an empty model. `Get-CallerIdentity` tests
   `QODER_CLI`/`QODER_PRODUCT_ID`/`QODER_SESSION_TYPE` first; qoder has no model
   env var, so the model stays blank there and `MAINFRAME_MODEL_NAME` fills it.
+- **the process tree decides BEFORE the env vars.** `Get-CallerIdentity` used to
+  read the env vars first, and two things made that wrong. A harness env var
+  leaks DOWN into long-lived services (the monitor api inherits the agent that
+  started it), and a compatibility flag can lie outright: **MiniMax Code sets
+  `OPENCODE_DISABLE_CHANNEL_DB=1` for opencode compatibility**, so every
+  MiniMax Code approval request was labelled `opencode` with an empty model --
+  the wrong name on the phone card, for every request the desktop app made.
+  The order is now: explicit `-Agent` -> `MAINFRAME_AGENT_NAME` -> **process
+  tree** -> `AGENT_NAME`/`AI_AGENT`/`HARNESS_NAME` -> harness-specific env
+  markers -> `OPENCODE_DISABLE_CHANNEL_DB` alone -> `terminal`. The compat flag
+  on its own is the weakest signal there is, so it is the LAST branch now, not
+  the first. `tests/vault-approval-identity.Tests.ps1` pins that order
+  structurally -- a future edit that moves the env vars back above the tree
+  silently reintroduces the bug, and the test fails instead.
+- **the MiniMax Code process is named `MiniMax Code`** (with a space), so the
+  tree match is `minimax|mcode` -> the label `minimax-code`, matching the
+  kebab-case of `opencode`/`claude-code`. do not label it `opencode` again.
+- **MiniMax Code reads its model back from disk.** the desktop app exposes no
+  model env var, so the ground truth is the session tree: every LLM call writes
+  `llm-call.json` into
+  `~/.minimax/v2/sessions/<yyyy>/<mm>/<dd>/<hh-mm-ss-mmm>-session_<b64url-id>/`
+  and that file carries the model the call actually used. `Get-MiniMaxSessionId`
+  finds the id from `MINIMAX_SESSION_ID`/`MAVIS_SESSION_ID`/... or from the
+  session workspace path (`...\sessions\mvs_<id>\workspace`);
+  `Get-MiniMaxModelFromDisk` reads the matching folder. **an explicitly
+  asked-for session id is authoritative**: no `llm-call.json` for it means the
+  model is unknown -- it does NOT borrow another session's model. the
+  recency fallback (newest write within 15 minutes) is only for the case where
+  no session id is known at all.
 - **no passwords on argv.** `bw unlock $password --raw` put the master password
   in the process command line, readable by any same-user process. both
   `bitwarden.com/unlock.ps1` and `monitor/apps/api/vault-unlock.ps1` now set
@@ -2310,6 +2339,12 @@ against a local ntfy-compatible relay: the topic/relay/page precedence, the
 backoff and the expired marker. `tests/test_linux_real_vault_session.py` pins
 the linux side of the contract: the argv, the result document and the failure
 modes - plus a guard that the python duplicate stays deleted.
+
+`tests/vault-approval-identity.Tests.ps1` pins who the module thinks is asking:
+the resolution ORDER (process tree before env vars), the compatibility flag as
+the last branch, the minimax detection, the session-id round trip through the
+base64url folder name, and that an unknown session id yields no model instead
+of borrowing another session's. run it under both runtimes like the others.
 
 ## the secrets archive and the skill tree on linux (2026-11-02)
 
