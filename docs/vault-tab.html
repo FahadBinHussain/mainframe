@@ -488,7 +488,19 @@ function show(text, type='') {
 // card posts the ciphertext back through that relay instead. The phone side
 // keeps using the same ntfy app either way.
 let NTFY_BASE = 'https://ntfy.sh';
-const REQUEST = { expiresAt: null, sid: null, host: null, stale: false, timer: null, markerTimer: null, relayDown: false };
+const REQUEST = { expiresAt: null, sid: null, host: null, stale: false, timer: null, markerTimer: null, relayDown: false, descriptor: null, signature: null };
+
+// The runner signs every approval link with a stable key. The public half is
+// baked in here, so a link that was NOT signed by the runner - a forged one
+// from somebody who knows the topic name - is refused BEFORE the page asks
+// for the master password.
+//
+// The topic name may leak. This is what does not depend on it.
+//
+// Keep this in sync with mainframe/vault-approval.psm1
+// (Get-VaultApprovalPublicKey) and with the relay's MF_APPROVAL_PUBLIC_KEY.
+const APPROVAL_PUBLIC_KEY_B64URL = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm4zB0bbXPMpvvZqbSvF36u2frwOSt_p4uQBLIohCQwYj20LpHDekmjMGGQEoArBLOSLvlQj7QYwkBHnzDibpDJC9QABUiNfup2ji-GEzO0iOVA35qdaIa1vCjmHM7-010Ta1AT6foS9wlrQrltCl3dysJmBrBvZCs99dwZyUPH5d0oGwoc0NNVaQTGq-sTnLyJLofYw57bNkiy2nPW5flaUg2wJY4phrSUjvZkr0ubnIf1W3abrfXZBmPabtmnuFWED3H2SVB6GyD8v_Hira_5Zvs8njO3xXhedhsAyzzD3PTmwoNm-cYyOFvn2Wy_Jy70CIpv99fbQLN13P4QkPjQIDAQAB';
+const APPROVAL_DESCRIPTOR_VERSION = 'mf-vault-approval-v1';
 
 function fmtLeft(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -551,11 +563,46 @@ function updateExpiry() {
   line.textContent = `request valid for ${fmtLeft(left)} more` + (REQUEST.relayDown ? ' · relay unreachable, link expiry only' : '');
 }
 
+function refuseUnsigned() {
+  // a link the runner did not sign. nothing is shown, nothing is asked for,
+  // and nothing can be sent.
+  REQUEST.stale = true;
+  clearInterval(REQUEST.timer);
+  clearInterval(REQUEST.markerTimer);
+  const card = document.querySelector('.card');
+  if (card) card.classList.add('stale');
+  const icon = document.getElementById('icon-container');
+  if (icon) icon.className = 'icon-wrap error';
+  const title = document.getElementById('title');
+  if (title) title.textContent = 'Unsigned request';
+  const verify = document.getElementById('verify-box');
+  if (verify) verify.style.display = 'none';
+  for (const id of ['bio-btn', 'go']) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = true;
+  }
+  for (const id of ['f', 'bio-section', 'ttl-box']) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  }
+  const desc = document.getElementById('desc');
+  if (desc) desc.textContent = 'This link was not signed by the runner, so it was refused. Nothing was unlocked.';
+  const line = document.getElementById('expiry-line');
+  if (line) {
+    line.className = 'expiry-line';
+    line.style.display = 'block';
+    line.textContent = 'refused';
+  }
+  show('unsigned request — refused. Nothing was sent and nothing was unlocked.', 'error');
+}
+
 async function pollExpiredMarker() {
   if (REQUEST.stale || !REQUEST.sid) return;
   let res;
   try {
-    res = await fetch(`${NTFY_BASE}/${encodeURIComponent(REQUEST.sid)}/json?poll=1`, { cache: 'no-store' });
+    // the signed descriptor travels with the poll too: the relay only answers
+    // a reader it can authenticate.
+    res = await fetch(`${NTFY_BASE}/${encodeURIComponent(REQUEST.sid)}/json?poll=1`, { cache: 'no-store', headers: descriptorHeaders() });
   } catch {
     REQUEST.relayDown = true;
     return;
@@ -614,15 +661,21 @@ function getParams() {
   const k = params.get('k') || (hash.match(/(?:^|&)k=([A-Za-z0-9_-]+)/) || [])[1];
   const sid = params.get('sid') || (hash.match(/(?:^|&)sid=([A-Za-z0-9_-]+)/) || [])[1];
   const code = params.get('code') || (hash.match(/(?:^|&)code=([0-9]+)/) || [])[1];
-  const host = params.get('host') || (hash.match(/(?:^|&)host=([^&]+)/) || [])[1];
-  const ctx = params.get('ctx') || (hash.match(/(?:^|&)ctx=([^&]+)/) || [])[1];
-  const agent = params.get('agent') || (hash.match(/(?:^|&)agent=([^&]+)/) || [])[1];
-  const model = params.get('model') || (hash.match(/(?:^|&)model=([^&]+)/) || [])[1];
+  const hostParam = params.get('host');
+  const hostRaw = (hash.match(/(?:^|&)host=([^&]+)/) || [])[1];
+  const ctxParam = params.get('ctx');
+  const ctxRaw = (hash.match(/(?:^|&)ctx=([^&]+)/) || [])[1];
+  const agentParam = params.get('agent');
+  const agentRaw = (hash.match(/(?:^|&)agent=([^&]+)/) || [])[1];
+  const modelParam = params.get('model');
+  const modelRaw = (hash.match(/(?:^|&)model=([^&]+)/) || [])[1];
+  const sig = params.get('sig') || (hash.match(/(?:^|&)sig=([A-Za-z0-9_-]+)/) || [])[1];
   const expRaw = params.get('exp') || (hash.match(/(?:^|&)exp=([0-9]+)/) || [])[1];
   const exp = expRaw ? Number(expRaw) : null;
   // URLSearchParams already percent-decodes, so only the raw-regex fallback
   // needs a manual decode - decoding twice would mangle a value that carries
-  // a literal percent sign.
+  // a literal percent sign, and the signed descriptor has to match the
+  // runner's byte for byte.
   const srvParam = params.get('srv');
   const srvRaw = (hash.match(/(?:^|&)srv=([^&]+)/) || [])[1];
   const srv = srvParam || (srvRaw ? decodeURIComponent(srvRaw) : null);
@@ -630,12 +683,71 @@ function getParams() {
     k,
     sid,
     code,
+    sig,
     exp: Number.isFinite(exp) && exp > 0 ? exp : null,
     srv: srv ? srv.replace(/\/+$/, '') : null,
-    host: host ? decodeURIComponent(host) : null,
-    ctx: ctx ? decodeURIComponent(ctx) : null,
-    agent: agent ? decodeURIComponent(agent) : null,
-    model: model ? decodeURIComponent(model) : null
+    host: hostParam !== null ? hostParam : (hostRaw ? decodeURIComponent(hostRaw) : null),
+    ctx: ctxParam !== null ? ctxParam : (ctxRaw ? decodeURIComponent(ctxRaw) : null),
+    agent: agentParam !== null ? agentParam : (agentRaw ? decodeURIComponent(agentRaw) : null),
+    model: modelParam !== null ? modelParam : (modelRaw ? decodeURIComponent(modelRaw) : null)
+  };
+}
+
+// The canonical descriptor: the exact set of facts the runner signed.
+//
+// BYTE EXACT - the runner builds the same string in
+// mainframe/vault-approval.psm1 (Get-VaultApprovalDescriptor) and signs it.
+// The order, the field names, the empty fields and the LF line ending all
+// matter.
+function buildDescriptor(p) {
+  return [
+    APPROVAL_DESCRIPTOR_VERSION,
+    `topic=${p.sid || ''}`,
+    `sid=${p.sid || ''}`,
+    `k=${p.k || ''}`,
+    `code=${p.code || ''}`,
+    `exp=${p.exp === null || p.exp === undefined ? '' : String(p.exp)}`,
+    `srv=${p.srv || ''}`,
+    `host=${p.host || ''}`,
+    `ctx=${p.ctx || ''}`,
+    `agent=${p.agent || ''}`,
+    `model=${p.model || ''}`
+  ].join('\n');
+}
+
+async function verifyDescriptor(descriptor, signature) {
+  if (!signature) return false;
+  let key;
+  try {
+    key = await crypto.subtle.importKey(
+      'spki',
+      b64ToBytes(APPROVAL_PUBLIC_KEY_B64URL),
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+  } catch {
+    return false;
+  }
+  try {
+    return await crypto.subtle.verify(
+      'RSASSA-PKCS1-v1_5',
+      key,
+      b64ToBytes(signature),
+      new TextEncoder().encode(descriptor)
+    );
+  } catch {
+    return false;
+  }
+}
+
+// the descriptor travels with every write to the relay, so the relay can
+// check that the message was really produced by the runner
+function descriptorHeaders() {
+  if (!REQUEST.descriptor || !REQUEST.signature) return {};
+  return {
+    'X-MF-Desc': bytesToB64(new TextEncoder().encode(REQUEST.descriptor)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+    'X-MF-Sig': REQUEST.signature
   };
 }
 
@@ -689,7 +801,7 @@ async function transmitCiphertext(b64, sid, is12h = false) {
     show('Transmitting encrypted password via relay...', 'waiting');
     const res = await fetch(`${NTFY_BASE}/${encodeURIComponent(sid)}`, {
       method: 'POST',
-      headers: { 'Title': is12h ? 'Vault Ciphertext (12h)' : 'Vault Ciphertext' },
+      headers: { 'Title': is12h ? 'Vault Ciphertext (12h)' : 'Vault Ciphertext', ...descriptorHeaders() },
       body: b64
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -790,8 +902,8 @@ window.addEventListener('hashchange', () => {
   location.reload();
 });
 
-document.addEventListener('DOMContentLoaded', () => {
-  const { k, sid, code, exp, srv, host, ctx, agent, model } = getParams();
+document.addEventListener('DOMContentLoaded', async () => {
+  const { k, sid, code, sig, exp, srv, host, ctx, agent, model } = getParams();
   if (srv) {
     NTFY_BASE = srv;
   }
@@ -800,6 +912,21 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('icon-container').className = 'icon-wrap error';
     return;
   }
+
+  // The signature check comes FIRST, before anything is shown and long before
+  // the password is asked for. A link that the runner did not sign is a
+  // forgery: it can name a different key (so the master password would be
+  // encrypted for somebody else) or a different topic (so the answer would
+  // be posted where somebody else reads it). Refusing here is what makes a
+  // leaked topic name worthless.
+  const descriptor = buildDescriptor({ k, sid, code, exp, srv, host, ctx, agent, model });
+  const signed = await verifyDescriptor(descriptor, sig);
+  if (!signed) {
+    refuseUnsigned();
+    return;
+  }
+  REQUEST.descriptor = descriptor;
+  REQUEST.signature = sig;
 
   if (code) {
     document.getElementById('verify-box').style.display = 'block';

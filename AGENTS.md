@@ -2224,6 +2224,82 @@ and post garbage that killed a live approval.
   that uses that same `pagesBase`. so: if the phone suddenly asks for the
   password, it is the origin that moved, not a broken relay.
 
+### the topic name is public, so the link is signed (2026-11-05)
+
+the ntfy.sh free tier **cannot protect a topic**. checked on 2026-11-05, against
+the real api, not the docs: `POST/GET/PUT/DELETE /v1/account/access` all answer
+`404 page not found`, `POST /v1/account/topic(s)` and `/v1/account/acl` answer 404
+too, and `/v1/account/reservation` exists but is Pro-only (400 "incorrect
+permission string"). adding the topic to the account (`POST
+/v1/account/subscription`, what the web app's "Topics" tab does) changes
+nothing: an anonymous client still reads it (200) and still writes to it (200).
+the token the account gets (`tk_...`) expires after **3 days**, and ntfy tokens
+are NOT topic-scoped.
+
+so: **the topic name has to be treated as PUBLIC.** a leaked name is a
+readable, writable channel - and the old flow let a reader of the topic do
+something much worse than read it:
+
+- the approval link fragment carried the RSA public key (`k`), the sid, the
+  code and the relay. whoever writes that fragment chooses `k`, so a forged
+  link made the CARD encrypt the master password for the attacker's key and
+  post it to the attacker's own topic. the page was same-origin (WebAuthn is
+  bound to the RP ID), so it looked completely normal on the phone.
+- the verification code was in the notification body, so an attacker who could
+  read the topic also knew the number the user was told to match.
+
+the fix does not depend on the topic name at all:
+
+- **the runner signs the approval descriptor.** `Get-VaultApprovalDescriptor`
+  builds the canonical string (`mf-vault-approval-v1` + topic/sid/k/code/exp/
+  srv/host/ctx/agent/model, LF separated, no trailing newline) and
+  `New-VaultApprovalDescriptorSignature` signs it with RSASSA-PKCS1-v1_5 over
+  SHA-256. `Get-VaultApprovalUrl` puts the signature in the fragment as `sig=`.
+  the key is a STABLE RSA-2048 pair (the one in the link is ephemeral, one per
+  request, and cannot be its own trust anchor).
+- **the page verifies it before it asks for anything.**
+  `docs/vault-tab.html` imports the baked-in public key with WebCrypto and
+  refuses the link (`refuseUnsigned()`) when the signature does not match the
+  descriptor it rebuilt from the fragment. the check happens BEFORE the
+  approve buttons are wired up, so a forged link never even asks for the
+  master password. `srv` is inside the signed descriptor on purpose -
+  otherwise the link could be pointed at somebody else's server.
+- **the relay enforces the same rule.** a publish must carry
+  `X-MF-Desc`/`X-MF-Sig` for THAT topic, or the relay answers 403 and nothing
+  reaches ntfy.sh. the relay also drops wake-up notifications the runner did
+  not sign, so a phone that reads through the relay cannot be shown a request
+  that was never made.
+- **the relay needs the credential.** `Get-VaultNtfyCredential` resolves
+  `-Token` -> `-Auth` -> `MAINFRAME_NTFY_AUTH` -> `ntfyAuth` in
+  `mainframe.config.json` -> `ntfyToken`. the value is the ntfy account's
+  basic auth (the token expires in 3 days, the password does not) and it is
+  also the relay's own lock: the relay compares the `Authorization` header
+  with `MF_RELAY_AUTH` and refuses everything else.
+- **the signing key lives in `mainframe.approval-signing.key`** (gitignored,
+  next to the config) and in the bitwarden vault as
+  `github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key`
+  (restore it with `automata-private\tools\env-sync.ps1 -Repo mainframe`).
+  a missing key THROWS with that restore command in the message - an unsigned
+  link would be refused by the phone, so shipping one is worse than stopping.
+  the public half is committed in `docs/vault-tab.html` and configured on the
+  relay as `MF_APPROVAL_PUBLIC_KEY`; all three have to match.
+- **the page url carries `?v=signed1`** so a phone that still has an OLD page
+  cached (one that does not check the signature) fetches the new one. bump
+  `$script:VaultApprovalPageVersion` whenever the page changes in a way that
+  matters for an already opened link.
+- tests: `tests/vault-approval-descriptor.Tests.ps1` (canonical descriptor,
+  tamper detection, the page's key matches the runner's, a missing key throws)
+  runs under windows powershell 5.1 AND pwsh 7. the relay side:
+  `test/relay-lock.test.mjs` and `test/page-signature.test.mjs` in
+  `automata-private\vercel.com\mainframe-vault-relay`.
+
+what is still open: the phone reads the wake-up topic on ntfy.sh directly, so
+somebody who knows the topic name can still push a FAKE notification to the
+phone (it cannot make the card sign anything - the card refuses a forged link
+- but it can point the victim at a page of their own). closing that needs the
+phone to read through an authenticated channel (the relay with a credential,
+or a self-hosted ntfy over tailscale with `auth-default-access: deny-all`).
+
 ### one phone prompt at a time (single-flight approval, 2026-11-02)
 
 several agents asking for the vault at the same moment each minted their own

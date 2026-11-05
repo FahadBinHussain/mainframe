@@ -299,6 +299,40 @@ function Get-VaultNtfyToken {
     return $null
 }
 
+function Get-VaultNtfyCredential {
+    <#
+    .SYNOPSIS
+        the Authorization header value for the approval channel.
+    .DESCRIPTION
+        Two shapes are supported, and both are plain header values:
+            "Bearer tk_..."   an ntfy access token
+            "Basic <base64>"  the ntfy account's user:password
+
+        The token on ntfy.sh expires after a few days, the password does not.
+        A machine that keeps this config for months wants the basic form.
+
+        Why it matters even though a free ntfy.sh topic cannot be protected:
+        the RELAY can be locked. The relay compares the Authorization header
+        with the credential it holds and refuses everything else, so knowing a
+        topic name is not enough to read the approval traffic or to post a
+        fake request through the relay.
+    #>
+    param(
+        [string]$Token = $null,
+        [string]$Auth = $null
+    )
+
+    if ($Token) { return "Bearer $($Token.Trim())" }
+    if ($Auth) { return $Auth.Trim() }
+    if ($env:MAINFRAME_NTFY_AUTH) { return $env:MAINFRAME_NTFY_AUTH.Trim() }
+    $configuredAuth = Get-VaultConfigValue -Key 'ntfyAuth'
+    if ($configuredAuth) { return ([string]$configuredAuth).Trim() }
+    if ($env:MAINFRAME_NTFY_TOKEN) { return "Bearer $($env:MAINFRAME_NTFY_TOKEN.Trim())" }
+    $configuredToken = Get-VaultConfigValue -Key 'ntfyToken'
+    if ($configuredToken) { return "Bearer $(([string]$configuredToken).Trim())" }
+    return $null
+}
+
 function Get-VaultPagesBase {
     param(
         [string]$PagesBase = $null,
@@ -433,6 +467,173 @@ function ConvertTo-SubjectPublicKeyInfo {
     return ,(ConvertTo-SubjectPublicKeyInfoManual -Rsa $Rsa)
 }
 
+# The approval descriptor: the exact set of facts the phone is asked to trust.
+#
+# The link fragment carries the RSA public key (k), the single-use topic (sid),
+# the verification code, the expiry and where the answer may be posted.
+# Whoever can write that fragment can also choose the key the master password
+# is encrypted to - so on its own the fragment is an attack, not an
+# authorisation.
+#
+# The runner signs the descriptor with a STABLE key and the approval page
+# verifies the signature against the public key that is baked into the page.
+# A forged fragment cannot be signed, so the page refuses it BEFORE it ever
+# asks for the master password. The topic name may leak; this does not depend
+# on it.
+$script:VaultApprovalDescriptorVersion = 'mf-vault-approval-v1'
+
+# the query on the approval page URL. it busts the browser cache, so a phone
+# that still has an OLD page cached (one that does not check the signature)
+# fetches the new one instead of using it. bump it whenever the page changes
+# in a way that matters for an already opened link.
+$script:VaultApprovalPageVersion = 'signed1'
+
+function Get-VaultApprovalSigningKeyPath {
+    param([string]$Path = $null)
+
+    if ($Path) { return $Path }
+    if ($env:MAINFRAME_APPROVAL_SIGNING_KEY) { return $env:MAINFRAME_APPROVAL_SIGNING_KEY }
+    $root = Get-MainframeCheckoutRoot
+    if ($root) { return (Join-Path $root 'mainframe.approval-signing.key') }
+    return $null
+}
+
+function Get-VaultApprovalSigningKey {
+    <#
+    .SYNOPSIS
+        the RSA private key that signs approval descriptors.
+    .DESCRIPTION
+        Throws when the key is missing. An unsigned approval link is refused
+        by the phone, so failing here is much better than shipping a link
+        that nobody can approve.
+    #>
+    param([string]$Path = $null)
+
+    $keyPath = Get-VaultApprovalSigningKeyPath -Path $Path
+    if (-not $keyPath) {
+        throw "no approval signing key path: set `$env:MAINFRAME_APPROVAL_SIGNING_KEY to the key file, or keep the mainframe checkout where mainframe.approval-signing.key sits next to mainframe.config.json. the key is kept in the bitwarden vault as github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key and is restored by C:\Users\Admin\Downloads\automata-private\tools\env-sync.ps1 -Repo mainframe."
+    }
+    if (-not (Test-Path -LiteralPath $keyPath)) {
+        throw "the approval signing key is missing: $keyPath. restore it from the bitwarden vault (github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key) with C:\Users\Admin\Downloads\automata-private\tools\env-sync.ps1 -Repo mainframe. without it no approval link can be signed and the phone will refuse every request."
+    }
+    $raw = Get-Content -LiteralPath $keyPath -Raw
+    try {
+        $key = $raw | ConvertFrom-Json
+    } catch {
+        throw "the approval signing key at $keyPath is not valid JSON: $($_.Exception.Message)"
+    }
+    foreach ($field in @('n', 'e', 'd', 'p', 'q', 'dp', 'dq', 'qi')) {
+        if (-not $key.$field) {
+            throw "the approval signing key at $keyPath has no '$field' field - it is not a mainframe approval key file"
+        }
+    }
+    $rsa = [System.Security.Cryptography.RSA]::Create()
+    try {
+        $rsa.ImportParameters([System.Security.Cryptography.RSAParameters]@{
+                Modulus  = [Convert]::FromBase64String($key.n)
+                Exponent = [Convert]::FromBase64String($key.e)
+                D        = [Convert]::FromBase64String($key.d)
+                P        = [Convert]::FromBase64String($key.p)
+                Q        = [Convert]::FromBase64String($key.q)
+                DP       = [Convert]::FromBase64String($key.dp)
+                DQ       = [Convert]::FromBase64String($key.dq)
+                InverseQ = [Convert]::FromBase64String($key.qi)
+            })
+    } catch {
+        $rsa.Dispose()
+        throw "the approval signing key at $keyPath could not be loaded: $($_.Exception.Message)"
+    }
+    return $rsa
+}
+
+function Get-VaultApprovalPublicKey {
+    <#
+    .SYNOPSIS
+        the signing public key as base64url SubjectPublicKeyInfo.
+    .DESCRIPTION
+        The same string is baked into the approval page and configured on the
+        relay. It is public by design - it verifies signatures, it does not
+        create them.
+    #>
+    param([string]$Path = $null)
+
+    $rsa = Get-VaultApprovalSigningKey -Path $Path
+    try {
+        $spki = ConvertTo-SubjectPublicKeyInfo -Rsa $rsa
+        return [Convert]::ToBase64String($spki).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+    } finally {
+        $rsa.Dispose()
+    }
+}
+
+function Get-VaultApprovalDescriptor {
+    <#
+    .SYNOPSIS
+        the canonical descriptor the runner signs and the phone verifies.
+    .DESCRIPTION
+        BYTE EXACT. The approval page rebuilds this string from the link
+        fragment and verifies the signature over it, so the order, the field
+        names, the empty fields and the line ending all matter. LF only, no
+        trailing newline.
+    #>
+    param(
+        [string]$Topic = '',
+        [string]$Sid = '',
+        [string]$Key = '',
+        [string]$Code = '',
+        [string]$ExpiresAt = '',
+        [string]$Server = '',
+        [string]$HostName = '',
+        [string]$Context = '',
+        [string]$Agent = '',
+        [string]$Model = ''
+    )
+
+    $lines = @(
+        $script:VaultApprovalDescriptorVersion
+        "topic=$Topic"
+        "sid=$Sid"
+        "k=$Key"
+        "code=$Code"
+        "exp=$ExpiresAt"
+        "srv=$Server"
+        "host=$HostName"
+        "ctx=$Context"
+        "agent=$Agent"
+        "model=$Model"
+    )
+    return ($lines -join "`n")
+}
+
+function New-VaultApprovalDescriptorSignature {
+    <#
+    .SYNOPSIS
+        sign an approval descriptor.
+    .DESCRIPTION
+        RSASSA-PKCS1-v1_5 over SHA-256. SignData with an explicit hash and
+        padding is the one signing call that behaves the same on windows
+        powershell 5.1 (RSACng) and pwsh 7 (RSABCrypt).
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Descriptor,
+        [System.Security.Cryptography.RSA]$Rsa = $null
+    )
+
+    $ownsKey = $false
+    if (-not $Rsa) {
+        $Rsa = Get-VaultApprovalSigningKey
+        $ownsKey = $true
+    }
+    try {
+        $data = [System.Text.Encoding]::UTF8.GetBytes($Descriptor)
+        $signature = $Rsa.SignData($data, [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        return [Convert]::ToBase64String($signature).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+    } finally {
+        if ($ownsKey) { $Rsa.Dispose() }
+    }
+}
+
 function Get-VaultApprovalUrl {
     param(
         [Parameter(Mandatory = $true)]
@@ -470,25 +671,46 @@ function Get-VaultApprovalUrl {
     $escapedHost = [Uri]::EscapeDataString($HostName)
     $escapedAgent = [Uri]::EscapeDataString($resolvedAgent)
     $modelParam = if ($resolvedModel) { "&model=" + [Uri]::EscapeDataString($resolvedModel) } else { "" }
-    $expParam = if ($ExpiresInSeconds -gt 0) { "&exp=" + [DateTimeOffset]::UtcNow.AddSeconds($ExpiresInSeconds).ToUnixTimeSeconds() } else { "" }
+    $expUnix = if ($ExpiresInSeconds -gt 0) { [DateTimeOffset]::UtcNow.AddSeconds($ExpiresInSeconds).ToUnixTimeSeconds() } else { $null }
+    $expParam = if ($null -ne $expUnix) { "&exp=$expUnix" } else { "" }
 
     $owner = ($ToolRepo -split '/')[0]
     $resolvedPages = Get-VaultPagesBase -PagesBase $PagesBase -ToolRepo $ToolRepo
     $resolvedRelay = Get-VaultNtfyServer -Server $Server
-    $url = "$resolvedPages/docs/vault-tab.html#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam$expParam"
+    # the relay hint is part of the signed descriptor on purpose: without it
+    # anybody could point the page at a server of their own and collect the
+    # encrypted master password there.
+    $descriptorServer = if ($resolvedRelay -ne 'https://ntfy.sh') { $resolvedRelay } else { '' }
+
+    # the descriptor the phone verifies. `topic` is the topic this descriptor
+    # authorises a write to - for the page that is the single-use sid topic.
+    $descriptor = Get-VaultApprovalDescriptor -Topic $sid -Sid $sid -Key $k -Code $code `
+        -ExpiresAt $(if ($null -ne $expUnix) { "$expUnix" } else { '' }) -Server $descriptorServer `
+        -HostName $HostName -Context $PromptContext -Agent $resolvedAgent -Model $resolvedModel
+    $signature = New-VaultApprovalDescriptorSignature -Descriptor $descriptor
+
+    $url = "$resolvedPages/docs/vault-tab.html?v=$script:VaultApprovalPageVersion#k=$k&sid=$sid&code=$code&host=$escapedHost&ctx=$escapedCtx&agent=$escapedAgent$modelParam$expParam"
     if ($resolvedRelay -ne 'https://ntfy.sh') {
         # the card has to post the ciphertext back to the same relay this
         # runner reads. without this the page would hardcode ntfy.sh and a
         # machine behind a relay would never see the approval land.
         $url += "&srv=$([Uri]::EscapeDataString($resolvedRelay))"
     }
+    # the signature travels in the fragment: it is what makes this link
+    # unforgeable, and the page checks it before it touches the password.
+    $url += "&sig=$signature"
 
     return [PSCustomObject]@{
-        Url   = $url
-        Sid   = $sid
-        Code  = $code
-        Agent = $resolvedAgent
-        Model = $resolvedModel
+        Url           = $url
+        Sid           = $sid
+        Code          = $code
+        Key           = $k
+        Agent         = $resolvedAgent
+        Model         = $resolvedModel
+        Descriptor    = $descriptor
+        Signature     = $signature
+        ExpiresAtUnix = $expUnix
+        Server        = $descriptorServer
     }
 }
 
@@ -505,6 +727,9 @@ function Send-VaultApprovalNotification {
         [string]$Model = $null,
         [string]$Server = $null,
         [string]$Token = $null,
+        [string]$Auth = $null,
+        [string]$Descriptor = $null,
+        [string]$Signature = $null,
         [switch]$NoToken
     )
 
@@ -512,7 +737,7 @@ function Send-VaultApprovalNotification {
     # -NoToken forces an anonymous publish, which is what a PUBLIC topic
     # needs. without it the credential comes from the config, because a
     # PROTECTED topic refuses an anonymous one.
-    $resolvedToken = if ($NoToken) { $null } else { Get-VaultNtfyToken -Token $Token }
+    $resolvedCredential = if ($NoToken) { $null } else { Get-VaultNtfyCredential -Token $Token -Auth $Auth }
     try {
         $callerTag = if ($Agent) { "$HostName - $Agent" } else { $HostName }
         $title = if ($Code) { "Vault Unlock: Code [$Code] ($callerTag)" } else { "Vault Unlock ($callerTag)" }
@@ -531,7 +756,14 @@ function Send-VaultApprovalNotification {
         # and the push is simply dropped - the phone never hears about the
         # request, so the runner would sit there until it times out with
         # nothing to explain the silence.
-        if ($resolvedToken) { $headers['Authorization'] = "Bearer $resolvedToken" }
+        if ($resolvedCredential) { $headers['Authorization'] = $resolvedCredential }
+        # The relay refuses any publish that is not signed by the runner. The
+        # descriptor says which topic the message may be written to, so a
+        # signature for one topic cannot be replayed onto another.
+        if ($Descriptor -and $Signature) {
+            $headers['X-MF-Desc'] = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Descriptor)).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+            $headers['X-MF-Sig'] = $Signature
+        }
         $bodyParts = @("Request from $HostName")
         if ($Agent) { $bodyParts += "Agent: $Agent" }
         if ($Model) { $bodyParts += "Model: $Model" }
@@ -563,7 +795,9 @@ function Send-VaultRequestExpired {
         [string]$Sid,
         [string]$HostName = $env:COMPUTERNAME,
         [string]$Code = $null,
-        [string]$Server = $null
+        [string]$Server = $null,
+        [string]$Descriptor = $null,
+        [string]$Signature = $null
     )
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
@@ -581,6 +815,14 @@ function Send-VaultRequestExpired {
             'Priority' = 'low'
             'Tags'     = 'hourglass'
             'Content-Type' = 'text/plain; charset=utf-8'
+        }
+        $expiredCredential = Get-VaultNtfyCredential
+        if ($expiredCredential) { $headers['Authorization'] = $expiredCredential }
+        # the marker rides the same signed channel as the ciphertext: the relay
+        # refuses anything that the runner did not sign.
+        if ($Descriptor -and $Signature) {
+            $headers['X-MF-Desc'] = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Descriptor)).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+            $headers['X-MF-Sig'] = $Signature
         }
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $null = Invoke-RestMethod -Uri "$resolvedServer/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
@@ -678,11 +920,16 @@ function Wait-VaultApprovalCiphertext {
 
         # 2. Poll relay topic
         try {
+            # the relay is locked: it only answers a reader that presents the
+            # credential, so the poll carries it.
+            $pollHeaders = @{}
+            $pollCredential = Get-VaultNtfyCredential
+            if ($pollCredential) { $pollHeaders['Authorization'] = $pollCredential }
             # Invoke-RestMethod parses a JSON body into an object, which turns
             # an expired marker into something no regex can recognise. the
             # webrequest content stays text, so markers and ciphertext look
             # the way they were posted.
-            $resp = Invoke-WebRequest -Uri "$resolvedServer/$Sid/raw?poll=1" -Method Get -TimeoutSec 5 -ErrorAction Stop
+            $resp = Invoke-WebRequest -Uri "$resolvedServer/$Sid/raw?poll=1" -Method Get -Headers $pollHeaders -TimeoutSec 5 -ErrorAction Stop
             $body = [string]$resp.Content
             if ($body) {
                 # raw returns every message on the topic, newline separated.
@@ -1175,6 +1422,13 @@ function Get-VaultMasterPassword {
         $code = $session.Code
         $resolvedAgent = $session.Agent
         $resolvedModel = $session.Model
+        # The wake-up push goes to the topic the phone listens on, the answer
+        # comes back to the single-use sid topic. Two different destinations,
+        # so two descriptors: each one names the topic it authorises.
+        $pushDescriptor = Get-VaultApprovalDescriptor -Topic $NtfyTopic -Sid $sid -Key $session.Key -Code $code `
+            -ExpiresAt $(if ($null -ne $session.ExpiresAtUnix) { "$($session.ExpiresAtUnix)" } else { '' }) -Server $session.Server `
+            -HostName $HostName -Context $PromptContext -Agent $resolvedAgent -Model $resolvedModel
+        $pushSignature = New-VaultApprovalDescriptorSignature -Descriptor $pushDescriptor
         $null = Set-VaultApprovalRequestDetails -Path $turn.Path -Token $turn.Token -Code $code -Sid $sid
 
         $callerDisplay = if ($resolvedModel) { "$resolvedAgent ($resolvedModel) @ $HostName" } else { "$resolvedAgent @ $HostName" }
@@ -1189,7 +1443,7 @@ function Get-VaultMasterPassword {
         Write-Host "approval url: $url" -ForegroundColor Gray
 
         if ($NtfyTopic) {
-            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel -Server $resolvedServer
+            $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel -Server $resolvedServer -Descriptor $pushDescriptor -Signature $pushSignature
             if ($sent) {
                 Write-Host "push notification sent to ntfy topic: $NtfyTopic" -ForegroundColor Green
             } else {
@@ -1206,7 +1460,7 @@ function Get-VaultMasterPassword {
         $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc -Rsa $rsa -Server $resolvedServer
 
         if ($ct -eq '__SESSION_ALREADY_UNLOCKED__') {
-            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer
+            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer -Descriptor $session.Descriptor -Signature $session.Signature
             return '__SESSION_ALREADY_UNLOCKED__'
         }
 
@@ -1235,7 +1489,7 @@ function Get-VaultMasterPassword {
             } catch {}
             return $pw
         } else {
-            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer
+            $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer -Descriptor $session.Descriptor -Signature $session.Signature
             Write-MainframeWarning "phone approval timed out after $TimeoutSeconds seconds."
             return $null
         }
@@ -1259,6 +1513,12 @@ Export-ModuleMember -Function `
     ConvertTo-SubjectPublicKeyInfo, `
     ConvertTo-SubjectPublicKeyInfoManual, `
     Get-VaultApprovalUrl, `
+    Get-VaultApprovalSigningKey, `
+    Get-VaultApprovalSigningKeyPath, `
+    Get-VaultApprovalPublicKey, `
+    Get-VaultApprovalDescriptor, `
+    New-VaultApprovalDescriptorSignature, `
+    Get-VaultNtfyCredential, `
     Send-VaultApprovalNotification, `
     Send-VaultRequestExpired, `
     Open-VaultApprovalOnPhone, `
