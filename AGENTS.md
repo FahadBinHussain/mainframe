@@ -2283,6 +2283,23 @@ the fix does not depend on the topic name at all:
   link would be refused by the phone, so shipping one is worse than stopping.
   the public half is committed in `docs/vault-tab.html` and configured on the
   relay as `MF_APPROVAL_PUBLIC_KEY`; all three have to match.
+- **linux gotcha (found 2026-11-07 on a fresh vm restore):**
+  `Get-MainframeCheckoutRoot` built its candidate list eagerly, so
+  `Join-Path $env:USERPROFILE ...` threw "cannot bind argument to parameter
+  'Path' because it is null" on linux (no USERPROFILE there) before the
+  `$HOME` candidates were ever tried. nothing on linux had called the
+  function before, so the signing-key lookup - its first linux caller -
+  was the first thing to hit it, and the cryptic bind error hid the real
+  "signing key is missing" message behind it. the USERPROFILE candidate is
+  now only added when the variable is set; `tests/mainframe-paths.Tests.ps1`
+  check 9 pins it.
+- **bootstrap gap (design in `docs/approval-signing-bootstrap.md`):** the
+  signing key's only homes are the vault and a checkout env-sync already
+  restored, so a brand-new machine cannot make its first signed approval
+  request - the key that unlocks the vault is inside the vault. windows
+  never notices (env-sync runs at setup, interactively); an agent-driven
+  linux box does. until the per-machine-key design in that doc lands, a
+  new machine needs the key file placed next to the config once, by hand.
 - **the page url carries `?v=signed1`** so a phone that still has an OLD page
   cached (one that does not check the signature) fetches the new one. bump
   `$script:VaultApprovalPageVersion` whenever the page changes in a way that
