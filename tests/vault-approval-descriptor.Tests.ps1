@@ -5,8 +5,10 @@
 #   - the approval descriptor is canonical (the runner and the phone have to
 #     build the same bytes, or every approval is refused)
 #   - a signature only covers the descriptor it was made for
-#   - the link carries the signature, and the page has the matching key
-#   - a missing signing key fails LOUDLY instead of shipping an unsigned link
+#   - the link carries the signature, and the page trusts the signing key
+#   - a configured-but-missing signing key fails LOUDLY instead of shipping
+#     an unsigned link, and a machine with no key at all mints its own pair
+#     and stops with the public key to register
 #   - the credential resolver picks the right shape
 $ErrorActionPreference = 'Stop'
 $module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../vault-approval.psm1'))
@@ -62,15 +64,19 @@ $emptyLines = $emptyDescriptor -split "`n"
 Assert-Equal 11 $emptyLines.Count 'the descriptor always has eleven lines'
 Assert-Equal 'model=' $emptyLines[10] 'a missing model is an empty field'
 
-# 3. the signing key loads and its public half is the one in the page
+# 3. the signing key loads and its public half is trusted by the page
+# (per-machine keys: the page carries a LIST, and this machine's key has to
+# be on it - on a machine whose key was generated but not registered yet
+# this check fails on purpose, with the key to register in the message from
+# the first Get-VaultApprovalSigningKey call)
 $publicKey = Get-VaultApprovalPublicKey
 Assert-True ($publicKey.Length -gt 300) 'the approval public key is a real SPKI'
 Assert-True ($publicKey -notmatch '[+/=]') 'the public key is base64url'
 
 $pageSource = Get-Content -LiteralPath $page -Raw
-$match = [regex]::Match($pageSource, "APPROVAL_PUBLIC_KEY_B64URL\s*=\s*'([A-Za-z0-9_-]+)'")
-Assert-True ($match.Success) 'the approval page carries a signing public key'
-Assert-Equal $publicKey $match.Groups[1].Value 'the page carries the SAME public key the runner signs with'
+$match = [regex]::Match($pageSource, "APPROVAL_PUBLIC_KEYS_B64URL\s*=\s*\[(?<body>[^\]]*)\]")
+Assert-True ($match.Success) 'the approval page carries a trusted signing key list'
+Assert-Contains $match.Groups['body'].Value $publicKey 'the page trust list carries the public key this machine signs with'
 
 # 4. a signature only covers the descriptor it was made for
 $signer = Get-VaultApprovalSigningKey
@@ -164,6 +170,50 @@ try {
     else { $env:MAINFRAME_NTFY_AUTH = $savedAuth }
     if ($null -eq $savedToken) { Remove-Item Env:\MAINFRAME_NTFY_TOKEN -ErrorAction SilentlyContinue }
     else { $env:MAINFRAME_NTFY_TOKEN = $savedToken }
+}
+
+# 8. a machine with no key provisioned mints its own pair instead of
+# demanding a copy from somewhere else - and stops with the key to register
+$savedHome2 = $env:MAINFRAME_HOME
+$savedKeyEnv2 = $env:MAINFRAME_APPROVAL_SIGNING_KEY
+$tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ('mf-signing-test-' + [Guid]::NewGuid().ToString('n'))
+try {
+    Remove-Item Env:\MAINFRAME_APPROVAL_SIGNING_KEY -ErrorAction SilentlyContinue
+    $env:MAINFRAME_HOME = $tmpRoot
+    $genMessage = ''
+    try {
+        $null = Get-VaultApprovalSigningKey
+    } catch {
+        $genMessage = $_.Exception.Message
+    }
+    Assert-True ($genMessage -ne '') 'a keyless machine stops on its first run'
+    Assert-Contains $genMessage 'generated' 'the stop says a key was generated for this machine'
+    $genKeyPath = Join-Path $tmpRoot 'mainframe.approval-signing.key'
+    Assert-True (Test-Path -LiteralPath $genKeyPath) 'the generated key was written at the resolved key path'
+    $pubMatch = [regex]::Match($genMessage, '([A-Za-z0-9_-]{300,})')
+    Assert-True ($pubMatch.Success) 'the stop message carries the public key to register'
+
+    $genSigner = Get-VaultApprovalSigningKey
+    try {
+        Assert-Equal $pubMatch.Groups[1].Value (Get-VaultApprovalPublicKey) 'the registered string is the generated key itself'
+        $genSig = New-VaultApprovalDescriptorSignature -Descriptor $descriptor -Rsa $genSigner
+        $genSigBytes = [Convert]::FromBase64String($genSig.Replace('-', '+').Replace('_', '/') + ('=' * ((4 - ($genSig.Length % 4)) % 4)))
+        $genOk = $genSigner.VerifyData(
+            [System.Text.Encoding]::UTF8.GetBytes($descriptor),
+            $genSigBytes,
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+            [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+        )
+        Assert-True $genOk 'the generated key signs and verifies'
+    } finally {
+        $genSigner.Dispose()
+    }
+} finally {
+    if ($null -eq $savedHome2) { Remove-Item Env:\MAINFRAME_HOME -ErrorAction SilentlyContinue }
+    else { $env:MAINFRAME_HOME = $savedHome2 }
+    if ($null -eq $savedKeyEnv2) { Remove-Item Env:\MAINFRAME_APPROVAL_SIGNING_KEY -ErrorAction SilentlyContinue }
+    else { $env:MAINFRAME_APPROVAL_SIGNING_KEY = $savedKeyEnv2 }
+    Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "approval descriptor checks: $script:checks passed"
