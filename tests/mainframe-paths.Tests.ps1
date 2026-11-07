@@ -77,6 +77,26 @@ try {
     [Environment]::SetEnvironmentVariable('MAINFRAME_HOME', '/opt/mainframe')
     Assert-Equal '/opt/mainframe' (Get-MainframeCheckoutRoot) 'MAINFRAME_HOME wins for the checkout root'
     [Environment]::SetEnvironmentVariable('MAINFRAME_HOME', $null)
+
+    # 9. no USERPROFILE (a linux box has none): the lookup must not die
+    # building its candidate list. regression - the list was built eagerly,
+    # so Join-Path on the empty USERPROFILE threw before the $HOME
+    # candidates were ever tried, and the approval-signing key lookup (the
+    # first linux caller of this function) crashed on exactly that.
+    $savedUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE')
+    try {
+        [Environment]::SetEnvironmentVariable('USERPROFILE', $null)
+        $expectedCheckout = Join-Path $HOME 'Downloads/mainframe'
+        if (Test-Path (Join-Path $expectedCheckout 'vault-secret.psm1')) {
+            Assert-Equal $expectedCheckout (Get-MainframeCheckoutRoot) `
+                'checkout root resolves through $HOME with no USERPROFILE'
+        } else {
+            $null = Get-MainframeCheckoutRoot
+            Assert-True $true 'checkout root lookup survives a missing USERPROFILE'
+        }
+    } finally {
+        [Environment]::SetEnvironmentVariable('USERPROFILE', $savedUserProfile)
+    }
 } finally {
     Restore-Env
 }
