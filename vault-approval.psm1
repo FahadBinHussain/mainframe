@@ -486,7 +486,7 @@ $script:VaultApprovalDescriptorVersion = 'mf-vault-approval-v1'
 # that still has an OLD page cached (one that does not check the signature)
 # fetches the new one instead of using it. bump it whenever the page changes
 # in a way that matters for an already opened link.
-$script:VaultApprovalPageVersion = 'signed1'
+$script:VaultApprovalPageVersion = 'signed2'
 
 function Get-VaultApprovalSigningKeyPath {
     param([string]$Path = $null)
@@ -498,14 +498,72 @@ function Get-VaultApprovalSigningKeyPath {
     return $null
 }
 
+function New-VaultApprovalSigningKeyFile {
+    <#
+    .SYNOPSIS
+        mint this machine's own approval signing key and write it to -Path.
+    .DESCRIPTION
+        RSA-2048, exported in the same JSON shape the loader reads
+        (n/e/d/p/q/dp/dq/qi, base64). Returns the public half as base64url
+        SubjectPublicKeyInfo - the string that gets registered in the
+        approval page's trusted list and on the relay.
+
+        A machine generates its key exactly once, on its first approval
+        request; after that the file just loads. The private half never
+        leaves the machine - it is not copied out of the vault or off
+        another box, which is the whole point of the per-machine design
+        in docs/approval-signing-bootstrap.md.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+    try {
+        $p = $rsa.ExportParameters($true)
+        $key = [ordered]@{
+            n  = [Convert]::ToBase64String($p.Modulus)
+            e  = [Convert]::ToBase64String($p.Exponent)
+            d  = [Convert]::ToBase64String($p.D)
+            p  = [Convert]::ToBase64String($p.P)
+            q  = [Convert]::ToBase64String($p.Q)
+            dp = [Convert]::ToBase64String($p.DP)
+            dq = [Convert]::ToBase64String($p.DQ)
+            qi = [Convert]::ToBase64String($p.InverseQ)
+        }
+        $dir = Split-Path -Parent $Path
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        [IO.File]::WriteAllText($Path, ($key | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
+        try {
+            if ([Environment]::OSVersion.Platform -eq [PlatformID]::Unix) { & chmod 600 $Path | Out-Null }
+        } catch { }
+        $spki = ConvertTo-SubjectPublicKeyInfo -Rsa $rsa
+        return [Convert]::ToBase64String($spki).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+    } finally {
+        $rsa.Dispose()
+    }
+}
+
 function Get-VaultApprovalSigningKey {
     <#
     .SYNOPSIS
         the RSA private key that signs approval descriptors.
     .DESCRIPTION
-        Throws when the key is missing. An unsigned approval link is refused
-        by the phone, so failing here is much better than shipping a link
-        that nobody can approve.
+        Each machine signs with its OWN key. When no key was provisioned
+        for this machine and none is configured, the first call mints a
+        pair (New-VaultApprovalSigningKeyFile) and stops with the public
+        half to register - the new key signs nothing the phone trusts
+        until then, which is the correct state for a box nobody has
+        vouched for yet.
+
+        An explicitly configured key (-Path, or
+        $env:MAINFRAME_APPROVAL_SIGNING_KEY) that is missing still throws
+        the restore message: that is a broken restore, not a first run.
+        An unsigned approval link is refused by the phone, so failing
+        here is much better than shipping a link nobody can approve.
     #>
     param([string]$Path = $null)
 
@@ -514,7 +572,11 @@ function Get-VaultApprovalSigningKey {
         throw "no approval signing key path: set `$env:MAINFRAME_APPROVAL_SIGNING_KEY to the key file, or keep the mainframe checkout where mainframe.approval-signing.key sits next to mainframe.config.json. the key is kept in the bitwarden vault as github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key and is restored by C:\Users\Admin\Downloads\automata-private\tools\env-sync.ps1 -Repo mainframe."
     }
     if (-not (Test-Path -LiteralPath $keyPath)) {
-        throw "the approval signing key is missing: $keyPath. restore it from the bitwarden vault (github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key) with C:\Users\Admin\Downloads\automata-private\tools\env-sync.ps1 -Repo mainframe. without it no approval link can be signed and the phone will refuse every request."
+        if ($Path -or $env:MAINFRAME_APPROVAL_SIGNING_KEY) {
+            throw "the approval signing key is missing: $keyPath. restore it from the bitwarden vault (github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key) with C:\Users\Admin\Downloads\automata-private\tools\env-sync.ps1 -Repo mainframe. without it no approval link can be signed and the phone will refuse every request."
+        }
+        $publicKey = New-VaultApprovalSigningKeyFile -Path $keyPath
+        throw "a new approval signing key was generated for this machine at $keyPath, and it is not registered yet - the phone will refuse this machine until it is. register the public key, then run again: add '$publicKey' to APPROVAL_PUBLIC_KEYS_B64URL in docs/vault-tab.html (mainframe repo) and to the relay's MF_APPROVAL_PUBLIC_KEY list, then redeploy the relay. the design is docs/approval-signing-bootstrap.md."
     }
     $raw = Get-Content -LiteralPath $keyPath -Raw
     try {
@@ -551,9 +613,9 @@ function Get-VaultApprovalPublicKey {
     .SYNOPSIS
         the signing public key as base64url SubjectPublicKeyInfo.
     .DESCRIPTION
-        The same string is baked into the approval page and configured on the
-        relay. It is public by design - it verifies signatures, it does not
-        create them.
+        The same string sits in the approval page's trusted-key list and on
+        the relay's list. It is public by design - it verifies signatures,
+        it does not create them.
     #>
     param([string]$Path = $null)
 
@@ -1514,6 +1576,7 @@ Export-ModuleMember -Function `
     ConvertTo-SubjectPublicKeyInfoManual, `
     Get-VaultApprovalUrl, `
     Get-VaultApprovalSigningKey, `
+    New-VaultApprovalSigningKeyFile, `
     Get-VaultApprovalSigningKeyPath, `
     Get-VaultApprovalPublicKey, `
     Get-VaultApprovalDescriptor, `
