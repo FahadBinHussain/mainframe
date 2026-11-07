@@ -69,12 +69,11 @@ function Get-MainframeCheckoutRoot {
         locations are searched. $null means "not found" - never a guess.
     #>
     if ($env:MAINFRAME_HOME) { return $env:MAINFRAME_HOME }
-    $candidates = @(
-        (Join-Path $env:USERPROFILE 'Downloads\mainframe')
-        (Join-Path $HOME 'Downloads\mainframe')
-        (Join-Path $HOME 'Downloads/mainframe')
-        (Join-Path $HOME '.local/share/mainframe')
-    )
+    $candidates = @()
+    if ($env:USERPROFILE) { $candidates += (Join-Path $env:USERPROFILE 'Downloads\mainframe') }
+    $candidates += (Join-Path $HOME 'Downloads\mainframe')
+    $candidates += (Join-Path $HOME 'Downloads/mainframe')
+    $candidates += (Join-Path $HOME '.local/share/mainframe')
     foreach ($candidate in $candidates) {
         if (-not $candidate) { continue }
         if (Test-Path -LiteralPath (Join-Path $candidate 'vault-secret.psm1')) { return $candidate }
