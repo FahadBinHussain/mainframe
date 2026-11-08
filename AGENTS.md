@@ -2317,6 +2317,7 @@ the fix does not depend on the topic name at all:
   runs under windows powershell 5.1 AND pwsh 7. the relay side:
   `test/relay-lock.test.mjs` and `test/page-signature.test.mjs` in
   `automata-private\vercel.com\mainframe-vault-relay`.
+- **sid topic polling carries signed descriptor (2026-11-08)**: on a fresh restore with no `ntfyAuth`, anonymous GET on `/ntfy/<sid>/raw` returned 403 on the relay. `Wait-VaultApprovalCiphertext` now takes `$Descriptor` and `$Signature` and passes them as `X-MF-Desc` / `X-MF-Sig` headers so polling succeeds without pre-provisioned credentials.
 
 what is still open: nothing about the master password - a leaked topic name
 buys an attacker nothing there. the phone now reads the wake-up topic
