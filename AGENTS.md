@@ -2275,14 +2275,24 @@ the fix does not depend on the topic name at all:
   basic auth (the token expires in 3 days, the password does not) and it is
   also the relay's own lock: the relay compares the `Authorization` header
   with `MF_RELAY_AUTH` and refuses everything else.
-- **the signing key lives in `mainframe.approval-signing.key`** (gitignored,
-  next to the config) and in the bitwarden vault as
-  `github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key`
-  (restore it with `automata-private\tools\env-sync.ps1 -Repo mainframe`).
-  a missing key THROWS with that restore command in the message - an unsigned
-  link would be refused by the phone, so shipping one is worse than stopping.
-  the public half is committed in `docs/vault-tab.html` and configured on the
-  relay as `MF_APPROVAL_PUBLIC_KEY`; all three have to match.
+- **each machine signs with its own key.** the first approval request on a
+  machine mints its pair (`New-VaultApprovalSigningKeyFile`) into
+  `mainframe.approval-signing.key` (gitignored, next to the config) and
+  stops with the public half to register; after that the file just loads.
+  registering = the public half goes into the page's
+  `APPROVAL_PUBLIC_KEYS_B64URL` list (`docs/vault-tab.html`) and the relay's
+  `MF_APPROVAL_PUBLIC_KEY` list, then the relay is redeployed (it serves
+  the page - `sync-page.ps1` refreshes its copy). revoking a machine =
+  removing its line in both places. an explicitly configured key (`-Path` /
+  `MAINFRAME_APPROVAL_SIGNING_KEY`) that is missing still THROWS the
+  vault-restore message - that is a broken restore, not a first run. the
+  original shared key (in the vault as
+  `github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key`,
+  restorable with `automata-private\tools\env-sync.ps1 -Repo mainframe`)
+  stays registered as the first list entry, so the windows box that created
+  it is untouched; treat the vault copy as that machine's backup. an
+  unsigned link would be refused by the phone, so shipping one is worse
+  than stopping.
 - **linux gotcha (found 2026-11-07 on a fresh vm restore):**
   `Get-MainframeCheckoutRoot` built its candidate list eagerly, so
   `Join-Path $env:USERPROFILE ...` threw "cannot bind argument to parameter
@@ -2293,13 +2303,11 @@ the fix does not depend on the topic name at all:
   "signing key is missing" message behind it. the USERPROFILE candidate is
   now only added when the variable is set; `tests/mainframe-paths.Tests.ps1`
   check 9 pins it.
-- **bootstrap gap (design in `docs/approval-signing-bootstrap.md`):** the
-  signing key's only homes are the vault and a checkout env-sync already
-  restored, so a brand-new machine cannot make its first signed approval
-  request - the key that unlocks the vault is inside the vault. windows
-  never notices (env-sync runs at setup, interactively); an agent-driven
-  linux box does. until the per-machine-key design in that doc lands, a
-  new machine needs the key file placed next to the config once, by hand.
+- **bootstrap (was a gap, closed by the per-machine design above):** a
+  brand-new machine no longer needs a key file placed by hand - it mints
+  its own pair on first use, and only its PUBLIC half travels, as a
+  registration commit plus a relay redeploy. the full design and the
+  registration steps are in `docs/approval-signing-bootstrap.md`.
 - **the page url carries `?v=signed1`** so a phone that still has an OLD page
   cached (one that does not check the signature) fetches the new one. bump
   `$script:VaultApprovalPageVersion` whenever the page changes in a way that

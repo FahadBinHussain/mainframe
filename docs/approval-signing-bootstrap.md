@@ -1,8 +1,9 @@
 # approval signing key bootstrap
 
-design only for now - no code in this change beyond the linux
-checkout-root fix that ships with it. this is the design to build
-against.
+implemented - the module and the page landed together; this doc is the
+record of the design and of the registration steps for a new machine.
+the one companion piece outside this repo is the relay's key list,
+covered under implementation status at the end.
 
 ## the problem
 
@@ -116,6 +117,38 @@ keeps the blast radius.
   key signs and verifies, a second key on the list verifies, an
   unlisted key does not. relay tests in automata-private for the
   multi-key publish check.
+
+## implementation status
+
+- `vault-approval.psm1` - done. `Get-VaultApprovalSigningKey` mints the
+  pair via `New-VaultApprovalSigningKeyFile` when nothing was
+  provisioned or configured, writes it at the resolved key path (mode
+  600 on unix), and stops with the public key and the registration
+  steps in the message. An explicitly configured key that is missing
+  still throws the vault-restore message. The approval page version
+  bumped to `signed2`, because the page's verification changed.
+- `docs/vault-tab.html` - done. `APPROVAL_PUBLIC_KEYS_B64URL` is a list
+  and `verifyDescriptor` tries each key. The first entry is the
+  original shared key (the windows machine); the second is the linux
+  vm that found the bootstrap gap, registered by the same change that
+  implemented all of this.
+- tests - `tests/vault-approval-descriptor.Tests.ps1`: check 3 now
+  asserts this machine's key is IN the page list (it fails on purpose
+  on a generated-but-unregistered machine), and check 8 pins the
+  mint-and-stop behaviour hermetically.
+- the relay - companion change, in the relay's own repo and deploy
+  flow: `MF_APPROVAL_PUBLIC_KEY` is read as a comma-separated list of
+  SPKI strings, and `public/docs/vault-tab.html` is refreshed with
+  `sync-page.ps1` before the redeploy, so the served page carries the
+  same list as this repo. Until that redeploy lands, the relay still
+  trusts only the original key - a new machine can be refused by the
+  relay even though the page would accept it, so register and redeploy
+  before a new machine's first real request.
+
+registration for a new machine, end to end: run any vault request once
+(it stops with the public key) -> add the key to the page list here and
+to `MF_APPROVAL_PUBLIC_KEY` on the relay -> sync the page copy and
+redeploy the relay -> run again. No private key ever moves.
 
 ## not changing
 
