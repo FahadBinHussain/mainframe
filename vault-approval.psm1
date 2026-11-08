@@ -957,7 +957,9 @@ function Wait-VaultApprovalCiphertext {
         [string]$LocalFileName = 'mainframe-vault-pass.enc',
         [DateTime]$StartTimeUtc = [DateTime]::MinValue,
         [System.Security.Cryptography.RSA]$Rsa = $null,
-        [string]$Server = $null
+        [string]$Server = $null,
+        [string]$Descriptor = $null,
+        [string]$Signature = $null
     )
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
@@ -987,6 +989,10 @@ function Wait-VaultApprovalCiphertext {
             $pollHeaders = @{}
             $pollCredential = Get-VaultNtfyCredential
             if ($pollCredential) { $pollHeaders['Authorization'] = $pollCredential }
+            if ($Descriptor -and $Signature) {
+                $pollHeaders['X-MF-Desc'] = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Descriptor)).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+                $pollHeaders['X-MF-Sig'] = $Signature
+            }
             # Invoke-RestMethod parses a JSON body into an object, which turns
             # an expired marker into something no regex can recognise. the
             # webrequest content stays text, so markers and ciphertext look
@@ -1519,7 +1525,7 @@ function Get-VaultMasterPassword {
         $opened = Open-VaultApprovalOnPhone -Url $url
 
         Write-Host "waiting for 1-tap fingerprint approval on phone (or ~/Downloads/mainframe-vault-pass.enc) ..." -ForegroundColor Yellow
-        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc -Rsa $rsa -Server $resolvedServer
+        $ct = Wait-VaultApprovalCiphertext -Sid $sid -TimeoutSeconds $TimeoutSeconds -StartTimeUtc $StartTimeUtc -Rsa $rsa -Server $resolvedServer -Descriptor $session.Descriptor -Signature $session.Signature
 
         if ($ct -eq '__SESSION_ALREADY_UNLOCKED__') {
             $null = Send-VaultRequestExpired -Sid $sid -HostName $HostName -Code $code -Server $resolvedServer -Descriptor $session.Descriptor -Signature $session.Signature
