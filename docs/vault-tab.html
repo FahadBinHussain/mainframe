@@ -490,16 +490,24 @@ function show(text, type='') {
 let NTFY_BASE = 'https://ntfy.sh';
 const REQUEST = { expiresAt: null, sid: null, host: null, stale: false, timer: null, markerTimer: null, relayDown: false, descriptor: null, signature: null };
 
-// The runner signs every approval link with a stable key. The public half is
-// baked in here, so a link that was NOT signed by the runner - a forged one
-// from somebody who knows the topic name - is refused BEFORE the page asks
-// for the master password.
+// Every runner signs its approval links with its own machine's stable key.
+// The public halves of all registered machines are listed here, so a link
+// that was NOT signed by a registered machine - a forged one from somebody
+// who knows the topic name - is refused BEFORE the page asks for the master
+// password.
 //
 // The topic name may leak. This is what does not depend on it.
 //
-// Keep this in sync with mainframe/vault-approval.psm1
-// (Get-VaultApprovalPublicKey) and with the relay's MF_APPROVAL_PUBLIC_KEY.
-const APPROVAL_PUBLIC_KEY_B64URL = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm4zB0bbXPMpvvZqbSvF36u2frwOSt_p4uQBLIohCQwYj20LpHDekmjMGGQEoArBLOSLvlQj7QYwkBHnzDibpDJC9QABUiNfup2ji-GEzO0iOVA35qdaIa1vCjmHM7-010Ta1AT6foS9wlrQrltCl3dysJmBrBvZCs99dwZyUPH5d0oGwoc0NNVaQTGq-sTnLyJLofYw57bNkiy2nPW5flaUg2wJY4phrSUjvZkr0ubnIf1W3abrfXZBmPabtmnuFWED3H2SVB6GyD8v_Hira_5Zvs8njO3xXhedhsAyzzD3PTmwoNm-cYyOFvn2Wy_Jy70CIpv99fbQLN13P4QkPjQIDAQAB';
+// Registering a machine = adding its public key to this list (the runner
+// prints it when it generates its key) and to the relay's
+// MF_APPROVAL_PUBLIC_KEY list, then redeploying the relay (the relay serves
+// this page - sync-page.ps1 refreshes its copy). Revoking a machine =
+// removing its line here and on the relay. Keep the list in sync with
+// mainframe/vault-approval.psm1 (Get-VaultApprovalPublicKey).
+const APPROVAL_PUBLIC_KEYS_B64URL = [
+  'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm4zB0bbXPMpvvZqbSvF36u2frwOSt_p4uQBLIohCQwYj20LpHDekmjMGGQEoArBLOSLvlQj7QYwkBHnzDibpDJC9QABUiNfup2ji-GEzO0iOVA35qdaIa1vCjmHM7-010Ta1AT6foS9wlrQrltCl3dysJmBrBvZCs99dwZyUPH5d0oGwoc0NNVaQTGq-sTnLyJLofYw57bNkiy2nPW5flaUg2wJY4phrSUjvZkr0ubnIf1W3abrfXZBmPabtmnuFWED3H2SVB6GyD8v_Hira_5Zvs8njO3xXhedhsAyzzD3PTmwoNm-cYyOFvn2Wy_Jy70CIpv99fbQLN13P4QkPjQIDAQAB',
+  'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnNzaFSfFjeGSfEt6d5ZPJd1SNnpn0GcZkLTsW4LcQegxpASb042x1XZK1sP_2zdcwphDGHlbmzZYyPNDrxOMn4UtEEHWejKejkrf80CLNvAFTq5mYQcxNBzsoTGfZ9zABt-9Vs2CzJDmHEXvAeYsVd6valKv-VO7TbiyKn4MkGzMtxpnHwlTSP7Th8fBk0XbQfcyXA_TY9QnfKH2pKnD7a2wqBw2WoUUQCVji8yv9W8dkSVx7baLdxJyz7iTmvMF3asRJxRf3oEjDhVgS8i2Jo44sldi-jF5JMlOLvEvCsiMgJbp9nXPr4IEDWrhl8Ie5rMUqIWCXqVgMGoz21gTEQIDAQAB'
+];
 const APPROVAL_DESCRIPTOR_VERSION = 'mf-vault-approval-v1';
 
 function fmtLeft(ms) {
@@ -717,28 +725,28 @@ function buildDescriptor(p) {
 
 async function verifyDescriptor(descriptor, signature) {
   if (!signature) return false;
-  let key;
-  try {
-    key = await crypto.subtle.importKey(
-      'spki',
-      b64ToBytes(APPROVAL_PUBLIC_KEY_B64URL),
-      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-      false,
-      ['verify']
-    );
-  } catch {
-    return false;
+  const data = new TextEncoder().encode(descriptor);
+  const sigBytes = b64ToBytes(signature);
+  for (const encoded of APPROVAL_PUBLIC_KEYS_B64URL) {
+    let key;
+    try {
+      key = await crypto.subtle.importKey(
+        'spki',
+        b64ToBytes(encoded),
+        { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+        false,
+        ['verify']
+      );
+    } catch {
+      continue;
+    }
+    try {
+      if (await crypto.subtle.verify('RSASSA-PKCS1-v1_5', key, sigBytes, data)) return true;
+    } catch {
+      // not this machine's key - try the next one
+    }
   }
-  try {
-    return await crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5',
-      key,
-      b64ToBytes(signature),
-      new TextEncoder().encode(descriptor)
-    );
-  } catch {
-    return false;
-  }
+  return false;
 }
 
 // the descriptor travels with every write to the relay, so the relay can
