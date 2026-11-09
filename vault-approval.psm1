@@ -178,22 +178,15 @@ function Get-CallerIdentity {
             $appData = if ($env:ANTIGRAVITY_APP_DATA_DIR) { $env:ANTIGRAVITY_APP_DATA_DIR } else { (Join-Path $HOME '.gemini\antigravity') }
             $transcript = Join-Path $appData "brain\$($env:ANTIGRAVITY_CONVERSATION_ID)\.system_generated\logs\transcript.jsonl"
             if (Test-Path -LiteralPath $transcript) {
-                # Check recent lines first for any mid-thread model switches
-                $recent = Get-Content -LiteralPath $transcript -Tail 100 -ErrorAction SilentlyContinue
-                if ($recent) {
-                    $matches = @($recent | Select-String -Pattern "Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need")
+                # Scan transcript for user model settings changes across the conversation.
+                # Only match USER_INPUT entries so tool outputs or agent responses echoing
+                # the prompt pattern do not get falsely picked as model switches.
+                $userLines = @(Get-Content -LiteralPath $transcript -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match '"type"\s*:\s*"USER_INPUT"' -and $_ -match 'Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need' })
+                if ($userLines.Count -gt 0) {
+                    $matches = @($userLines | Select-String -Pattern "Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need")
                     if ($matches.Count -gt 0) {
                         $Model = $matches[-1].Matches[0].Groups[1].Value.Trim()
-                    }
-                }
-                # Check initial lines (Step 0) if no recent change
-                if (-not $Model) {
-                    $head = Get-Content -LiteralPath $transcript -TotalCount 50 -ErrorAction SilentlyContinue
-                    if ($head) {
-                        $matches = @($head | Select-String -Pattern "Model Selection.*?from\s+.*?\s+to\s+(.+?)\.\s+No need")
-                        if ($matches.Count -gt 0) {
-                            $Model = $matches[-1].Matches[0].Groups[1].Value.Trim()
-                        }
                     }
                 }
             }

@@ -128,4 +128,43 @@ $mine = Get-CallerIdentity
 Assert-True ($mine.Agent -in @('minimax-code', 'browser', 'terminal', 'opencode', 'claude-code', 'codex', 'antigravity', 'qoder', 'aider', 'cursor', 'windsurf')) `
     'the resolved agent is one of the known labels'
 
+# 14. antigravity mid-thread model switches are detected even in long transcripts (>150 lines)
+$fakeConvoId = "mf-test-convo-$([Guid]::NewGuid().ToString('N'))"
+$fakeAppDir = Join-Path ([IO.Path]::GetTempPath()) "antigravity-$fakeConvoId"
+$fakeLogsDir = Join-Path $fakeAppDir "brain\$fakeConvoId\.system_generated\logs"
+New-Item -ItemType Directory -Force -Path $fakeLogsDir | Out-Null
+$fakeTranscript = Join-Path $fakeLogsDir "transcript.jsonl"
+
+$lines = [System.Collections.Generic.List[string]]::new()
+# Line 1: step 0 model selection
+$lines.Add('{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.8 Flash (Medium). No need to comment on this change if the user doesn''t ask about it.\n</USER_SETTINGS_CHANGE>"}')
+# Lines 2 to 74: fillers
+for ($i = 1; $i -lt 74; $i++) {
+    $lines.Add(('{"step_index":' + $i + ',"source":"MODEL","type":"PLANNER_RESPONSE","content":"filler"}'))
+}
+# Line 75: user switches model mid-thread
+$lines.Add('{"step_index":74,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Gemini 3.8 Flash (Medium) to Gemini 3.8 Flash (High). No need to comment on this change if the user doesn''t ask about it.\n</USER_SETTINGS_CHANGE>"}')
+# Lines 76 to 200: fillers (total > 200 lines, so line 75 is outside tail 100 and head 50)
+for ($i = 75; $i -lt 200; $i++) {
+    $lines.Add(('{"step_index":' + $i + ',"source":"MODEL","type":"PLANNER_RESPONSE","content":"filler"}'))
+}
+# Step 201: tool output echoing old model pattern - must NOT be picked
+$lines.Add('{"step_index":200,"source":"MODEL","type":"GENERIC","content":"echoed output: The user changed setting `Model Selection` from None to Gemini 3.8 Flash (Medium). No need to comment"}')
+
+[IO.File]::WriteAllLines($fakeTranscript, $lines)
+
+$savedConvo = $env:ANTIGRAVITY_CONVERSATION_ID
+$savedAppDir = $env:ANTIGRAVITY_APP_DATA_DIR
+try {
+    $env:ANTIGRAVITY_CONVERSATION_ID = $fakeConvoId
+    $env:ANTIGRAVITY_APP_DATA_DIR = $fakeAppDir
+    $identity = Get-CallerIdentity -Agent 'antigravity'
+    Assert-Equal 'antigravity' $identity.Agent 'antigravity agent is identified'
+    Assert-Equal 'Gemini 3.8 Flash (High)' $identity.Model 'latest mid-thread model switch is picked across full transcript'
+} finally {
+    if ($null -eq $savedConvo) { Remove-Item Env:\ANTIGRAVITY_CONVERSATION_ID -ErrorAction SilentlyContinue } else { $env:ANTIGRAVITY_CONVERSATION_ID = $savedConvo }
+    if ($null -eq $savedAppDir) { Remove-Item Env:\ANTIGRAVITY_APP_DATA_DIR -ErrorAction SilentlyContinue } else { $env:ANTIGRAVITY_APP_DATA_DIR = $savedAppDir }
+    Remove-Item -Recurse -Force $fakeAppDir -ErrorAction SilentlyContinue
+}
+
 Write-Host "vault-approval identity checks: $script:checks passed"
