@@ -1166,6 +1166,7 @@ profile `token.txt` directly. the details below still describe the behavior.
 - `/v1/projects` on a brand-new account returns `[]` while `/v1/organizations` already returns the org — an empty project list is NOT a broken token.
 - `run` restricts the host to `api.supabase.com` (path can be full URL or bare like `v1/projects`; bare paths get `/v1` prefixed).
 - profiles keyed by account email only — never store username/label/project-name fallbacks.
+- **the management API is account-scoped, not project-scoped** (2026-11-11): a personal access token can only write a project it actually owns. Writing `PATCH v1/projects/<ref>/config/auth` (auth provider settings, site URL, redirect allow-list) with the wrong profile answers **403 "Your account does not have the necessary privileges to access this endpoint"** — that is an account-ownership answer, NOT a bad payload. Find the owner first (`GET v1/projects/<ref>` → `organization_id`, then check which profile's org holds it); a database/query call with the service-role key can succeed on a project whose *management* token belongs to a different profile, so the two paths can disagree about who "owns" a project.
 
 ## terabox: web-session cookie helper
 
