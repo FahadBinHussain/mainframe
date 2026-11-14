@@ -65,6 +65,17 @@ $ErrorActionPreference = 'Stop'
 # which lands in the information stream - silencing it keeps stdout a clean
 # JSON document on both windows powershell 5.1 and pwsh 7.
 $InformationPreference = 'SilentlyContinue'
+# the flow's own calls use $BwPath, but the imported modules call bare `bw`.
+# on windows bw is on PATH; on linux it usually is not (the local install
+# lives under the work root), so point PATH at the binary the flow was told
+# to use. without this every module call dies with "the term 'bw' is not
+# recognized" - found 2026-11-14 running the vault leg on a muse vm.
+if ($BwPath -match '[\\/]') {
+    $bwDir = Split-Path -Parent $BwPath
+    if ($bwDir -and (Test-Path -LiteralPath $bwDir)) {
+        $env:PATH = "$bwDir$([IO.Path]::PathSeparator)$env:PATH"
+    }
+}
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'vault-approval.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
