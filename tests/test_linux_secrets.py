@@ -83,6 +83,41 @@ class SecretsDecryptTests(unittest.TestCase):
         with self.assertRaisesRegex(ls.SecretsError, "password is wrong"):
             ls.read_zip(self.blob, "definitely-not-the-password")
 
+    def test_a_two_line_notes_value_decrypts_on_the_second_line(self):
+        # the real vault layout: the `[secrets archive password]` header on
+        # line 1, the password on line 2. vault-flow hands over the notes
+        # verbatim, so read_zip must try each line against the verifier.
+        notes = "[secrets archive password]\n" + PASSWORD
+        members = ls.read_zip(self.blob, notes)
+        self.assertIn("tool-secrets.zip", members)
+
+    def test_the_password_line_wins_wherever_it_sits(self):
+        members = ls.read_zip(self.blob, PASSWORD + "\n[secrets archive password]")
+        self.assertIn("tool-secrets.zip", members)
+
+    def test_crlf_notes_and_blank_lines_are_ignored(self):
+        notes = "[secrets archive password]\r\n\r\n" + PASSWORD + "\r\n"
+        members = ls.read_zip(self.blob, notes)
+        self.assertIn("tool-secrets.zip", members)
+
+    def test_all_lines_wrong_names_how_many_lines_were_tried(self):
+        with self.assertRaisesRegex(ls.SecretsError, "tried 2 password lines"):
+            ls.read_zip(self.blob, "nope-one\nnope-two")
+
+    def test_a_mac_failure_never_retries_the_next_line(self):
+        # a MAC failure after a verifier match means the password was right
+        # and the data is corrupt - retrying the next line would mask that.
+        # flip one byte in the body (after salt+verifier, before the MAC),
+        # which keeps the verifier intact and breaks the authentication code.
+        raw = bytearray(self.blob.read_bytes())
+        eocd = bytes(raw).rfind(ls.SIG_EOCD)
+        cd_offset = int.from_bytes(raw[eocd + 16:eocd + 20], "little")
+        raw[cd_offset - 20] ^= 0xFF
+        broken = self.root / "mac-broken.zip"
+        broken.write_bytes(bytes(raw))
+        with self.assertRaisesRegex(ls.SecretsError, "authentication code"):
+            ls.read_zip(broken, PASSWORD + "\nwrong-line")
+
     def test_a_truncated_archive_is_refused(self):
         broken = self.root / "broken.zip"
         broken.write_bytes(self.blob.read_bytes()[:120])
@@ -203,6 +238,21 @@ class SecretsStagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ls.SecretsError, "missing"):
             ls.stage_secrets(self.root / "nope.zip", MANIFEST, PASSWORD,
                              self.root / "staging", home=self.root, environment={})
+
+    def test_stages_with_a_two_line_notes_password(self):
+        # the whole leg, not just read_zip: the notes value as vault-flow
+        # hands it over must stage the same files as the bare password.
+        home = self.root / "home"
+        home.mkdir()
+        notes = "[secrets archive password]\n" + PASSWORD
+        report = ls.stage_secrets(self.blob, MANIFEST, notes,
+                                  self.root / "staging",
+                                  home=home, environment={})
+        self.assertEqual(report["blocked"], [])
+        staged = {row["target"].replace("\\", "/")
+                  for row in report["staged"]}
+        self.assertIn(".ssh/id_ed25519", staged)
+        self.assertIn(".wakatime.cfg", staged)
 
 
 class QuickBlobTests(unittest.TestCase):

@@ -2541,6 +2541,16 @@ central one's differ).
 - the format is pinned against a **real 7z archive** in
   `tests/test_linux_secrets.py`; a synthetic fixture would not prove the writer's
   layout, which is exactly what bit us on `pwsh_linux`'s CRLF release notes.
+- **the vault notes are two lines, and the password is only one of them (2026-11-14).**
+  vault-flow hands `read_zip` the mainframe-production notes verbatim - the
+  `[secrets archive password]` header on line 1, the password on line 2 - and
+  PBKDF2 over the whole two-line string fails the verifier, so the Nov 7
+  restore staged everything except the secrets. `read_zip` now tries each
+  non-empty line against the AES verifier in turn and the first line that
+  verifies wins; only a verifier mismatch moves to the next line, so a MAC
+  failure (right password, corrupt data) still fails loudly instead of
+  masking the corruption. verified against the real release blob + the real
+  vault notes, not just the fixture.
 
 ### the mapping is PATH based, and one path is translated
 

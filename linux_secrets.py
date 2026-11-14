@@ -11,7 +11,10 @@ four things and refuses to improvise anything the manifest does not name:
 
   1. decrypt the AES-256 blob (WinZip AE-2, which 7-Zip writes for
      `-mem=AES256`) using only the stdlib plus the `openssl` CLI - no
-     third-party crypto dependency, and the password never reaches argv;
+     third-party crypto dependency, and the password never reaches argv.
+     each non-empty line of the vault notes is tried against the AES
+     verifier in turn, so the `[secrets archive password]` header line
+     does not break the restore;
   2. read the PUBLIC manifest (`tool-secrets.manifest.json`) for the item list,
      the same file Windows reads;
   3. resolve each manifest item's `archivePath` to a Linux home path, refusing
@@ -61,6 +64,16 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 
 class SecretsError(RuntimeError):
     """A loud, named failure - never a silent skip."""
+
+
+class PasswordVerifierError(SecretsError):
+    """The AES password verifier did not match - this password line is wrong.
+
+    kept distinct from the other SecretsError failures so read_zip can retry
+    the next password line on a verifier mismatch only: a MAC failure after a
+    verifier match means the password was right and the data is corrupt, and
+    retrying would mask the corruption.
+    """
 
 
 # ---------------------------------------------------------------- winzip aes
@@ -115,7 +128,7 @@ def decrypt_winzip_aes(payload: bytes, password: str, strength: int) -> bytes:
     aes_key = derived[:key_len]
     mac_key = derived[key_len:key_len * 2]
     if derived[key_len * 2:key_len * 2 + 2] != verifier:
-        raise SecretsError("the secrets archive password is wrong (AES password verifier mismatch)")
+        raise PasswordVerifierError("the secrets archive password is wrong (AES password verifier mismatch)")
     if not hmac.compare_digest(
             hmac.new(mac_key, body, hashlib.sha1).digest()[:10], auth):
         raise SecretsError("the secrets archive failed its AES authentication code (corrupt or truncated)")
@@ -134,13 +147,48 @@ def _aes_extra(extra: bytes) -> tuple[int | None, int | None]:
     return None, None
 
 
+def _password_lines(password: str) -> list[str]:
+    """One candidate per non-empty line, in order.
+
+    vault-flow hands over the mainframe-production notes verbatim, and the
+    notes are two lines - the `[secrets archive password]` header, then the
+    password. a single-line password is the normal case and behaves exactly
+    as before; a multi-line one is tried line by line, so the notes layout
+    can change without the restore breaking.
+    """
+    lines = [line.strip() for line in password.splitlines() if line.strip()]
+    return lines or [password]
+
+
 def read_zip(path: Path, password: str) -> dict[str, dict]:
     """Return {member name: {'data': bytes, 'mode': int|None}}.
 
     python's `zipfile` refuses WinZip AES entries (compress_type 99), so the
     central directory is walked directly: the raw ciphertext only exists in the
     local file header, and `zipfile` will not hand it over.
+
+    each non-empty line of `password` is tried in turn against the archive's
+    AES verifier, and the first line that verifies wins. only a verifier
+    mismatch moves to the next line - a MAC failure means the password was
+    right and the data is corrupt, so it fails loudly instead of masking the
+    corruption behind a retry.
     """
+    candidates = _password_lines(password)
+    last: PasswordVerifierError | None = None
+    for candidate in candidates:
+        try:
+            return _read_zip_single(path, candidate)
+        except PasswordVerifierError as exc:
+            last = exc
+    tried = len(candidates)
+    raise SecretsError(
+        "the secrets archive password is wrong (AES password verifier "
+        f"mismatch; tried {tried} password line{'s' if tried != 1 else ''})"
+    ) from last
+
+
+def _read_zip_single(path: Path, password: str) -> dict[str, dict]:
+    """One attempt at the whole archive with one password line."""
     path = Path(path)
     if path.stat().st_size > MAX_BLOB_BYTES:
         raise SecretsError(f"the secrets archive is larger than {MAX_BLOB_BYTES} bytes")
