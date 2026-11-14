@@ -817,6 +817,28 @@ The encrypted secrets flow carries `%USERPROFILE%\.gitconfig` for Git identity/c
 
 ## Restore
 
+### One link, any machine
+
+```powershell
+# windows (powershell)
+irm da.gd/hpalA | iex
+```
+
+```bash
+# linux (bash)
+curl -fsSL da.gd/hpalA | bash
+```
+
+the short link points at a tiny redirector (`workers/boot-redirect`,
+live at `https://mainframe-boot.fahadbinhussain001.workers.dev`) that routes
+by caller: powershell on windows gets `boot.ps1`, curl/wget gets
+`boot-remote.sh`, a browser gets a page with both commands. both scripts
+ask quick or full (default full) before downloading anything — quick is
+machine state only, full is everything including package installs. on a
+muse vm (`/opt/muse` exists) package installs do not apply, so full runs
+as quick and `--muse-skills` syncs the restored skills. `MF_MODE=quick`
+or `MF_MODE=full` skips the prompt where there is no terminal.
+
 Extract `mainframe-backup.zip` on the new machine, then double-click `restore.cmd` or run:
 
 ```powershell
