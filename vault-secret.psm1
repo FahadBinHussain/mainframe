@@ -12,8 +12,10 @@
 # Session: read from %APPDATA%\mainframe\accounts\bitwarden\session.key (written
 # by automata-private\bitwarden.com\unlock.ps1 or 1-tap mobile approval) or $env:BW_SESSION.
 # Sessions expire after 1 hour (configurable via MAINFRAME_VAULT_TTL_MINUTES or
-# mainframe.config.json vaultTtlMinutes); expired sessions auto-lock and prompt
-# for 1-tap mobile approval on phone via vault-approval.psm1.
+# mainframe.config.json vaultTtlMinutes); an expired session is EXPIRED, not
+# just locked - `bw logout` revokes the CLI's tokens server-side and wipes its
+# local cache, so the old session key stops working for real. the next vault
+# use is a full login through 1-tap mobile approval on phone via vault-approval.psm1.
 #
 # Performance: Get-VaultItems caches bw list items per session so the vault is
 # queried at most once per process. Write operations (Update-VaultItemNotes,
@@ -144,6 +146,65 @@ function Lock-VaultSession {
     Write-Host "Bitwarden vault locked." -ForegroundColor Green
 }
 
+function Expire-VaultSession {
+    <#
+    .SYNOPSIS
+        really end the vault session: log the CLI out and purge the cache.
+
+    .DESCRIPTION
+        lock is not expiry. `bw lock` leaves the CLI logged in, the local
+        vault cache on disk and the old session key able to decrypt it - so
+        a session that only "expired" by policy kept working for days after
+        its TTL (the muse container ran 7 days on one approval). expiry runs
+        `bw logout`: the server revokes the CLI's tokens and the CLI wipes
+        its local data, so the old session key has nothing left to decrypt
+        and the next vault use is a full login through the phone approval.
+
+        the local purge never depends on the server: session.key, session.ttl
+        and the env vars go even when logout fails (no network, no CLI). the
+        logout is verified with `bw status` afterwards - a CLI that is still
+        logged in is reported LOUDLY and locked as a fallback, never silently
+        left half-expired. one limit is inherent and cannot be fixed here: a
+        session key or token copied BEFORE the expiry stays a valid decryption
+        key for a copied vault cache - expiry kills the live session, not a
+        copy made earlier.
+    #>
+    param([string]$BwPath = 'bw')
+    $sessionFile = Get-MainframeSessionKeyPath
+    $loggedOut = $false
+    try {
+        $logoutOut = @(& $BwPath logout 2>&1)
+        $loggedOut = ($LASTEXITCODE -eq 0)
+        if (-not $loggedOut) {
+            Write-MainframeWarning "bw logout failed ($($logoutOut -join ' ')) - purging the local session anyway"
+        }
+    } catch {
+        Write-MainframeWarning "bw logout could not run ($_) - purging the local session anyway"
+    }
+    if (Test-Path -LiteralPath $sessionFile) {
+        Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
+    }
+    $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
+    if (Test-Path -LiteralPath $ttlFile) {
+        Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
+    Remove-Item -Path 'Env:\MAINFRAME_VAULT_APPROVED_TTL' -ErrorAction SilentlyContinue
+    Clear-VaultSessionCache
+    Clear-VaultItemsCache
+    try {
+        $status = & $BwPath status 2>$null | Out-String | ConvertFrom-Json
+        if ($status -and $status.status -ne 'unauthenticated') {
+            Write-MainframeWarning "the vault session did NOT expire - bw status is still '$($status.status)' after logout; locking the vault instead"
+            & $BwPath lock 2>$null | Out-Null
+        }
+    } catch {
+        Write-MainframeWarning "could not verify the logout with bw status ($_) - the local session is purged, the server side is unconfirmed"
+    }
+    Write-Host "vault session expired (logged out)." -ForegroundColor Green
+    return $loggedOut
+}
+
 function Get-VaultSession {
     param([switch]$AllowExpired)
 
@@ -155,8 +216,8 @@ function Get-VaultSession {
         $age = (Get-Date) - $fileInfo.LastWriteTime
 
         if (-not $AllowExpired -and $ttlMinutes -gt 0 -and $age.TotalMinutes -ge $ttlMinutes) {
-            Write-Host "vault session expired ($([math]::Round($age.TotalMinutes))m >= ${ttlMinutes}m TTL) - locking vault" -ForegroundColor Yellow
-            Lock-VaultSession
+            Write-Host "vault session expired ($([math]::Round($age.TotalMinutes))m >= ${ttlMinutes}m TTL) - expiring it (logout + purge)" -ForegroundColor Yellow
+            Expire-VaultSession | Out-Null
             return $null
         }
 
@@ -203,6 +264,45 @@ function Test-VaultSession {
     return $false
 }
 
+function Invoke-VaultLogin {
+    <#
+    .SYNOPSIS
+        log the bw CLI in with the master password - the first use after a
+        session expiry, when the CLI is logged out and unlock alone cannot work.
+
+    .DESCRIPTION
+        the one login implementation: the account email comes out of the
+        sealed blob (bw-email.enc.json, unlocked by the master password
+        itself) or $env:MAINFRAME_BW_EMAIL, then `bw login`. vault-flow.ps1
+        and Ensure-VaultSession both call it, so a fresh machine and an
+        expired session log in the same way. returns the email it logged in
+        as, and throws when the email cannot be resolved or the login fails.
+    #>
+    param(
+        [string]$BwPath = 'bw',
+        [Parameter(Mandatory = $true)][string]$Password,
+        [string]$Checkout = $PSScriptRoot
+    )
+    $email = $null
+    $blob = Join-Path $Checkout 'bw-email.enc.json'
+    if (Test-Path -LiteralPath $blob) {
+        $secure = ConvertTo-SecureString $Password -AsPlainText -Force
+        $email = Unseal-BwEmail -BlobPath $blob -Password $secure
+    }
+    if (-not $email) { $email = [string]$env:MAINFRAME_BW_EMAIL }
+    if (-not $email) {
+        throw 'the bw CLI is logged out and the account email could not be unsealed - set MAINFRAME_BW_EMAIL or run the setup that asks for the master password'
+    }
+    [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $Password)
+    try {
+        & $BwPath login $email --passwordenv BW_PASSWORD 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "bw login failed for $email" }
+    } finally {
+        Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+    }
+    return $email
+}
+
 function Ensure-VaultSession {
     param(
         [int]$TimeoutSeconds = 120,
@@ -240,6 +340,18 @@ function Ensure-VaultSession {
             return $true
         }
         if ($pw) {
+            # an expired session logs the CLI out, so the first use after an
+            # expiry is a full login, not an unlock - unlock alone fails on
+            # a logged-out CLI.
+            $statusVal = $null
+            try {
+                $statusRaw = & bw status 2>$null | Out-String
+                if ($statusRaw) { $statusVal = ($statusRaw | ConvertFrom-Json).status }
+            } catch {}
+            if ($statusVal -eq 'unauthenticated') {
+                Write-Host 'bw is logged out after the session expiry - logging in again' -ForegroundColor Yellow
+                Invoke-VaultLogin -Password $pw | Out-Null
+            }
             [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $pw)
             try {
                 $unlockOut = @(& bw unlock --raw --passwordenv BW_PASSWORD 2>&1)
@@ -536,4 +648,4 @@ function Write-VaultSecretToExisting {
     return $item.id
 }
 
-Export-ModuleMember -Function Get-VaultSession, Set-VaultSessionKey, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Get-VaultSessionTtlMinutes, Get-VaultBwServer, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-BwEmailKeyMaterial, Unseal-BwEmail, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot
+Export-ModuleMember -Function Get-VaultSession, Set-VaultSessionKey, Test-VaultSession, Ensure-VaultSession, Lock-VaultSession, Expire-VaultSession, Invoke-VaultLogin, Get-VaultSessionTtlMinutes, Get-VaultBwServer, Get-VaultItems, Clear-VaultItemsCache, Find-VaultItemByEmail, Get-SecretFromNotes, Read-VaultSecret, Update-VaultItemNotes, Write-VaultSecretToExisting, New-VaultItem, Clear-VaultSessionCache, Get-BwEmailKeyMaterial, Unseal-BwEmail, Get-MainframeProfileRoot, Get-MainframeAccountsDir, Get-MainframeAccountDir, Get-MainframeSessionKeyPath, Get-MainframeCheckoutRoot

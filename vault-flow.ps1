@@ -195,9 +195,14 @@ if ($Lock -or $LockIfStale) {
     }
     if ($fresh) {
         Write-FlowLog 'the cached session is still fresh - leaving the vault unlocked'
-    } else {
+    } elseif ($Lock) {
         Lock-VaultSession -BwPath $BwPath
         Write-FlowLog "vault session purged at $sessionFile"
+    } else {
+        # -LockIfStale with a stale session: the TTL has lapsed, so this is
+        # an expiry, not a lock - the CLI logs out for real.
+        Expire-VaultSession -BwPath $BwPath | Out-Null
+        Write-FlowLog "vault session expired at $sessionFile"
     }
     if ($Json) {
         Write-FlowResult ([ordered]@{ locked = (-not $fresh); sessionPath = $sessionFile })
@@ -247,23 +252,8 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     }
 
     if ($status.status -eq 'unauthenticated') {
-        $blob = Join-Path $Checkout 'bw-email.enc.json'
-        if (Test-Path -LiteralPath $blob) {
-            $secure = ConvertTo-SecureString $password -AsPlainText -Force
-            $email = Unseal-BwEmail -BlobPath $blob -Password $secure
-            if ($email) { Write-FlowLog 'email unsealed from bw-email.enc.json' }
-        }
-        if (-not $email) { $email = [string]$env:MAINFRAME_BW_EMAIL }
-        if (-not $email) {
-            throw 'the bw CLI is logged out and the account email could not be unsealed - set MAINFRAME_BW_EMAIL or run the setup that asks for the master password'
-        }
-        [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $password)
-        try {
-            & $BwPath login $email --passwordenv BW_PASSWORD 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "bw login failed for $email" }
-        } finally {
-            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
-        }
+        $email = Invoke-VaultLogin -BwPath $BwPath -Password $password -Checkout $Checkout
+        Write-FlowLog 'bw logged in again'
     }
 
     [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $password)
