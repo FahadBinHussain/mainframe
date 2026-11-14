@@ -770,14 +770,15 @@ def activate(staging: Path, home: Path, work_root: Path,
             "backup_dir": str(backup_root) if backed_up else ""}
 
 
-def sync_muse_skills(staging: Path, home: Path) -> dict:
-    """Copy restored agent skills into the Muse custom-skills directory.
+def sync_restored_skills(staging: Path, target_dir: Path) -> dict:
+    """Copy restored agent skills into an agent's custom-skills directory.
 
     Activation puts the skill tree at ~/.agents/skills (the opencode/agents
-    convention), but a Muse VM reads custom skills only from
-    ~/workspace/custom-skills. Without this step the skills are on disk and
-    invisible to Muse. The target directory existing is the Muse-VM signal:
-    a plain Linux box never has it, so the step is a no-op there.
+    convention), but an agent that reads skills from somewhere else — a Muse
+    VM reads ~/workspace/custom-skills — never sees them. This step copies
+    the staged skills to the target the operator asked for. The target is a
+    parameter on purpose: the mechanism is general, the directory is the
+    operator's choice, and nothing here assumes one agent's convention.
 
     Merge only: existing entries are never deleted or overwritten. A skill
     whose name already exists in the target is skipped LOUDLY, and a skill
@@ -786,12 +787,12 @@ def sync_muse_skills(staging: Path, home: Path) -> dict:
     reads from the STAGED tree, so the restore places exactly what this
     backup contained - nothing local that happens to be lying around.
     """
-    target_root = home / "workspace" / "custom-skills"
     result: dict = {"synced": [], "skipped_existing": [],
                     "skipped_symlink": [], "skipped_other": []}
-    if not target_root.is_dir():
-        result["status"] = "skipped-not-muse"
-        return result
+    if target_dir.exists() and not target_dir.is_dir():
+        raise RuntimeError(f"skill target {target_dir} exists and is not a "
+                           f"directory - refusing to write skills into it")
+    target_dir.mkdir(parents=True, exist_ok=True)
     source_root = staging / "home-staging" / ".agents" / "skills"
     if not source_root.is_dir() or not any(source_root.iterdir()):
         result["status"] = "no-skills-staged"
@@ -799,33 +800,47 @@ def sync_muse_skills(staging: Path, home: Path) -> dict:
     for skill in sorted(source_root.iterdir(), key=lambda p: p.name):
         if skill.is_symlink():
             result["skipped_symlink"].append(skill.name)
-            log(f"muse skills: SKIP {skill.name} - the skill itself is a "
+            log(f"skills sync: SKIP {skill.name} - the skill itself is a "
                 f"symlink, refused like activation refuses them")
             continue
         if not skill.is_dir():
             result["skipped_other"].append(skill.name)
-            log(f"muse skills: SKIP {skill.name} - not a skill directory")
+            log(f"skills sync: SKIP {skill.name} - not a skill directory")
             continue
-        target = target_root / skill.name
+        target = target_dir / skill.name
         if target.exists() or target.is_symlink():
             result["skipped_existing"].append(skill.name)
-            log(f"muse skills: SKIP {skill.name} - already in "
-                f"~/workspace/custom-skills, never overwritten")
+            log(f"skills sync: SKIP {skill.name} - already in "
+                f"{target_dir}, never overwritten")
             continue
         if any(p.is_symlink() for p in skill.rglob("*")):
             result["skipped_symlink"].append(skill.name)
-            log(f"muse skills: SKIP {skill.name} - contains a symlink, "
+            log(f"skills sync: SKIP {skill.name} - contains a symlink, "
                 f"refused like activation refuses them")
             continue
         shutil.copytree(skill, target)
         result["synced"].append(skill.name)
     result["status"] = "synced"
-    log(f"muse skills: synced {len(result['synced'])} skill(s) into "
-        f"~/workspace/custom-skills, skipped "
+    log(f"skills sync: synced {len(result['synced'])} skill(s) into "
+        f"{target_dir}, skipped "
         f"{len(result['skipped_existing'])} existing, "
         f"{len(result['skipped_symlink'])} with symlinks, "
         f"{len(result['skipped_other'])} not directories")
     return result
+
+
+def resolve_muse_skills_dir(muse_skills: bool,
+                            muse_skills_dir: Path | None) -> Path | None:
+    """Pick the skill-sync target, or None when the operator did not ask.
+
+    The sync is opt-in: no flag, no sync, on any machine. An explicit
+    --muse-skills-dir wins over the bare --muse-skills default.
+    """
+    if muse_skills_dir is not None:
+        return muse_skills_dir.resolve()
+    if muse_skills:
+        return Path.home() / "workspace" / "custom-skills"
+    return None
 
 
 # The private repo holds the per-domain scripts and the patchers. Windows
@@ -974,7 +989,7 @@ def stage_secrets_into(backup_root: Path, staging: Path,
 def run_restore(backup_root: Path, work_root: Path, yes: bool,
                 restore_global_agents: bool = False,
                 secrets_password: str | None = None,
-                skip_muse_skills: bool = False) -> dict:
+                muse_skills_dir: Path | None = None) -> dict:
     import linux_restore as lr
     stamp = time.strftime("%Y-%m-%d-%H%M%S")
     staging = work_root / "restore-staging" / stamp
@@ -1028,13 +1043,11 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool,
             raise RuntimeError("Requested global AGENTS restore did not activate HOME/AGENTS.md")
         log("restored exact top-level AGENTS.md to HOME/AGENTS.md; byte-for-byte verification passed")
         muse_skills: dict = {"status": "no-activation"}
-        if yes:
+        if yes and muse_skills_dir is not None:
             # --yes authorized full activation, so the skills went live too.
-            if skip_muse_skills:
-                log("muse skills sync skipped (--skip-muse-skills)")
-                muse_skills = {"status": "skipped-flag"}
-            else:
-                muse_skills = sync_muse_skills(staging, Path.home())
+            muse_skills = sync_restored_skills(staging, muse_skills_dir)
+        elif yes:
+            muse_skills = {"status": "skipped-not-requested"}
         remaining = [path for path in staged if path not in activated]
         note = (f"{len(remaining)} other candidate(s) remain staged; use --yes to activate all"
                 if remaining and not yes else "")
@@ -1056,11 +1069,10 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool,
     activation = activate(staging, Path.home(), work_root)
     log(f"activated {len(activation['activated'])} file(s) into live HOME; "
         f"backed up {len(activation['backed_up'])} overwritten file(s)")
-    if skip_muse_skills:
-        log("muse skills sync skipped (--skip-muse-skills)")
-        muse_skills = {"status": "skipped-flag"}
+    if muse_skills_dir is not None:
+        muse_skills = sync_restored_skills(staging, muse_skills_dir)
     else:
-        muse_skills = sync_muse_skills(staging, Path.home())
+        muse_skills = {"status": "skipped-not-requested"}
     return {"staged": staged, "activation": activation, "secrets": secrets_report,
             "staging": str(staging),
             "status": report.get("operational_status"),
@@ -1071,7 +1083,7 @@ def run_restore_leg(backup_root: Path | None, work_root: Path, *,
                     yes: bool, restore_global_agents: bool,
                     skip_private_repo: bool, gh_token: str | None,
                     secrets_password: str | None = None,
-                    skip_muse_skills: bool = False
+                    muse_skills_dir: Path | None = None
                     ) -> tuple[dict, list[str]]:
     """Sync the private checkout, then restore. Returns (report, failures).
 
@@ -1109,7 +1121,7 @@ def run_restore_leg(backup_root: Path | None, work_root: Path, *,
         report["restore"] = run_restore(
             backup_root, work_root, yes, restore_global_agents,
             secrets_password=secrets_password,
-            skip_muse_skills=skip_muse_skills)
+            muse_skills_dir=muse_skills_dir)
     except Exception as exc:
         failures.append(f"restore: {exc}")
         log(f"restore FAILED: {exc}")
@@ -1139,9 +1151,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skip-private-repo", action="store_true",
                     help="skip the private repo clone/pull in the restore leg "
                          "(the checkout is NOT synced, and the run says so)")
-    ap.add_argument("--skip-muse-skills", action="store_true",
-                    help="skip copying restored skills into "
-                         "~/workspace/custom-skills on a Muse VM")
+    ap.add_argument("--muse-skills", action="store_true",
+                    help="also copy restored skills into "
+                         "~/workspace/custom-skills after activation "
+                         "(opt-in: without this flag, or --muse-skills-dir, "
+                         "no skill sync happens on any machine)")
+    ap.add_argument("--muse-skills-dir", type=Path, default=None,
+                    help="copy restored skills into this directory instead "
+                         "of ~/workspace/custom-skills (implies --muse-skills)")
     ap.add_argument("--work-root", type=Path,
                     default=Path.home() / ".local" / "share" / "mainframe",
                     help="tool installs, staging and backups live here")
@@ -1262,7 +1279,8 @@ def main(argv: list[str] | None = None) -> int:
         restore_global_agents=args.restore_global_agents,
         skip_private_repo=args.skip_private_repo, gh_token=gh_token,
         secrets_password=secrets_pw,
-        skip_muse_skills=args.skip_muse_skills)
+        muse_skills_dir=resolve_muse_skills_dir(args.muse_skills,
+                                                args.muse_skills_dir))
     report.update(restore_report)
     failures.extend(restore_failures)
 
