@@ -904,6 +904,26 @@ OpenSSH with the key named by `$env:TAILSCALE_SSH_KEY_NAME` (default `id_ed25519
 StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key is missing
 (needs the admin-console SSH policy otherwise).
 
+### the windows sshd side has to be ON before any of that answers (measured 2026-11-14)
+- **the capability being `Installed` says nothing about the service.** `sshd` ships `Manual` +
+  `Stopped`, so port 22 is refused on every interface and the peer reports it as "port closed" -
+  which reads exactly like a firewall block. `Start-Service sshd` +
+  `Set-Service sshd -StartupType Automatic` is the fix, and it is the only state that survives a
+  reboot.
+- **an admin-group account reads its key from the programdata file, not the user's own.**
+  `sshd_config` ends with `Match Group administrators` ->
+  `AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys`, so a key written only to
+  `~/.ssh/authorized_keys` is silently ignored. write both, no BOM, ACL = SYSTEM + Administrators.
+- **the openSSH/Operational log names the file it actually read**
+  (`Accepted key ... found at <path>:N`) - that is the check, not the config file.
+- **a mesh-vpn adapter reports `NetworkCategory Private`**, so the stock private-profile ssh rule
+  already covers tunnel traffic; scope an extra rule to the tunnel interface + the tailnet range
+  to keep port 22 off the LAN.
+- three failures that look identical from the peer, and which stage they are at:
+  connection refused = the service; `Permission denied (publickey)` = the key file/path/ACL;
+  `ssh_dispatch_run_fatal` after `Accepted key` = the **client** could not sign (passphrase);
+  a close in preauth with no `Accepted key` line = the client never offered a key.
+
 ### fleet workflow (N pcs, all in one tailnet, mainframe backup/restore)
 1. **once per tailnet**: generate ONE *reusable* auth key in the admin console
    (Settings > Keys > Auth keys > Generate > Reusable ON, Ephemeral OFF) and store it:
