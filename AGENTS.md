@@ -2245,6 +2245,12 @@ and post garbage that killed a live approval.
   fingerprint approval" ticked; after that it is 1-tap again on every machine
   that uses that same `pagesBase`. so: if the phone suddenly asks for the
   password, it is the origin that moved, not a broken relay.
+  2026-11-14 proved it again: the nov 11 relay move (vercel -> cloudflare
+  worker) dragged `pagesBase` onto workers.dev and every approval fell back
+  to the manual password form. keep `pagesBase` on the stable github.io
+  default and never point it at the relay host - the page origin and the
+  relay are independent (`srv=` carries the relay), so relay moves must not
+  touch `pagesBase`, or 1-tap breaks silently on every machine at once.
 
 ### the topic name is public, so the link is signed (2026-11-05)
 
