@@ -1,159 +1,82 @@
-# approval signing key bootstrap
+# approval signing key bootstrap — RETIRED 2026-11-15
 
-implemented - the module and the page landed together; this doc is the
-record of the design and of the registration steps for a new machine.
-the one companion piece outside this repo is the relay's key list,
-covered under implementation status at the end.
+this doc records a design that no longer exists. it stays so nobody
+re-adds it without knowing why it went away.
 
-## the problem
+## what it was
 
-a brand-new machine cannot make its first vault approval request.
+every machine minted its own RSA-2048 approval signing key on first
+use (`Get-VaultApprovalSigningKey` in `vault-approval.psm1`). the runner
+signed each approval link's descriptor
+(`New-VaultApprovalDescriptorSignature`), and two lists decided which
+machines the phone and the relay trusted:
 
-approval links are signed (`New-VaultApprovalDescriptorSignature`), and
-the phone refuses an unsigned one - that part is right and stays. the
-signing key is a stable RSA pair whose private half lives in exactly
-two places:
+- `APPROVAL_PUBLIC_KEYS_B64URL` in `docs/vault-tab.html` (a commit here)
+- `MF_APPROVAL_PUBLIC_KEY` on the relay (env var + redeploy)
 
-- the bitwarden vault, as
-  `github.com/FahadBinHussain/mainframe/mainframe.approval-signing.key`
-- a checkout that `env-sync.ps1 -Repo mainframe` has already restored
+a new machine's first approval run minted its key and then STOPPED with
+the public half to register. until the key was on both lists, the phone
+refused its links and the relay refused its publishes.
 
-on windows that is enough: setup is interactive, env-sync runs while a
-human is unlocking things anyway, and the key is on disk before the
-first approval is ever needed.
+## why it was removed
 
-on an agent-driven linux box it circles: the restore asks the vault for
-the release token, the vault asks the phone for approval, the approval
-link has to be signed, and the signing key is inside the vault it is
-trying to open. the run dies at the vault leg with "the approval
-signing key is missing". found on a fresh vm restore on 2026-11-07 -
-the machine had simply never been given the file.
+every new machine needed a manual registration step: a commit to the
+page list, a relay env change, and a redeploy — before it could get a
+single approval. on 2026-11-15 a fresh Muse VM hit exactly that wall
+during its mainframe restore (its first approval run died minting a key
+nobody had registered), and the user ordered the whole registration
+design out: the ntfy topic is the credential, and no per-machine list
+is worth the friction.
 
-## what also broke on the way there
+## what stays
 
-`Get-MainframeCheckoutRoot` (mainframe-paths.psm1) built its candidate
-list eagerly, so `Join-Path $env:USERPROFILE ...` threw a null bind
-error on linux - USERPROFILE does not exist there - before the `$HOME`
-candidates were tried. the signing-key lookup is the first linux caller
-of that function, so the crash hid the real "key is missing" message
-behind a cryptic one. fixed in this branch (the candidate is only added
-when the variable is set) with a regression check in
-`tests/mainframe-paths.Tests.ps1`.
+the per-machine RSA key pair itself — but as an ENCRYPTION key only,
+not a signing key. the approval page encrypts the master password to
+the runner's public half (`k` in the link, RSA-OAEP), so only the
+runner can read it back; the relay never sees the password in the
+clear. a fresh machine mints its pair on first use and proceeds —
+no list, no registration, no stop. the function and file names still
+say "signing" (`Get-VaultApprovalSigningKey`,
+`mainframe.approval-signing.key`, `MAINFRAME_APPROVAL_SIGNING_KEY`);
+renaming them would break every existing machine's key file and env
+var for no behaviour change, so the names stay and this doc is the
+record of what they mean now.
 
-## the fix: per-machine signing keys
+## what replaced the verification
 
-stop moving one shared private key to every machine. a machine should
-be born with its own key, and only public keys should ever travel.
+nothing mechanical. the link only reaches the phone through the ntfy
+topic, and the topic (a random 32-char name) is the credential:
+whoever knows it can send a link. the phone card shows host, agent,
+model and the verification code, so a link from an unrecognised machine
+stands out — the human check is the forgery defence now. the relay
+authorises publishes and sid-topic reads by topic knowledge (the phone
+still presents `MF_RELAY_AUTH` to read the main topic).
 
-1. **first run generates the key.** when
-   `Get-VaultApprovalSigningKey` finds no key file, it generates an
-   RSA-2048 pair in the same JSON shape, writes it to
-   `mainframe.approval-signing.key` next to the config (mode 600 /
-   gitignored, as now), and stops with a message that prints the
-   PUBLIC half (base64url SubjectPublicKeyInfo - the same string
-   `Get-VaultApprovalPublicKey` returns) plus the registration steps
-   below. generating is not enough to approve anything: until the
-   public half is registered, the phone and the relay still refuse
-   this machine, which is the correct state for an unknown box.
-2. **the page trusts a list.** `docs/vault-tab.html` currently bakes in
-   one public key; it takes a list instead and accepts a descriptor
-   signed by ANY key on it. bump the page version (`signed2`) so cached
-   old pages are not used.
-3. **the relay trusts the same list.** `MF_APPROVAL_PUBLIC_KEY` on the
-   relay accepts several keys (comma-separated SPKI strings), and the
-   relay checks a publish against all of them. the relay lives in the
-   private automata-private repo - that part is a separate change
-   there, with its `test/page-signature.test.mjs` extended to two keys.
-4. **registration is the only per-machine step, and it is public.**
-   adding a machine = add its public key to the page list (a commit
-   here) and to the relay env, redeploy both. no secret moves, no vault
-   access needed, and an agent can open that commit as a PR by itself -
-   which is the whole point: the next vm sets itself up without a human
-   carrying a private key to it.
-5. **revocation is deleting a line.** a lost or retired machine loses
-   the ability to get approvals signed the moment its key leaves both
-   lists. today one leaked key file is every machine at once.
+## the original problem it solved (still solved, differently)
 
-## migration
+2026-11-07: a fresh agent-driven linux box could not make its first
+approval because the signing key lived inside the vault it was trying
+to open — the restore died at the vault leg with "the approval signing
+key is missing". the per-machine mint fixed the circle (the key is born
+on the machine, never fetched from the vault). that fix survives: the
+mint-on-first-use behaviour is unchanged, only the registration stop
+after it is gone.
 
-- the current shared key stays on both lists as entry one - the
-  existing windows setup keeps working untouched.
-- each other machine generates its own key on its next approval
-  request and gets registered once.
-- when every live machine has its own key, the shared key comes off
-  the lists and the vault copy is retired. until then nothing about
-  the current flow changes.
+## what was removed, for the record
 
-## the alternative, if the list change is too much
-
-seal the existing shared key the way `bw-email.enc.json` is sealed
-(PBKDF2-HMAC-SHA256, AES-256-CBC, HMAC over the lot, key derived from
-the master password) and commit the sealed blob. a new machine
-unseals it with one interactive master-password entry at first setup -
-the same moment windows boot already asks for - and writes the key
-file. smaller diff (no page or relay change), but the shared private
-key still lives on every machine, a sealed copy sits in a public repo
-resting entirely on the master password, and an agent-driven box still
-needs a human to type that password once. it fixes the circle; it
-keeps the blast radius.
-
-## also, regardless of which design lands
-
-- **fail before the run, not inside it.** `linux_real.py` / the boot
-  flow should check for the signing key while it checks prerequisites
-  and stop there with the one-line fix, instead of discovering it
-  halfway through the vault leg.
-
-## pieces to change
-
-- `vault-approval.psm1` - generate-on-missing in
-  `Get-VaultApprovalSigningKey`, with the public key and the
-  registration steps in the stop message. the descriptor format and
-  the signing itself do not change.
-- `docs/vault-tab.html` - trusted key list, page version bump.
-- the relay (automata-private) - `MF_APPROVAL_PUBLIC_KEY` as a list.
-- `linux_real.py` / boot flow - the pre-flight key check.
-- tests - `tests/vault-approval-descriptor.Tests.ps1`: the generated
-  key signs and verifies, a second key on the list verifies, an
-  unlisted key does not. relay tests in automata-private for the
-  multi-key publish check.
-
-## implementation status
-
-- `vault-approval.psm1` - done. `Get-VaultApprovalSigningKey` mints the
-  pair via `New-VaultApprovalSigningKeyFile` when nothing was
-  provisioned or configured, writes it at the resolved key path (mode
-  600 on unix), and stops with the public key and the registration
-  steps in the message. An explicitly configured key that is missing
-  still throws the vault-restore message. The approval page version
-  bumped to `signed2`, because the page's verification changed.
-- `docs/vault-tab.html` - done. `APPROVAL_PUBLIC_KEYS_B64URL` is a list
-  and `verifyDescriptor` tries each key. The first entry is the
-  original shared key (the windows machine); the second is the linux
-  vm that found the bootstrap gap, registered by the same change that
-  implemented all of this.
-- tests - `tests/vault-approval-descriptor.Tests.ps1`: check 3 now
-  asserts this machine's key is IN the page list (it fails on purpose
-  on a generated-but-unregistered machine), and check 8 pins the
-  mint-and-stop behaviour hermetically.
-- the relay - companion change, in the relay's own repo and deploy
-  flow: `MF_APPROVAL_PUBLIC_KEY` is read as a comma-separated list of
-  SPKI strings, and `public/docs/vault-tab.html` is refreshed with
-  `sync-page.ps1` before the redeploy, so the served page carries the
-  same list as this repo. Until that redeploy lands, the relay still
-  trusts only the original key - a new machine can be refused by the
-  relay even though the page would accept it, so register and redeploy
-  before a new machine's first real request.
-
-registration for a new machine, end to end: run any vault request once
-(it stops with the public key) -> add the key to the page list here and
-to `MF_APPROVAL_PUBLIC_KEY` on the relay -> sync the page copy and
-redeploy the relay -> run again. No private key ever moves.
-
-## not changing
-
-- the descriptor format, the single-flight queue, the relay credential
-  rules - untouched.
-- no unsigned mode, no skip-signing flag. a machine that cannot sign
-  stops, exactly like today; it just stops with its own key half-made
-  and a public string to register instead of a vault errand.
+- `vault-approval.psm1`: `Get-VaultApprovalDescriptor`,
+  `New-VaultApprovalDescriptorSignature`, the descriptor/signature
+  params and `X-MF-Desc`/`X-MF-Sig` headers on the publish/poll
+  functions, the mint-and-stop throw, the `signed2` page version
+  (now `topic1`).
+- `docs/vault-tab.html`: `APPROVAL_PUBLIC_KEYS_B64URL`,
+  `verifyDescriptor`, `buildDescriptor`, `descriptorHeaders`,
+  `refuseUnsigned`, the `sig` link param.
+- the relay (automata-private `cloudflare.com/mainframe-vault-relay`):
+  `signatureVerifies`, the `signature` authorise path,
+  `notificationIsSigned` / `filterSignedNotifications`,
+  `MF_APPROVAL_PUBLIC_KEY` (the env var is no longer read; remove it
+  from the worker's secrets when convenient).
+- tests: `tests/vault-approval-descriptor.Tests.ps1` became
+  `tests/vault-approval-key.Tests.ps1` (mint-and-proceed, OAEP
+  round-trip, no-trust-list regression checks).
