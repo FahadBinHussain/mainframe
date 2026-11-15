@@ -924,26 +924,6 @@ OpenSSH with the key named by `$env:TAILSCALE_SSH_KEY_NAME` (default `id_ed25519
 StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key is missing
 (needs the admin-console SSH policy otherwise).
 
-### the windows sshd side has to be ON before any of that answers (measured 2026-11-14)
-- **the capability being `Installed` says nothing about the service.** `sshd` ships `Manual` +
-  `Stopped`, so port 22 is refused on every interface and the peer reports it as "port closed" -
-  which reads exactly like a firewall block. `Start-Service sshd` +
-  `Set-Service sshd -StartupType Automatic` is the fix, and it is the only state that survives a
-  reboot.
-- **an admin-group account reads its key from the programdata file, not the user's own.**
-  `sshd_config` ends with `Match Group administrators` ->
-  `AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys`, so a key written only to
-  `~/.ssh/authorized_keys` is silently ignored. write both, no BOM, ACL = SYSTEM + Administrators.
-- **the openSSH/Operational log names the file it actually read**
-  (`Accepted key ... found at <path>:N`) - that is the check, not the config file.
-- **a mesh-vpn adapter reports `NetworkCategory Private`**, so the stock private-profile ssh rule
-  already covers tunnel traffic; scope an extra rule to the tunnel interface + the tailnet range
-  to keep port 22 off the LAN.
-- three failures that look identical from the peer, and which stage they are at:
-  connection refused = the service; `Permission denied (publickey)` = the key file/path/ACL;
-  `ssh_dispatch_run_fatal` after `Accepted key` = the **client** could not sign (passphrase);
-  a close in preauth with no `Accepted key` line = the client never offered a key.
-
 ### fleet workflow (N pcs, all in one tailnet, mainframe backup/restore)
 1. **once per tailnet**: generate ONE *reusable* auth key in the admin console
    (Settings > Keys > Auth keys > Generate > Reusable ON, Ephemeral OFF) and store it:
@@ -1206,7 +1186,6 @@ profile `token.txt` directly. the details below still describe the behavior.
 - `/v1/projects` on a brand-new account returns `[]` while `/v1/organizations` already returns the org — an empty project list is NOT a broken token.
 - `run` restricts the host to `api.supabase.com` (path can be full URL or bare like `v1/projects`; bare paths get `/v1` prefixed).
 - profiles keyed by account email only — never store username/label/project-name fallbacks.
-- **the management API is account-scoped, not project-scoped** (2026-11-11): a personal access token can only write a project it actually owns. Writing `PATCH v1/projects/<ref>/config/auth` (auth provider settings, site URL, redirect allow-list) with the wrong profile answers **403 "Your account does not have the necessary privileges to access this endpoint"** — that is an account-ownership answer, NOT a bad payload. Find the owner first (`GET v1/projects/<ref>` → `organization_id`, then check which profile's org holds it); a database/query call with the service-role key can succeed on a project whose *management* token belongs to a different profile, so the two paths can disagree about who "owns" a project.
 
 ## terabox: web-session cookie helper
 
@@ -2085,7 +2064,6 @@ is otherwise unchanged.)
 - **session expiry is real now, not policy (2026-11-14)**: the TTL used to only purge `session.key` and run `bw lock`, which left the CLI logged in and the local vault cache on disk - the old session key kept decrypting it, so the muse container ran 7 days on one approval. `Get-VaultSession` now calls `Expire-VaultSession` on a lapsed TTL: `bw logout` revokes the CLI's tokens server-side and wipes its local data, then the session key and TTL are purged, so the next vault use is a full login through the phone approval (`Invoke-VaultLogin` unseals the email and logs in; `Ensure-VaultSession` and `windows/vault-flow.ps1` both use it). `Lock-VaultSession` stays a plain lock (manual lock only); `-LockIfStale` with a stale session expires instead of locking. one limit is inherent: a key or token copied BEFORE the expiry stays a valid decryption key for a copied vault cache - expiry kills the live session, not a copy made earlier. `tests/vault-session-expire.Tests.ps1` pins the behaviour down with a fake bw.
 - **Number matching & host provenance (2026-10-27)**: To protect against MFA fatigue, prompt bombing, and distinguishing legitimate agent requests from unauthorized triggers during the day, approval requests generate a cryptographic 2-digit verification code (`code`), requesting hostname (`host`), and context (`ctx`). The runner terminal outputs `VERIFICATION CODE: [ XX ]`, and `docs/vault-tab.html` renders a prominent glowing verification card showing that code, hostname, and action. Users only approve if the code on their phone screen matches the number printed on their terminal monitor.
 - **Agent, harness & model provenance (2026-10-27)**: Approval requests include full caller identity (`agent` and `model`) across terminal banners, ntfy push notifications, and the mobile approval card. Runners resolve identity via explicit `-Agent`/`-Model` args, environment overrides (`MAINFRAME_AGENT_NAME`, `MAINFRAME_MODEL_NAME`, `AGENT_NAME`, `MODEL_NAME`), or automatic ground-truth detection: for Antigravity, runners inspect the active thread's conversation transcript on disk (`<appDataDir>/brain/<convoId>/.system_generated/logs/transcript.jsonl`) for system-injected `Model Selection` settings changes (tail and head), extracting the exact active model (e.g. `Gemini 3.8 Flash (High)`) without hallucination or hardcoding; for OpenCode/Claude/Codex/Aider, runners inspect harness env vars or process ancestry, falling back to `terminal` for interactive human shells. `docs/vault-tab.html` renders animated tags (Rule 10) for host (`💻`), agent (`🤖`), model (`🧠`), and action context (`⚡`), and updates the header badge and description to clearly identify who is requesting vault access.
-- **Antigravity mid-thread model switch detection across full transcript (2026-11-09)**: `windows/vault-approval.psm1` previously split transcript inspection between `-Tail 100` and `-TotalCount 50`. In conversations longer than ~150 lines, any mid-thread model switch between lines 51 and (Total - 100) fell into a dead zone where `-Tail 100` found nothing and fell back to `-TotalCount 50`, falsely reporting the initial thread model (e.g. `Gemini 3.8 Flash (Medium)` instead of `Gemini 3.8 Flash (High)`). Furthermore, raw string matching on `transcript.jsonl` risked matching tool outputs echoing transcript text. `Get-CallerIdentity` now filters strictly for `"type":"USER_INPUT"` steps across the full conversation history and takes the latest match.
 - **cross-agent 1-hour session reuse & stampede mitigation (2026-10-28)**: vault unlock is shared across all agents on the box via the profile root's `accounts/bitwarden/session.key` (windows: `%APPDATA%\mainframe\...`, linux: `$XDG_CONFIG_HOME/mainframe\...` - see `windows/mainframe-paths.psm1`). 1-tap mobile approval unlocks the vault once for 60 minutes for ALL agents (Antigravity, OpenCode, Claude Code, terminal). Previously, transient Node/Bitwarden CLI failures (concurrent execution locking `data.json`, stderr output breaking JSON parse) caused `Test-VaultSession` and external scripts (`get-session.ps1`, `unlock.ps1`) to mistakenly conclude the vault was locked or delete `session.key`, triggering duplicate approval prompts on phone within the same hour. `Test-VaultSession` now passes `--session` explicitly and retries once before declaring locked. `Wait-VaultApprovalCiphertext` in `windows/vault-approval.psm1` polls disk for fresh `session.key` writes while waiting for approval, instantly unblocking concurrent agent runs without asking for duplicate approvals. that only helps a request that is ALREADY asking, though - the prompt itself is single-flight since 2026-11-02, see "one phone prompt at a time" below.
 - **the linux side now has the same 1-hour session (2026-11-01)**: `linux/linux_real.py` used to unlock the vault on EVERY run and lock it again in a `finally`, so a container asked the phone for a tap every single time. it now caches the raw bw session key at `<work_root>/vault/session.key` (mode 600) exactly like windows does at `%APPDATA%\mainframe\accounts\bitwarden\session.key`: a run inside the TTL reuses it and asks for NOTHING, an expired one is locked and purged so the phone is asked again, and `--lock-vault` (the linux twin of `windows/vault-lock.ps1`) purges it on demand. the TTL comes from the same `vaultTtlMinutes` config key with the same precedence as windows (env > config > 60). the cli stays unlocked while a fresh session is cached - that is what keeps the cached key usable, and it is the windows behaviour too. symmtry is the point: one tap per hour on every machine, not one per run.
 - **parity proven on the muse container (2026-11-01)**: two consecutive `linux/linux_real.py` runs in the container, the second one inside the TTL: `verification codes pushed: 0`, `times it asked the phone: 0`, `reused the cached session: 1`, `rate limit hits: 0`, `failures: []`. the windows side proves the same from the other end - the cached session key alone reads the vault (`bw list items --session <cached>` -> 1334 items) with no unlock and no phone approval, and `bw status` says `locked` on both machines while the cached key still works. the session key does not need the cli to be unlocked, only to be *authenticated* (`unauthenticated` is the one state that forces a new approval).
@@ -2139,7 +2117,7 @@ and post garbage that killed a live approval.
 
 - **no default topic.** `Get-VaultNtfyTopic` (exported by `windows/vault-approval.psm1`)
   resolves `-Topic` -> `MAINFRAME_NTFY_TOPIC` -> `ntfyTopic` in
-  `mainframe.config.json` (script dir, cwd, `~/.config/mainframe/`), and throws
+  `mainframe.config.json` (checkout root, `~/.config/mainframe/`), and throws
   with the searched paths when nothing is set. never reintroduce a literal topic
   in code -- it runs on a public server.
 - **a random topic name is UNGUESSABLE, not private.** the topic lives on
@@ -2415,7 +2393,6 @@ the fix does not depend on the topic name at all:
   runs under windows powershell 5.1 AND pwsh 7. the relay side:
   `test/relay-lock.test.mjs` and `test/page-signature.test.mjs` in
   `automata-private\vercel.com\mainframe-vault-relay`.
-- **sid topic polling carries signed descriptor (2026-11-08)**: on a fresh restore with no `ntfyAuth`, anonymous GET on `/ntfy/<sid>/raw` returned 403 on the relay. `Wait-VaultApprovalCiphertext` now takes `$Descriptor` and `$Signature` and passes them as `X-MF-Desc` / `X-MF-Sig` headers so polling succeeds without pre-provisioned credentials.
 
 what is still open: nothing about the master password - a leaked topic name
 buys an attacker nothing there. the phone now reads the wake-up topic
@@ -2490,6 +2467,73 @@ if a lock ever looks wedged (a bogus far-future `expiresAt` from a suspended
 process), deleting the file is safe - it only serialises prompts, it never holds
 a secret. normally nothing needs doing: the deadline handles it.
 
+### approval links are signed with one shared key (2026-11-15)
+
+supersedes the 2026-11-05 per-machine registration design (deleted
+2026-11-15, restored the same day in shared-key form — the user rejected
+per-machine registration, so there is exactly ONE signing key pair for the
+whole ecosystem, not one per machine).
+
+- **the key.** ECDSA P-256, private key at
+  `~/.config/mainframe/approval-signing.key` (0600) + a vault item as the
+  backup/source + carried by migration packs (build-pack.py standing
+  files). the public key is pinned in `docs/vault-tab.html` (a public key
+  in a public page is fine).
+- **the signature.** the runner signs `k LF sid LF code LF exp LF srv`
+  (ECDSA + SHA-256, 64-byte raw R‖S, base64url) and the signature rides
+  the link fragment as `sig`. the page verifies against the pinned key
+  BEFORE showing the approve UI.
+- **warn mode, not enforced — yet.** `ENFORCE_SIGNING = false` in the
+  page: an unsigned or invalid link shows a big red banner but still
+  allows approval. enforcement flips only after every machine holds the
+  key (A, B, laptop, desktop-main confirmed) — a separate step, never
+  flip it casually.
+- **the key travels with the topic, always.** a device without the topic
+  cannot send an approval at all (the runner fails loudly), so there is
+  no new device that approves unsigned: pack restores get key+topic
+  together and their first approval is already signed. the unsigned case
+  only happens on existing machines during the transition, and only when
+  their vault session is dead at that moment.
+- **the runner self-heals.** whenever the vault session is live and the
+  local key file is missing, the runner fetches the key from the vault
+  and saves it 0600 — at flow start, at request time, and after an
+  unlock. the fetch happens AFTER the unlock, never before, so there is
+  no circularity. the only deadlock under future enforcement is
+  session-dead + key-file-lost at the same time (two simultaneous
+  failures); recovery is re-delivering key+topic via the pack.
+- **rotating the topic** (the one user step: the phone subscription
+  changes too) is documented in `docs/ntfy-topic-rotation.md`, scripted
+  in `windows/rotate-ntfy-topic.ps1`. the topic is never printed any
+  more — only a 4-char fingerprint.
+- tests: `tests/vault-approval-signing.Tests.ps1` pins the sign/verify
+  round-trip, the self-heal, and the warn-mode flag.
+
+### the 12h session expires for real (2026-11-15)
+
+the 12-hour TTL stays (clamped to 720 max), but expiry used to be lazy:
+`Get-VaultSession` only checked age-vs-TTL on the next vault use, so
+`session.key` sat on disk — and the server session stayed live — past the
+mark until something touched the vault. a direct
+`BW_SESSION=$(cat session.key) bw ...` bypassed the check entirely.
+
+- **every unlock registers a one-shot expiry job** that runs the full
+  `Expire-VaultSession` (`bw logout` + purge + `bw status` verify) at
+  the TTL mark with zero vault use needed: a one-shot schtasks task
+  (`MainframeVaultExpiry`) on windows, a `systemd-run` transient timer
+  (`mainframe-vault-expiry`) on linux, a detached sleeper only as a
+  fallback. the lazy check remains the backstop. the job cleans up after
+  itself; re-unlock replaces it; a manual lock/expire cancels it.
+- **the env fallback is TTL-gated too.** `Set-VaultSessionKey` stamps
+  `MAINFRAME_VAULT_SESSION_STARTED_UNIX` at unlock; an env-only session
+  without the marker is refused and cleared in-process.
+- **`-AllowExpired` is gone** (zero callers). `boot.ps1` persists through
+  `Set-VaultSessionKey -ScheduleExpiry` too, so a boot unlock expires on
+  the same schedule, and it uses `--passwordfile` (0600 temp file) instead
+  of `BW_PASSWORD` everywhere — same as the vault modules.
+- tests: `tests/vault-session-scheduled-expiry.Tests.ps1` proves with a
+  1-minute TTL that the file is gone and `bw status` is unauthenticated
+  after the mark with zero vault use in between.
+
 ## one vault flow, one implementation
 
 the python copy of the vault flow is GONE. `linux/linux_real.py` no longer has
@@ -2545,9 +2589,11 @@ install and a failure to start is a loud error, never a silent skip.
 - **`ConvertFrom-Json` on a JSON array returns ONE object in Windows
   PowerShell 5.1** and many in pwsh 7. `windows/mainframe-json.psm1`
   (`ConvertFrom-JsonArray`) is the one place that difference is handled.
-- **the linux config file lookup also checks the working directory**, so a test
-  that runs a driver script must run it in a folder without a
-  `mainframe.config.json`.
+- **the config lookup does NOT check the working directory any more**
+  (superseded 2026-11-15, M7): a crafted `mainframe.config.json` in a
+  directory the runner happened to run from could override the topic and
+  the relay/page bases, so the CWD candidate was dropped — checkout root
+  + profile root only. a test driver no longer needs a clean folder.
 - **caller identity resolution must inspect ancestry and context before environment variables**:
   agent session environment variables (`ANTIGRAVITY_CONVERSATION_ID`, `OPENCODE_SESSION`, etc.)
   leak down process trees to long-running services (like the automata monitor).
