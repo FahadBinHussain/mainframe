@@ -264,6 +264,21 @@ try {
     Assert-True ((Get-CallLog).Count -eq 0) 'show-current touches neither bw nor the relay'
     Assert-Equal $before (Get-Content -LiteralPath $configPath -Raw) 'show-current leaves the config alone'
     Assert-True ((Get-VaultItems).Count -eq 0) 'show-current writes no vault item'
+
+    # 8. duplicate vault topic items: refuse loudly before rotating.
+    #    same shape as the link-item duplicates (a "failed" bw write
+    #    that landed server-side, then a retry that made another item).
+    Reset-CaseState
+    Set-TestConfig -Token $script:fakeToken
+    Set-VaultItems @([pscustomobject]@{ id = 'mock-id-1'; name = $topicItemName; notes = $script:fakeOldTopic }, [pscustomobject]@{ id = 'mock-id-2'; name = $topicItemName; notes = $script:fakeOldTopic })
+    $before = Get-Content -LiteralPath $configPath -Raw
+    $run = Invoke-Target -TargetArgs @{ Topic = $script:fakeNewTopic }
+    Assert-True ($run.Code -ne 0) 'duplicate topic items exit non-zero'
+    Assert-Contains $run.Output 'found 2 vault items' 'duplicate topic items are named'
+    Assert-Contains $run.Output 'mock-id-1' 'duplicate topic items list the first id'
+    Assert-Contains $run.Output 'mock-id-2' 'duplicate topic items list the second id'
+    Assert-Equal $before (Get-Content -LiteralPath $configPath -Raw) 'duplicate topic items leave the config alone'
+    Assert-Equal 0 (Get-RestCalls).Count 'duplicate topic items make no relay call'
 } finally {
     if ($null -eq $savedProfile) { Remove-Item Env:MAINFRAME_PROFILE_ROOT -ErrorAction SilentlyContinue } else { $env:MAINFRAME_PROFILE_ROOT = $savedProfile }
     if ($null -eq $savedBwState) { Remove-Item Env:MF_MOCK_BW_STATE -ErrorAction SilentlyContinue } else { $env:MF_MOCK_BW_STATE = $savedBwState }

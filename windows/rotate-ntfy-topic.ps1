@@ -235,7 +235,19 @@ function Set-VaultNtfyTopic {
     }
     $items = ConvertFrom-BwJsonArray -Json $listOut
     # --search is a substring match: only the exact item name is the topic.
-    $item = @($items | Where-Object { [string]$_.name -eq $script:VaultNtfyTopicVaultItemName }) | Select-Object -First 1
+    $matches = @($items | Where-Object { [string]$_.name -eq $script:VaultNtfyTopicVaultItemName })
+    if ($matches.Count -gt 1) {
+        # duplicates happen when a bw create/edit "fails" client-side
+        # (Premature close / socket hang up) after the server already
+        # applied it, and the retry creates another item - measured
+        # 2026-11-15 (four same-name bootstrap-link items after one
+        # flaky run; the topic item has the same shape). picking the
+        # first match would silently edit the wrong one, so refuse and
+        # name the ids to clean up instead.
+        $ids = ($matches | ForEach-Object { [string]$_.id }) -join ', '
+        throw "found $($matches.Count) vault items named '$script:VaultNtfyTopicVaultItemName' (ids: $ids) - refusing to guess which one is the topic. delete all but one with 'bw delete item <id>' (keep the one whose notes match the current topic), then re-run. nothing was changed."
+    }
+    $item = $matches | Select-Object -First 1
     if ($item -and ([string]$item.notes).Trim() -eq $Topic) {
         Write-Host 'vault topic item already holds this value - nothing to write there (a previous run wrote the vault and stopped before the local config).'
         return
@@ -378,7 +390,15 @@ function Get-VaultBootstrapLink {
     }
     $items = ConvertFrom-BwJsonArray -Json $listOut
     # --search is a substring match: only the exact item name is the link.
-    $item = @($items | Where-Object { [string]$_.name -eq $script:VaultBootstrapLinkItemName }) | Select-Object -First 1
+    $matches = @($items | Where-Object { [string]$_.name -eq $script:VaultBootstrapLinkItemName })
+    if ($matches.Count -gt 1) {
+        # same duplicate shape as the topic item above: a "failed"
+        # create/edit that landed server-side, then a retry that made
+        # another item. refuse to guess which link is the live one.
+        $ids = ($matches | ForEach-Object { [string]$_.id }) -join ', '
+        throw "found $($matches.Count) vault items named '$script:VaultBootstrapLinkItemName' (ids: $ids) - refusing to guess which one is the link. delete all but one with 'bw delete item <id>' (keep the one whose link matches the local config), then re-run."
+    }
+    $item = $matches | Select-Object -First 1
     if (-not $item) { return $null }
     return ([string]$item.notes).Trim()
 }

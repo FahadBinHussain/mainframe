@@ -336,6 +336,22 @@ try {
     $run = Invoke-Target
     Assert-True ($run.Code -ne 0) 'a plain-http relay exits non-zero'
     Assert-Contains $run.Output 'is not https' 'a plain-http relay names itself'
+
+    # 13. duplicate vault link items: refuse loudly, touch nothing.
+    #    duplicates happen when a bw create/edit "fails" client-side
+    #    after the server applied it (measured 2026-11-15: four
+    #    same-name items after one flaky run).
+    Reset-CaseState
+    Set-TestConfig
+    Set-Content -LiteralPath (Join-Path $bwState 'items.json') -Value (ConvertTo-Json -InputObject @([pscustomobject]@{ id = 'mock-id-1'; name = $linkItemName; notes = "$script:relayBase/bootstrap/$script:fakeOldToken" }, [pscustomobject]@{ id = 'mock-id-2'; name = $linkItemName; notes = "$script:relayBase/bootstrap/$script:fakeVaultToken" }) -Compress) -NoNewline
+    $before = Get-Content -LiteralPath $configPath -Raw
+    $run = Invoke-Target
+    Assert-True ($run.Code -ne 0) 'duplicate vault items exit non-zero'
+    Assert-Contains $run.Output 'found 2 vault items' 'duplicate vault items are named'
+    Assert-Contains $run.Output 'mock-id-1' 'duplicate vault items list the first id'
+    Assert-Contains $run.Output 'mock-id-2' 'duplicate vault items list the second id'
+    Assert-Equal $before (Get-Content -LiteralPath $configPath -Raw) 'duplicate vault items leave the config alone'
+    Assert-Equal 0 (Get-RestCalls).Count 'duplicate vault items make no relay call'
 } finally {
     if ($null -eq $savedProfile) { Remove-Item Env:MAINFRAME_PROFILE_ROOT -ErrorAction SilentlyContinue } else { $env:MAINFRAME_PROFILE_ROOT = $savedProfile }
     if ($null -eq $savedBwState) { Remove-Item Env:MF_MOCK_BW_STATE -ErrorAction SilentlyContinue } else { $env:MF_MOCK_BW_STATE = $savedBwState }
