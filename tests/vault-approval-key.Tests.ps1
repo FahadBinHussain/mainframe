@@ -119,24 +119,12 @@ try {
     else { $env:MAINFRAME_APPROVAL_SIGNING_KEY = $savedKeyEnv }
 }
 
-# 7. the credential resolver picks the right shape
-$savedAuth = $env:MAINFRAME_NTFY_AUTH
-$savedToken = $env:MAINFRAME_NTFY_TOKEN
-try {
-    Remove-Item Env:\MAINFRAME_NTFY_AUTH -ErrorAction SilentlyContinue
-    Remove-Item Env:\MAINFRAME_NTFY_TOKEN -ErrorAction SilentlyContinue
-    Assert-Equal 'Bearer tk_explicit' (Get-VaultNtfyCredential -Token 'tk_explicit') 'an explicit token becomes a bearer header'
-    Assert-Equal 'Basic abc123' (Get-VaultNtfyCredential -Auth 'Basic abc123') 'an explicit credential is used as it is'
-    $env:MAINFRAME_NTFY_AUTH = 'Basic fromenv'
-    Assert-Equal 'Basic fromenv' (Get-VaultNtfyCredential) 'the environment overrides the config'
-    $env:MAINFRAME_NTFY_TOKEN = 'tk_fromenv'
-    Assert-Equal 'Basic fromenv' (Get-VaultNtfyCredential) 'the credential wins over the token'
-} finally {
-    if ($null -eq $savedAuth) { Remove-Item Env:\MAINFRAME_NTFY_AUTH -ErrorAction SilentlyContinue }
-    else { $env:MAINFRAME_NTFY_AUTH = $savedAuth }
-    if ($null -eq $savedToken) { Remove-Item Env:\MAINFRAME_NTFY_TOKEN -ErrorAction SilentlyContinue }
-    else { $env:MAINFRAME_NTFY_TOKEN = $savedToken }
-}
+# 7. there is no credential resolver any more - topic-only auth means no
+#    header or token is ever resolved, sent, or read from the config
+$source = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../vault-approval.psm1') -Raw
+Assert-True ($source -notmatch 'function Get-VaultNtfyCredential') 'there is no credential resolver'
+Assert-True ($source -notmatch 'MAINFRAME_NTFY_AUTH') 'there is no ntfy auth environment variable'
+Assert-True ($source -notmatch "'ntfyAuth'") 'the config carries no ntfy auth key'
 
 # 8. a machine with no key provisioned mints its own pair and proceeds -
 # no registration step, no stop. the second call loads the same key.

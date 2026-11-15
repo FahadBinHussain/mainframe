@@ -268,64 +268,12 @@ function Get-VaultNtfyServer {
     return $Server.TrimEnd('/')
 }
 
-function Get-VaultNtfyToken {
-    param([string]$Token = $null)
-
-    # The credential of a PROTECTED ntfy topic.
-    #
-    # A topic on ntfy.sh is public by default: anyone who knows the name can
-    # read every request on it and post their own. A random name makes it
-    # unguessable, but "unguessable" is not "private" - the name leaks through
-    # a backup, a screenshot or a log, and a reader of the topic sees the
-    # verification code, so they can also forge a request that matches what
-    # the terminal shows.
-    #
-    # Protecting the topic closes that: ntfy refuses an anonymous read, so
-    # only a holder of the credential sees the requests at all.
-    #
-    # The credential is an ntfy access token (tk_...). ntfy tokens are NOT
-    # topic-scoped - a token grants full access to its account - so it lives
-    # only in the local, gitignored config, exactly like the topic name.
-    if (-not $Token) { $Token = $env:MAINFRAME_NTFY_TOKEN }
-    if (-not $Token) { $Token = Get-VaultConfigValue -Key 'ntfyToken' }
-    if ($Token) { return $Token.Trim() }
-    return $null
-}
-
-function Get-VaultNtfyCredential {
-    <#
-    .SYNOPSIS
-        the Authorization header value for the approval channel.
-    .DESCRIPTION
-        Two shapes are supported, and both are plain header values:
-            "Bearer tk_..."   an ntfy access token
-            "Basic <base64>"  the ntfy account's user:password
-
-        The token on ntfy.sh expires after a few days, the password does not.
-        A machine that keeps this config for months wants the basic form.
-
-        Why it matters even though a free ntfy.sh topic cannot be protected:
-        the RELAY can be locked. The relay compares the Authorization header
-        with the credential it holds and refuses everything else, so knowing a
-        topic name is not enough to read the approval traffic or to post a
-        fake request through the relay.
-    #>
-    param(
-        [string]$Token = $null,
-        [string]$Auth = $null
-    )
-
-    if ($Token) { return "Bearer $($Token.Trim())" }
-    if ($Auth) { return $Auth.Trim() }
-    if ($env:MAINFRAME_NTFY_AUTH) { return $env:MAINFRAME_NTFY_AUTH.Trim() }
-    $configuredAuth = Get-VaultConfigValue -Key 'ntfyAuth'
-    if ($configuredAuth) { return ([string]$configuredAuth).Trim() }
-    if ($env:MAINFRAME_NTFY_TOKEN) { return "Bearer $($env:MAINFRAME_NTFY_TOKEN.Trim())" }
-    $configuredToken = Get-VaultConfigValue -Key 'ntfyToken'
-    if ($configuredToken) { return "Bearer $(([string]$configuredToken).Trim())" }
-    return $null
-}
-
+# topic-only auth: there is no ntfy credential in the design any more.
+# the topic name in mainframe.config.json is the only credential - a
+# request that knows it may publish and read, no header or token is ever
+# sent. (an earlier design carried an ntfy access token / basic auth in
+# the config and a relay credential on the worker; both were removed
+# 2026-11-15 because every new machine needed a manual handover step.)
 function Get-VaultPagesBase {
     param(
         [string]$PagesBase = $null,
@@ -696,17 +644,12 @@ function Send-VaultApprovalNotification {
         [string]$PromptContext = "vault access",
         [string]$Agent = $null,
         [string]$Model = $null,
-        [string]$Server = $null,
-        [string]$Token = $null,
-        [string]$Auth = $null,
-        [switch]$NoToken
+        [string]$Server = $null
     )
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
-    # -NoToken forces an anonymous publish, which is what a PUBLIC topic
-    # needs. without it the credential comes from the config, because a
-    # PROTECTED topic refuses an anonymous one.
-    $resolvedCredential = if ($NoToken) { $null } else { Get-VaultNtfyCredential -Token $Token -Auth $Auth }
+    # topic-only auth: every publish is anonymous. knowing the topic name
+    # is the credential - no header is ever sent.
     try {
         $callerTag = if ($Agent) { "$HostName - $Agent" } else { $HostName }
         $title = if ($Code) { "Vault Unlock: Code [$Code] ($callerTag)" } else { "Vault Unlock ($callerTag)" }
@@ -721,12 +664,6 @@ function Send-VaultApprovalNotification {
             # read the body back byte for byte.
             'Content-Type' = 'text/plain; charset=utf-8'
         }
-        # A PROTECTED topic needs the credential. Without it ntfy answers 403
-        # and the push is simply dropped - the phone never hears about the
-        # request, so the runner would sit there until it times out with
-        # nothing to explain the silence.
-        if ($resolvedCredential) { $headers['Authorization'] = $resolvedCredential }
-
         $bodyParts = @("Request from $HostName")
         if ($Agent) { $bodyParts += "Agent: $Agent" }
         if ($Model) { $bodyParts += "Model: $Model" }
@@ -741,10 +678,11 @@ function Send-VaultApprovalNotification {
         $status = 0
         try { $status = [int]$_.Exception.Response.StatusCode } catch { $status = 0 }
         if ($status -eq 401 -or $status -eq 403) {
-            # the topic is protected and the credential is missing or wrong.
-            # ntfy answers 403 and drops the message, so without this the only
-            # symptom is a phone that never buzzes.
-            Write-MainframeWarning "ntfy refused the push to topic '$Topic' (HTTP $status): the topic is protected and the credential is missing or wrong. set 'ntfyToken' in mainframe.config.json (or MAINFRAME_NTFY_TOKEN) to the ntfy access token that owns the topic."
+            # the relay answers 403 only when the topic or server is wrong -
+            # there is no credential to set, the topic name in
+            # mainframe.config.json is the credential. without this warning
+            # the only symptom is a phone that never buzzes.
+            Write-MainframeWarning "ntfy refused the push to topic '$Topic' (HTTP $status): the relay or topic is misconfigured. check ntfyTopic and ntfyServer in mainframe.config.json - there is no credential to set."
         } else {
             Write-MainframeWarning "ntfy push dispatch to topic '$Topic' failed: $_"
         }
@@ -777,9 +715,6 @@ function Send-VaultRequestExpired {
             'Tags'     = 'hourglass'
             'Content-Type' = 'text/plain; charset=utf-8'
         }
-        $expiredCredential = Get-VaultNtfyCredential
-        if ($expiredCredential) { $headers['Authorization'] = $expiredCredential }
-
         $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
         $null = Invoke-RestMethod -Uri "$resolvedServer/$Sid" -Method Post -Headers $headers -Body $bodyBytes -TimeoutSec 10 -ErrorAction Stop
         return $true
@@ -876,11 +811,9 @@ function Wait-VaultApprovalCiphertext {
 
         # 2. Poll relay topic
         try {
-            # the relay is locked: it only answers a reader that presents the
-            # credential, so the poll carries it.
+            # topic-only auth: the poll carries no credential - knowing the
+            # sid topic name is what authorises the read.
             $pollHeaders = @{}
-            $pollCredential = Get-VaultNtfyCredential
-            if ($pollCredential) { $pollHeaders['Authorization'] = $pollCredential }
             # Invoke-RestMethod parses a JSON body into an object, which turns
             # an expired marker into something no regex can recognise. the
             # webrequest content stays text, so markers and ciphertext look
@@ -1459,7 +1392,6 @@ Export-ModuleMember -Function `
     Get-VaultConfigValue, `
     Get-VaultNtfyTopic, `
     Get-VaultNtfyServer, `
-    Get-VaultNtfyToken, `
     Get-VaultPagesBase, `
     ConvertTo-SubjectPublicKeyInfo, `
     ConvertTo-SubjectPublicKeyInfoManual, `
@@ -1468,7 +1400,6 @@ Export-ModuleMember -Function `
     New-VaultApprovalSigningKeyFile, `
     Get-VaultApprovalSigningKeyPath, `
     Get-VaultApprovalPublicKey, `
-    Get-VaultNtfyCredential, `
     Send-VaultApprovalNotification, `
     Send-VaultRequestExpired, `
     Open-VaultApprovalOnPhone, `
