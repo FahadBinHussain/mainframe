@@ -262,7 +262,12 @@ function Set-VaultNtfyTopic {
         Write-Host "vault topic item updated: $script:VaultNtfyTopicVaultItemName"
         return
     }
-    $templateOut = Invoke-Bw -Bw $Bw -Arguments @('get', 'template', 'item.securenote')
+    # get template takes the session too: a session-less call makes the
+    # rust bw CLI prompt for the master password instead of printing the
+    # template (measured 2026-11-15 — the first real link creation died
+    # here, and the rotate script had the same latent call). encode
+    # stays bare: it works without a session.
+    $templateOut = Invoke-Bw -Bw $Bw -Arguments (@('get', 'template', 'item.securenote') + $SessionArgs)
     if (-not $templateOut) {
         throw "bw get template item.securenote failed - cannot create the vault topic item, refusing to rotate. ($script:BwLastError) nothing was changed."
     }

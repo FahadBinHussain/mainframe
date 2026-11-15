@@ -308,7 +308,11 @@ function Set-VaultBootstrapLink {
         Write-Host "vault bootstrap-link item updated: $script:VaultBootstrapLinkItemName"
         return
     }
-    $templateOut = Invoke-Bw -Bw $Bw -Arguments @('get', 'template', 'item.securenote')
+    # get template takes the session too: a session-less call makes the
+    # rust bw CLI prompt for the master password instead of printing the
+    # template (measured 2026-11-15 — the first real link creation died
+    # here). encode stays bare: it works without a session.
+    $templateOut = Invoke-Bw -Bw $Bw -Arguments (@('get', 'template', 'item.securenote') + $SessionArgs)
     if (-not $templateOut) {
         throw "bw get template item.securenote failed - cannot create the vault bootstrap-link item, refusing to continue. ($script:BwLastError) nothing was changed."
     }
