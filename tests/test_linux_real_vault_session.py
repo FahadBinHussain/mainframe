@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 REPO = Path(__file__).parents[1]
 sys.path.insert(0, str(REPO))
-import linux_real as lr  # noqa: E402
+from linux import linux_real as lr  # noqa: E402
 
 
 class PythonVaultDuplicateIsGoneTests(unittest.TestCase):
@@ -43,8 +43,8 @@ class PythonVaultDuplicateIsGoneTests(unittest.TestCase):
                                  "it belongs in vault-flow.ps1")
 
     def test_the_powershell_cli_is_the_only_entry_point(self):
-        self.assertTrue((REPO / "vault-flow.ps1").is_file())
-        source = (REPO / "linux_real.py").read_text(encoding="utf-8")
+        self.assertTrue((REPO / "windows" / "vault-flow.ps1").is_file())
+        source = (REPO / "linux" / "linux_real.py").read_text(encoding="utf-8")
         self.assertIn("vault-flow.ps1", source)
         self.assertNotIn("secretsPassword =", source)
 
@@ -52,7 +52,7 @@ class PythonVaultDuplicateIsGoneTests(unittest.TestCase):
         # the topic is the whole privacy of the approval channel: whoever holds
         # it can read requests and push fake cards. the flow's log line goes to
         # a screen someone may paste, so it names the relay and the page only.
-        source = (REPO / "vault-flow.ps1").read_text(encoding="utf-8")
+        source = (REPO / "windows" / "vault-flow.ps1").read_text(encoding="utf-8")
         self.assertNotIn("topic '$approvalTopic'", source)
         self.assertIn("relay '$approvalServer'", source)
 
@@ -62,7 +62,7 @@ class VaultFlowCommandTests(unittest.TestCase):
         cmd = lr.vault_flow_command(REPO, "/opt/pwsh", "/opt/bw")
         self.assertEqual(cmd[0], "/opt/pwsh")
         self.assertEqual(cmd[1:5], ["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
-        self.assertEqual(cmd[5], str(REPO / "vault-flow.ps1"))
+        self.assertEqual(cmd[5], str(REPO / "windows" / "vault-flow.ps1"))
         self.assertIn("-Json", cmd)
         self.assertIn("-Checkout", cmd)
         self.assertIn("-BwPath", cmd)
@@ -192,8 +192,8 @@ class PwshAndBwResolutionTests(unittest.TestCase):
             root = Path(scratch)
             with patch.object(lr.shutil, "which", return_value=None), \
                  patch.object(lr, "log"), \
-                 patch("pwsh_linux.resolve_release", return_value={"version": "9.9.9"}) as resolve, \
-                 patch("pwsh_linux.install_release",
+                 patch("linux.pwsh_linux.resolve_release", return_value={"version": "9.9.9"}) as resolve, \
+                 patch("linux.pwsh_linux.install_release",
                        return_value={"version": "9.9.9", "pwsh_version": "9.9.9"}) as install:
                 result = lr.ensure_pwsh(root)
             self.assertEqual(result, str(root / lr.PWSH_ROOT / "pwsh"))
@@ -230,8 +230,8 @@ class PwshAndBwResolutionTests(unittest.TestCase):
             root = Path(scratch)
             with patch.object(lr.shutil, "which", return_value=None), \
                  patch.object(lr, "log"), \
-                 patch("bitwarden_cli_linux.resolve_release", return_value={"version": "1.2.3"}) as resolve, \
-                 patch("bitwarden_cli_linux.install_release", return_value={}) as install:
+                 patch("linux.bitwarden_cli_linux.resolve_release", return_value={"version": "1.2.3"}) as resolve, \
+                 patch("linux.bitwarden_cli_linux.install_release", return_value={}) as install:
                 result = lr.ensure_bw(root)
             self.assertEqual(result, str(root / "vault" / "bitwarden-cli" / "bw"))
             resolve.assert_called_once_with("x86_64")

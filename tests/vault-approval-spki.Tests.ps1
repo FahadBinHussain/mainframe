@@ -4,7 +4,7 @@
 # It never touches the network, the vault or the phone. It only builds an RSA
 # key in memory and checks the bytes the approval page would import.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../vault-approval.psm1'))
+$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {

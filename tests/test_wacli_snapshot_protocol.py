@@ -12,8 +12,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import wacli_snapshot as snapshot
-import wacli_snapshot_protocol as protocol
+from wacli import wacli_snapshot as snapshot
+from wacli import wacli_snapshot_protocol as protocol
 
 
 def blocked_plan():

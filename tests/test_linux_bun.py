@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import bun_linux as bun
+from linux import bun_linux as bun
 
 
 def elf_fixture() -> bytes:
@@ -133,13 +133,14 @@ class BunTests(unittest.TestCase):
 
 class BunPlannerTests(unittest.TestCase):
     def setUp(self):
-        import linux_packages as lp
+        from linux import linux_packages as lp
         self.lp = lp
         host = patch.object(lp, "host_info", return_value=("ubuntu", "x86_64")); host.start(); self.addCleanup(host.stop)
 
     def plan(self, names=None, resolver_error=None):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, key, values in (
                 ("scoop-allowed.json", "apps", names or ["bulk-crap-uninstaller", "bun", "ditto"]),
                 ("winget-allowed.json", "packages", [{"id": "Vendor.Unknown"}]),
@@ -147,7 +148,7 @@ class BunPlannerTests(unittest.TestCase):
                 ("uv-allowed.json", "packages", ["uv-fixture"]),
                 ("go-allowed.json", "packages", ["example.com/fixture"]),
             ):
-                (root / filename).write_text(json.dumps({key: values}))
+                (root / "manifests" / filename).write_text(json.dumps({key: values}))
             with patch.object(bun, "resolve_release", return_value={"version": "1.2.3"}, side_effect=resolver_error):
                 return self.lp.build_plan(root)
 

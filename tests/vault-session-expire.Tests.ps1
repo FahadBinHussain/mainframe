@@ -11,7 +11,7 @@
 # is faked and the profile root is a temp directory.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$secretModule = Join-Path $repo 'vault-secret.psm1'
+$secretModule = Join-Path $repo 'windows\vault-secret.psm1'
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {

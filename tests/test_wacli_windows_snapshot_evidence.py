@@ -16,8 +16,8 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 import test_wacli_windows_contract as windows_contract
-import wacli_snapshot
-import wacli_state as ws
+from wacli import wacli_snapshot
+from wacli import wacli_state as ws
 
 
 class SQLiteSnapshotEvidence(unittest.TestCase):
@@ -232,7 +232,7 @@ class WindowsCaptureStillBlocked(unittest.TestCase):
         with patch.object(windows_contract.shutil, 'which', return_value=None), \
                 patch.object(windows_contract.subprocess, 'run', side_effect=AssertionError('spawned')):
             with self.assertRaises(unittest.SkipTest):
-                harness.run_function(windows_contract.ROOT / 'backup.ps1',
+                harness.run_function(windows_contract.ROOT / 'windows' / 'backup.ps1',
                                      'Assert-WindowsWhatsappCaptureSafe', '')
 
     def test_real_uncheckpointed_wal_is_blocked_even_with_version_metadata(self):
@@ -251,7 +251,7 @@ class WindowsCaptureStillBlocked(unittest.TestCase):
                 con.commit()
                 wal = store / 'wacli.db-wal'
                 before = wal.read_bytes()
-                for script in (windows_contract.ROOT / 'backup.ps1', windows_contract.ROOT / 'backup-secrets.ps1'):
+                for script in (windows_contract.ROOT / 'windows' / 'backup.ps1', windows_contract.ROOT / 'windows' / 'backup-secrets.ps1'):
                     passed, output = harness.invoke_guard(script, root)
                     self.assertFalse(passed)
                     self.assertIn('consistent snapshot', output)
@@ -262,7 +262,7 @@ class WindowsCaptureStillBlocked(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='wacli-enumeration-synthetic-') as td:
             root = Path(td) / 'whatsapp'
             root.mkdir()
-            for script in (windows_contract.ROOT / 'backup.ps1', windows_contract.ROOT / 'backup-secrets.ps1'):
+            for script in (windows_contract.ROOT / 'windows' / 'backup.ps1', windows_contract.ROOT / 'windows' / 'backup-secrets.ps1'):
                 body = ("$ErrorActionPreference = 'Continue'; "
                         "function Get-ChildItem { [CmdletBinding()] param([string]$LiteralPath, "
                         "[switch]$File, [switch]$Directory, [switch]$Recurse, [switch]$Force) "

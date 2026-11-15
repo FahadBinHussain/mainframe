@@ -11,10 +11,10 @@ The [WACLI patch](../patches/wacli/0001-blocked-snapshot-protocol.patch) propose
 The Mainframe command below accepts a bounded capability document on standard input. It never starts a WACLI executable, resolves an account/store, reads a snapshot, requests a password, encrypts an artifact or publishes a backup:
 
 ```sh
-python3 wacli_snapshot.py check-producer < synthetic-blocked-plan.json
+python3 -m wacli.wacli_snapshot check-producer < synthetic-blocked-plan.json
 ```
 
-A recognized blocked plan returns exit **3**, not success. Invalid or unsupported input returns exit **2** with a fixed diagnostic. Existing `plan`, `capture` and `wacli_state.py plan-coordinated-capture` behavior is unchanged. No production backup or restore path calls the new inspector automatically.
+A recognized blocked plan returns exit **3**, not success. Invalid or unsupported input returns exit **2** with a fixed diagnostic. Existing `plan`, `capture` and `wacli/wacli_state.py plan-coordinated-capture` behavior is unchanged. No production backup or restore path calls the new inspector automatically.
 
 Do not probe an arbitrary executable just to obtain this document. Runtime binary trust and provenance are separate prerequisites; a matching JSON document is not proof of either. In particular, `producer_verified`, `snapshot_consumed`, `capture_enabled`, `publishable` and `complete` remain false.
 
@@ -35,7 +35,7 @@ The proposed producer emits one plain JSON object, without a generic `success`/`
 }
 ```
 
-Mainframe's [pure-bytes inspector](../wacli_snapshot_protocol.py) bounds input at 16 KiB, checks exact JSON types and rejects duplicate keys, non-standard constants, unsupported versions and any required field claiming successful capture. Unknown optional fields are ignored and never reflected in output. Even a receipt, artifact hash or `VERIFIED` claim in an optional field cannot enable capture. The parser recognizes only a blocked plan; it does not implement or accept a capture receipt.
+Mainframe's [pure-bytes inspector](../wacli/wacli_snapshot_protocol.py) bounds input at 16 KiB, checks exact JSON types and rejects duplicate keys, non-standard constants, unsupported versions and any required field claiming successful capture. Unknown optional fields are ignored and never reflected in output. Even a receipt, artifact hash or `VERIFIED` claim in an optional field cannot enable capture. The parser recognizes only a blocked plan; it does not implement or accept a capture receipt.
 
 The stdin command expects a finite input document. It does not provide process sandboxing, producer execution, an execution timeout, artifact discovery or receipt verification. Those capabilities are deliberately absent, not inferred from parsing success.
 

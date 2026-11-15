@@ -111,14 +111,14 @@ if (Test-Path $MainframeDir) { Set-Location $MainframeDir; git pull --rebase 2>$
 else { git clone "https://github.com/$Repo.git" $MainframeDir | Out-Null; if ($LASTEXITCODE -ne 0) { Die "git clone failed (no network? github blocked?)" } }
 Set-Location $MainframeDir
 
-$approvalModule = Join-Path $MainframeDir 'vault-approval.psm1'
+$approvalModule = Join-Path $MainframeDir 'windows\vault-approval.psm1'
 if (Test-Path -LiteralPath $approvalModule) {
     Import-Module $approvalModule -Force -DisableNameChecking
 }
-$pathsModule = Join-Path $MainframeDir 'mainframe-paths.psm1'
+$pathsModule = Join-Path $MainframeDir 'windows\mainframe-paths.psm1'
 if (-not (Test-Path -LiteralPath $pathsModule)) { Die "mainframe-paths.psm1 is missing from $MainframeDir - the profile-root rules live there. Pull the newest mainframe and re-run." }
 Import-Module $pathsModule -Force -DisableNameChecking
-$vaultModule = Join-Path $MainframeDir 'vault-secret.psm1'
+$vaultModule = Join-Path $MainframeDir 'windows\vault-secret.psm1'
 if (-not (Test-Path -LiteralPath $vaultModule)) { Die "vault-secret.psm1 is missing from $MainframeDir - the vault rules live there. Pull the newest mainframe and re-run." }
 Import-Module $vaultModule -Force -DisableNameChecking
 
@@ -349,13 +349,13 @@ $ghItems = Get-BwItemsOrDie -Search 'github.com' -Context "github token for $rep
 $ownerItem = $ghItems | Where-Object { $_.name -eq "github.com - $repoOwner" } | Select-Object -First 1
 if (-not $ownerItem) {
     $found = (@($ghItems) | ForEach-Object { $_.name }) -join ', '
-    Die "vault has no item named 'github.com - $repoOwner' - that is the token which can read $BackupRepo. github items in vault: $found. fix: github-account.ps1 token-add"
+    Die "vault has no item named 'github.com - $repoOwner' - that is the token which can read $BackupRepo. github items in vault: $found. fix: accounts\github-account.ps1 token-add"
 }
 $ghToken = $null
 $ownerNotes = [string]$ownerItem.notes
 $ghTokenMatch = [regex]::Match($ownerNotes, '(gh[pousr]_[A-Za-z0-9_]{30,})')
 if ($ghTokenMatch.Success -and $ghTokenMatch.Groups.Count -gt 1) { $ghToken = $ghTokenMatch.Groups[1].Value }
-if (-not $ghToken) { Die "vault item 'github.com - $repoOwner' has no github token in its notes. fix: github-account.ps1 token-add" }
+if (-not $ghToken) { Die "vault item 'github.com - $repoOwner' has no github token in its notes. fix: accounts\github-account.ps1 token-add" }
 
 # --- 3b. secrets archive password (same search + regex publish-backup.ps1 uses) ---
 Step 'fetching secrets archive password from vault'
@@ -382,9 +382,9 @@ if ($pick -match '^(q|quick)$') { $mode = 'quick' }
 Step "downloading machine-state zips from $BackupRepo"
 $env:GH_TOKEN = $ghToken
 $release = gh release view --repo $BackupRepo --json tagName,assets 2>$null | ConvertFrom-Json
-if (-not $release) { Die "no releases in $BackupRepo. run backup.ps1 -Publish on the source machine first." }
+if (-not $release) { Die "no releases in $BackupRepo. run windows\backup.ps1 -Publish on the source machine first." }
 $quickAsset = $release.assets | Where-Object name -like '*-quick.zip' | Select-Object -First 1
-if (-not $quickAsset) { Die "release $($release.tagName) has no mainframe-quick.zip asset (the core/persist/secrets 3-asset layout was retired - republish from the source machine: .\backup.ps1 -Publish)" }
+if (-not $quickAsset) { Die "release $($release.tagName) has no mainframe-quick.zip asset (the core/persist/secrets 3-asset layout was retired - republish from the source machine: .\windows\backup.ps1 -Publish)" }
 $wantPersist = $mode -eq 'full'
 if ($wantPersist) {
     $persistAsset = $release.assets | Where-Object name -like '*-persist.zip' | Select-Object -First 1
@@ -415,7 +415,7 @@ if ($persistPath) {
 # .ssh keys, opencode config and the mainframe account profiles - refuse instead.
 $encBlob = Join-Path $extract 'mainframe-secrets.zip'
 if (-not (Test-Path $encBlob)) {
-    Die "$($quickAsset.name) carries no mainframe-secrets.zip entry - restoring it would give you a partial machine. republish from the source machine: .\backup.ps1 -Publish"
+    Die "$($quickAsset.name) carries no mainframe-secrets.zip entry - restoring it would give you a partial machine. republish from the source machine: .\windows\backup.ps1 -Publish"
 }
 # decrypt it into the restore root - restore.ps1 looks for
 # $BackupRoot\tool-secrets.zip and restores it with restore-secrets.ps1.
@@ -428,7 +428,7 @@ Write-Host "secrets archive decrypted -> $extract\tool-secrets.zip"
 
 Step 'phase 1: repo restore (scoop, pnpm, uv, tasks, secrets)'
 try {
-    $restoreScript = Join-Path $MainframeDir 'restore.ps1'
+    $restoreScript = Join-Path $MainframeDir 'windows\restore.ps1'
     & pwsh -NoProfile -ExecutionPolicy Bypass -File $restoreScript -Mode $mode -BackupRoot $extract
     if ($LASTEXITCODE -ne 0) { Die "restore.ps1 phase 1 failed (exit $LASTEXITCODE) - scroll up for the exact error" }
 } catch {
@@ -438,7 +438,7 @@ try {
 # --- 6. tailscale (vault authkey) ---
 Step 'provisioning tailscale'
 try {
-    $tailscaleScript = Join-Path $MainframeDir 'tailscale-account.ps1'
+    $tailscaleScript = Join-Path $MainframeDir 'accounts\tailscale-account.ps1'
     & pwsh -NoProfile -ExecutionPolicy Bypass -File $tailscaleScript provision 2>$null
 } catch { Write-Warning "tailscale provision failed: $($_.Exception.Message) - do it manually later" }
 

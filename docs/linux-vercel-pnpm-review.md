@@ -4,7 +4,7 @@
 
 The package allowlist continues to name `vercel` without a version. A default package plan does not query npm for Vercel. With explicit `--pnpm-plan-config` and new, distinct isolated roots, the dry planner reads npm JSON metadata for `vercel/latest`, verifies that the exact root-version endpoint agrees on recorded fields, and records the root version, registry SRI, Node engine, lifecycle-hook metadata, and exact direct dependencies. Exact-version Linux optional `@vercel/vc-native-*` entries also carry their registry version, SRI, and declared OS/CPU/libc fields. Non-exact dependency ranges remain unresolved rather than being guessed or resolved by running pnpm.
 
-On 2026-10-24, the live npm [`vercel/latest` endpoint](https://registry.npmjs.org/vercel/latest) reported `65.2.0` with `engines.node >=20`; its [exact-version endpoint](https://registry.npmjs.org/vercel/65.2.0) matched the reviewed registry metadata. This is a dated observation, not a version pin or a change to `pnpm-allowed.json`.
+On 2026-10-24, the live npm [`vercel/latest` endpoint](https://registry.npmjs.org/vercel/latest) reported `65.2.0` with `engines.node >=20`; its [exact-version endpoint](https://registry.npmjs.org/vercel/65.2.0) matched the reviewed registry metadata. This is a dated observation, not a version pin or a change to `manifests/pnpm-allowed.json`.
 
 ## Native execution stays disabled
 

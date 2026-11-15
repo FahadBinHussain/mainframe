@@ -3,8 +3,8 @@
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
-$approvalModule = [IO.Path]::GetFullPath((Join-Path $scriptDir '../vault-approval.psm1'))
-$secretModule = [IO.Path]::GetFullPath((Join-Path $scriptDir '../vault-secret.psm1'))
+$approvalModule = [IO.Path]::GetFullPath((Join-Path $scriptDir '..\windows\vault-approval.psm1'))
+$secretModule = [IO.Path]::GetFullPath((Join-Path $scriptDir '..\windows\vault-secret.psm1'))
 
 Import-Module $approvalModule -Force -DisableNameChecking
 Import-Module $secretModule -Force -DisableNameChecking

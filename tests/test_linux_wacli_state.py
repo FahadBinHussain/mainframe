@@ -14,8 +14,8 @@ from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import wacli_state as ws
-import linux_restore as lr
+from wacli import wacli_state as ws
+from linux import linux_restore as lr
 
 
 class WacliStateTests(unittest.TestCase):

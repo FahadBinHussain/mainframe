@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import vscode_linux as vscode
+from linux import vscode_linux as vscode
 
 VERSION = "1.2.3"
 COMMIT = "a" * 40

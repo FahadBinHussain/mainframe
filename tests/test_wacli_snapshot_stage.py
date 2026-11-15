@@ -14,8 +14,8 @@ from unittest.mock import patch
 
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import wacli_snapshot_stage as stage
-from wacli_snapshot_stage import SnapshotStageError, StageLimits, stage_snapshot
+from wacli import wacli_snapshot_stage as stage
+from wacli.wacli_snapshot_stage import SnapshotStageError, StageLimits, stage_snapshot
 
 
 # this contract needs the POSIX filesystem operations (O_NOFOLLOW, private

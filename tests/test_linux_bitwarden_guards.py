@@ -12,8 +12,8 @@ import zipfile
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-import bitwarden_cli_linux as bw
-import linux_packages as lp
+from linux import bitwarden_cli_linux as bw
+from linux import linux_packages as lp
 import test_linux_bitwarden as fixtures
 from test_linux_bitwarden import Response, elf_fixture
 

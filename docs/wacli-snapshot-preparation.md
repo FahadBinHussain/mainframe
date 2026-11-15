@@ -4,7 +4,7 @@
 
 ## What can be exercised now
 
-The private engine in [`wacli_snapshot_stage.py`](../wacli_snapshot_stage.py) works only on an explicitly supplied, already-private staged store. It preserves raw staged files separately from derived `wacli.db` and `session.db` snapshots. SQLite recovery and online backup happen on a separate scratch copy, never on the supplied input or preserved originals. Unknown files, sidecars and schema objects are not silently filtered out.
+The private engine in [`wacli/wacli_snapshot_stage.py`](../wacli/wacli_snapshot_stage.py) works only on an explicitly supplied, already-private staged store. It preserves raw staged files separately from derived `wacli.db` and `session.db` snapshots. SQLite recovery and online backup happen on a separate scratch copy, never on the supplied input or preserved originals. Unknown files, sidecars and schema objects are not silently filtered out.
 
 This is **preparation**, not a capture attestation. Its versioned preparation receipt records file hashes, SQLite observations and schema metadata, but keeps the capture boundary and historical producer unverified and the result non-publishable. A staged tree may already be torn across its two databases or media. An integrity check, matching version numbers, or a caller-written receipt cannot fix or certify that.
 
@@ -12,7 +12,7 @@ The private engine requires Python 3.11+ with the SQLite backup API and supporte
 
 Full schema definitions can themselves contain sensitive literals, names and trigger/view SQL. The receipt is therefore **sensitive private data**, not a safe log or public provenance document. Only recognized version-table columns are read; arbitrary table/view shapes fail. Schema definitions remain intact in private staging and the encrypted candidate to satisfy lossless preservation, never in public CLI output.
 
-The private integration in [`wacli_snapshot.py`](../wacli_snapshot.py) tests the existing container layout: `mainframe-secrets.zip`, WinZip AES-256, containing `tool-secrets.zip`. It verifies authenticated decryption and exact byte hashes before returning a candidate inside a caller-owned private workspace. It is not connected to a release publisher. Sensitive staging is temporary; cleanup is not secure erasure after a crash or process kill.
+The private integration in [`wacli/wacli_snapshot.py`](../wacli/wacli_snapshot.py) tests the existing container layout: `mainframe-secrets.zip`, WinZip AES-256, containing `tool-secrets.zip`. It verifies authenticated decryption and exact byte hashes before returning a candidate inside a caller-owned private workspace. It is not connected to a release publisher. Sensitive staging is temporary; cleanup is not secure erasure after a crash or process kill.
 
 The low-level preparation destination is reserved exclusively and its completion receipt is written last. It is not an atomic durable backup publication. A killed process or failed cleanup can leave private plaintext staging; an existing/partial destination must be reviewed and cannot be reused or considered complete. Normal integration scopes all preparation and encryption inside a private temporary context and removes that context on normal exit or exceptions. Cleanup failures return fixed diagnostics, not private filesystem errors. No startup process scans or deletes a user's directories automatically.
 
@@ -23,14 +23,14 @@ The candidate's inner members use **`WacliPreparation/v1/`**, not either existin
 These public preflights return a fixed JSON report and exit **3** for blocked:
 
 ```sh
-python3 wacli_snapshot.py plan
-python3 wacli_state.py plan-coordinated-capture
-python3 wacli_snapshot.py capture \
+python3 -m wacli.wacli_snapshot plan
+python3 -m wacli.wacli_state plan-coordinated-capture
+python3 -m wacli.wacli_snapshot capture \
   --source-root /approved/source \
   --destination /approved/new-output
 ```
 
-Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The legacy native `wacli_state.py capture --quiesced` path is now also unconditionally disabled: caller attestation cannot substitute for writer ownership and launch exclusion. Its `snapshot()` API refuses too; offline export and metadata sidecar checks remain available. The Windows native helper retains a writerless VSS copy implementation, but the integrated backup now fails closed before export for WACLI state because supported metadata cannot prove coverage of media paths stored only in SQLite. Any future permitted payload remains crash-consistent only and does not enable the no-I/O or coordinated capture APIs.
+Even the `capture` operation reads neither path, asks for no password, loads no encryption provider, and creates no artifact. There is no `--force`, `--quiesced`, receipt-import, or lock-only override. The legacy native `wacli/wacli_state.py capture --quiesced` path is now also unconditionally disabled: caller attestation cannot substitute for writer ownership and launch exclusion. Its `snapshot()` API refuses too; offline export and metadata sidecar checks remain available. The Windows native helper retains a writerless VSS copy implementation, but the integrated backup now fails closed before export for WACLI state because supported metadata cannot prove coverage of media paths stored only in SQLite. Any future permitted payload remains crash-consistent only and does not enable the no-I/O or coordinated capture APIs.
 
 ## Upstream command proposal, not a snapshot backend
 

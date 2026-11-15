@@ -4,12 +4,12 @@
 
 ## What is available
 
-`wacli_state.py plan --state-root /approved/state-root` inspects filenames and metadata only. It does not parse config, messages, SQL rows, session credentials or tokens. It reports `capture_enabled: false`. SQLite WAL/SHM/journal files, links, special files and unsafe names still block this inspection; nothing is deleted or checkpointed.
+`wacli/wacli_state.py plan --state-root /approved/state-root` inspects filenames and metadata only. It does not parse config, messages, SQL rows, session credentials or tokens. It reports `capture_enabled: false`. SQLite WAL/SHM/journal files, links, special files and unsafe names still block this inspection; nothing is deleted or checkpointed.
 
-`python3 wacli_state.py plan-coordinated-capture` reads no source and exits 3 with fixed blocked diagnostics. The legacy capture syntax also exits 3 without source or destination access:
+`python3 -m wacli.wacli_state plan-coordinated-capture` reads no source and exits 3 with fixed blocked diagnostics. The legacy capture syntax also exits 3 without source or destination access:
 
 ```sh
-python3 wacli_state.py capture --state-root /approved/state-root \
+python3 -m wacli.wacli_state capture --state-root /approved/state-root \
   --quiesced --destination /approved/new-backup-directory
 ```
 
@@ -19,7 +19,7 @@ Normal Linux installation is still a separate dry plan, not a tested installatio
 
 ## Why stop/copy/restart is not yet sound
 
-The current [Windows account helper](../whatsapp-account.ps1) launches authentication in a detached PowerShell window and invokes arbitrary WACLI commands directly. It does not register process identities or long-running service ownership, prove clean application shutdown, or hold an admission gate that excludes new launches. Mainframe has no reliable inventory of independent SQLite/media writers or retained writable handles. A process-name scan or forced kill cannot supply that missing proof.
+The current [Windows account helper](../accounts/whatsapp-account.ps1) launches authentication in a detached PowerShell window and invokes arbitrary WACLI commands directly. It does not register process identities or long-running service ownership, prove clean application shutdown, or hold an admission gate that excludes new launches. Mainframe has no reliable inventory of independent SQLite/media writers or retained writable handles. A process-name scan or forced kill cannot supply that missing proof.
 
 A future backend must establish all of the following before copying:
 
@@ -32,12 +32,12 @@ No stop/restart wrapper is added while these primitives are absent: it could int
 
 ## Explicit offline export remains available
 
-Normal `linux_restore.py` recovery keeps the encrypted envelope opaque and never decrypts it. Native ZIP members are not automatically activated or home-staged by `--apply-portable`.
+Normal `linux/linux_restore.py` recovery keeps the encrypted envelope opaque and never decrypts it. Native ZIP members are not automatically activated or home-staged by `--apply-portable`.
 
 After the owner separately authorizes and performs the normal secret-archive unlock flow, an existing compatible `tool-secrets.zip` can be exported to a **new offline directory**:
 
 ```sh
-python3 wacli_state.py restore-unlocked \
+python3 -m wacli.wacli_state restore-unlocked \
   --archive /approved/unlocked/tool-secrets.zip \
   --destination /approved/new-offline-wacli-state
 ```

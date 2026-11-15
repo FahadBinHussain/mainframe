@@ -11,8 +11,8 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import linux_migrations as lm
-import linux_restore as lr
+from linux import linux_migrations as lm
+from linux import linux_restore as lr
 
 
 def encode_registry_export(text):

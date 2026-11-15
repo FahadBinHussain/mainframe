@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import anydesk_linux as ad
+from linux import anydesk_linux as ad
 
 
 class Response:

@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import google_workspace_cli_linux as g
+from linux import google_workspace_cli_linux as g
 
 VERSION = "1.2.3"
 INTEGRITY = "sha512-" + base64.b64encode(hashlib.sha512(b"package").digest()).decode()

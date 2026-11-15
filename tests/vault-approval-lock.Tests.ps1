@@ -15,7 +15,7 @@
 # is a temp directory.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$module = Join-Path $repo 'vault-approval.psm1'
+$module = Join-Path $repo 'windows\vault-approval.psm1'
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {

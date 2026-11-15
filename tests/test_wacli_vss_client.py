@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 
-import wacli_snapshot
+from wacli import wacli_snapshot
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / 'wacli-vss-client'

@@ -12,8 +12,8 @@ from unittest.mock import patch
 from zipfile import ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import linux_restore as lr
-import linux_real as lrreal
+from linux import linux_restore as lr
+from linux import linux_real as lrreal
 
 
 class LinuxRestoreTests(unittest.TestCase):

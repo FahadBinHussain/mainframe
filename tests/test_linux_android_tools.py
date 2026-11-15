@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import android_commandline_tools as act
+from linux import android_commandline_tools as act
 
 VERSION = "12345678"
 WIN = f"https://dl.google.com/android/repository/commandlinetools-win-{VERSION}_latest.zip"

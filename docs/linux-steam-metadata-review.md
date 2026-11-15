@@ -2,7 +2,7 @@
 
 ## What the sources show
 
-The tracked [`scoop-allowed.json`](../scoop-allowed.json) entry is the bare package name `steam`; it does not identify a Windows package version or manifest source. No private backup or live install state was inspected to infer one.
+The tracked [`manifests/scoop-allowed.json`](../manifests/scoop-allowed.json) entry is the bare package name `steam`; it does not identify a Windows package version or manifest source. No private backup or live install state was inspected to infer one.
 
 Valve's [official Steam Linux repository page](https://repo.steampowered.com/steam/) describes the current Ubuntu LTS download as `steam_latest.deb`. It calls this a launcher/bootstrapper containing `steam-devices` udev rules and a minimal Steam client that uses self-update to download the rest. The page does not publish a release version or top-level SHA-256 for that latest filename. It also describes a repository-based install path involving a signing key, APT source configuration, and i386 architecture; none of those steps were run. Valve notes that version-numbered historical releases exist under `archive/stable/`, but the tracked Windows allowlist does not select a corresponding version.
 

@@ -21,7 +21,7 @@ with zipfile.ZipFile(sys.argv[1] + '/mainframe-quick.zip', 'w') as z:
     z.writestr('.gitconfig', '[core]\n\tautocrlf = true\n[color]\n\tui = auto\n')
 EOF
 printf '[user]\n\tname = Old Name\n' > "$root/home/.gitconfig"
-python3 "$repo/linux_real.py" --skip-vault --skip-packages \
+PYTHONPATH="$repo" python3 -m linux.linux_real --skip-vault --skip-packages \
     --backup-root "$root/backup" --yes > "$root/output" 2>&1
 grep -Fq 'autocrlf = input' "$root/home/.gitconfig" || {
     printf 'FAIL: converted gitconfig not activated\n' >&2

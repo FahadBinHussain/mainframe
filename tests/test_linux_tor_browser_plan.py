@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 from unittest.mock import Mock, patch
 
-import tor_browser_linux as tor
+from linux import tor_browser_linux as tor
 
 VERSION = "15.0.26"
 WINDOWS_SHA = "37c2201f31f2fd9ea8470cf8f3cafc8dd3cd92d9ed9109b3913e1105b47d2af5"

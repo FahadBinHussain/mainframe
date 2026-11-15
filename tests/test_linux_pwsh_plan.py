@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import pwsh_linux as pwsh
+from linux import pwsh_linux as pwsh
 
 VERSION = "9.8.7"
 WINDOWS_NAME = f"PowerShell-{VERSION}-win-x64.zip"

@@ -18,7 +18,7 @@ boot.ps1 (public, tiny, reviewable)
    ├─1─ clone mainframe repo (public, zero secrets by design)
    ├─2─ ask bitwarden master password → unlock vault
    │      └─ reads: github token (for step 4) + all account tokens + env secrets
-   ├─3─ restore.ps1 -Mode full -ExcludeSecrets    (tools, repos, manifests, tasks)
+   ├─3─ windows/restore.ps1 -Mode full -ExcludeSecrets    (tools, repos, manifests, tasks)
    ├─4─ download latest mainframe-backup.zip from PRIVATE github release
    │      (auth = github token fetched from vault in step 2)
    │      └─ restore edge profile + accounts dirs + skills + native bits from it
@@ -34,12 +34,12 @@ is the single root of trust.
 
 ## components to build
 
-### 1. `backup.ps1` addition — publish step (new)
+### 1. `windows/backup.ps1` addition — publish step (new)
 - after zip build: upload `mainframe-backup.zip` to a **private repo release**
   (`FahadBinHussain/rmusb-store` or similar), tag = date (`2026-09-04`), asset =
   the zip. use `gh release create/upload` with the vault github token.
 - keep last N=3 releases (prune older) so the store stays bounded (~1.3GB).
-- mode: `backup.ps1 -Publish` (manual trigger) — auto-publish optional later.
+- mode: `windows/backup.ps1 -Publish` (manual trigger) — auto-publish optional later.
 - NOT auto by default: a bad backup shouldn't silently overwrite the good one.
 
 ### 2. `boot.ps1` (new, lives in mainframe repo root, surfaced at a stable url)
@@ -49,10 +49,10 @@ is the single root of trust.
   2. ensure git → clone `FahadBinHussain/mainframe` to `~\Downloads\mainframe`
   3. prompt bitwarden password (secure prompt, env-scoped, never written to disk)
   4. `bw unlock` → session key → export vault github token
-  5. `restore.ps1 -Mode full -ExcludeSecrets` (already handles scoop, pnpm, uv,
+  5. `windows/restore.ps1 -Mode full -ExcludeSecrets` (already handles scoop, pnpm, uv,
      tasks, patches, vault env-secrets via env-sync)
   6. fetch latest release zip with the token → extract →
-     `restore.ps1` edge-profile/accounts/skills paths from it
+     `windows/restore.ps1` edge-profile/accounts/skills paths from it
      (reuse existing restore path; the zip layout is already the backup layout)
   7. tailscale provision (authkey from vault) → desktop wake test optional
   8. final report: what restored / what needs 1-click (cws extensions) / next steps
@@ -61,11 +61,11 @@ is the single root of trust.
   optionally shorten later via a custom domain/redirect. keep the pinned-tag
   variant documented (`?ref=v1`) for paranoid boots.
 
-### 3. `restore.ps1` small change
+### 3. `windows/restore.ps1` small change
 - accept `-BackupZip <path>` alternative to `-BackupRoot` (extract to temp, then
   current flow). today restore takes the extracted dir; boot.ps1 can also just
   extract itself and pass -BackupRoot. prefer the boot.ps1-side extract to keep
-  restore.ps1 untouched.
+  windows/restore.ps1 untouched.
 
 ### 4. vault requirements (verify + fill gaps)
 - `github.com` item: needs a **classic PAT with `repo` scope** (release read on
@@ -80,10 +80,10 @@ is the single root of trust.
 - vault locked / wrong password → clear error, exit
 - github token lacks `repo` scope → tell the user EXACTLY that, exit
 - no network / github blocked (uni firewall?) → report the exact host blocked
-- release asset missing (first ever run) → say "run backup.ps1 -Publish on the
+- release asset missing (first ever run) → say "run windows/backup.ps1 -Publish on the
   old machine first", exit
 - partial failure mid-restore → leave a resume marker + rerun is idempotent
-  (restore.ps1 already re-runnable)
+  (windows/restore.ps1 already re-runnable)
 
 ---
 
@@ -111,9 +111,9 @@ is the single root of trust.
 
 | piece | size |
 |---|---|
-| backup.ps1 -Publish | ~40 lines |
+| windows/backup.ps1 -Publish | ~40 lines |
 | boot.ps1 | ~100 lines |
-| restore.ps1 | 0 lines (extract on boot side) |
+| windows/restore.ps1 | 0 lines (extract on boot side) |
 | vault token scope check | 1 command |
 | test on desktop | 1 evening |
 
@@ -143,12 +143,12 @@ today both modes download all 425MB compressed. split:
 - full downloads both, extracts into the same dir
 - **single-zip retired (2026-09-04):** no migration bridge - the only old-format
   release was never booted from, and boot.ps1 dies loud when split assets are
-  missing. backup.ps1 deletes any stale `mainframe-backup.zip` with a note.
+  missing. windows/backup.ps1 deletes any stale `mainframe-backup.zip` with a note.
 
 changes:
-1. backup.ps1: build two zips from staging (quick excludes persist\, persist zip
+1. windows/backup.ps1: build two zips from staging (quick excludes persist\, persist zip
    has persist\ at root). -Publish uploads both assets to the same release.
-2. publish-backup.ps1: upload both, keep-10 per hostname unchanged.
+2. windows/publish-backup.ps1: upload both, keep-10 per hostname unchanged.
 3. boot.ps1: Q -> quick asset only; F -> quick + persist assets, sequential
    extract into one dir; missing asset = loud die (except the old-format bridge).
 4. NOT splitting edge-profile: extension code + storage + indexeddb are one

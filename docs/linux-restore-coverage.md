@@ -6,9 +6,9 @@
 
 The Linux path is deliberately **offline and non-destructive**:
 
-- `linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
+- `linux/linux_restore.py` reads ZIP central-directory metadata for inventory. Recovery copies each original ZIP byte-for-byte into `raw-archives/`, verifies the copy, and materializes safe members under `recovered/`.
 - `--apply-portable` may additionally copy explicitly classified files into a **new** `home-staging/` tree. It never writes the live home directory, activates services, changes global agent instructions, imports credentials, or executes Windows files. The separate offline `--include-global-agents` opt-in stages only the exact top-level `AGENTS.md` from `mainframe-quick.zip` as `home-staging/AGENTS.md`.
-- `linux_real.py --restore-global-agents` is the narrow live exception: it activates that exact file at `$HOME/AGENTS.md`, verifies the copied bytes, and backs up an existing destination under the work root. Without `--yes`, this flag activates only `AGENTS.md`; other candidates remain staged. Nested `AGENTS.md` files and `.agents/skills` remain blocked. The default restore behavior is unchanged.
+- `linux/linux_real.py --restore-global-agents` is the narrow live exception: it activates that exact file at `$HOME/AGENTS.md`, verifies the copied bytes, and backs up an existing destination under the work root. Without `--yes`, this flag activates only `AGENTS.md`; other candidates remain staged. Nested `AGENTS.md` files and `.agents/skills` remain blocked. The default restore behavior is unchanged.
 - `--convert-portable` separately opts into the exact Git, mpv, yt-dlp, Flameshot, qBittorrent, OBS, and user-environment LESS settings adapters documented below. They read only verified allowlisted source files, emit offline subsets, and never activate them. No production payload was inspected for development or this coverage review; tests use synthetic fixtures. No secret is decrypted or printed. Encrypted members, nested archives, DPAPI material, and opaque account data remain raw-only/opaque.
 - Every native target below is a **staging candidate layout, not confirmed operational**. A staged byte is not proof that its application, plugins, identity, paths, permissions, or behavior work on Linux.
 - This is **not the user's requested 100% Linux runtime**. It is a lossless-byte-preservation and selective-native-staging tool with explicit blockers.
@@ -19,10 +19,10 @@ The Linux path is deliberately **offline and non-destructive**:
 
 | Invocation | Actual behavior |
 |---|---|
-| `boot.sh --restore [args]` | Forwards all remaining arguments verbatim to the checked-out `restore.sh`, which invokes `linux_restore.py`. |
-| `boot.sh --packages [args]` | Requires `python3` and forwards all remaining arguments verbatim to `linux_packages.py`. |
+| `boot.sh --restore [args]` | Forwards all remaining arguments verbatim to the checked-out `restore.sh`, which invokes `linux/linux_restore.py`. |
+| `boot.sh --packages [args]` | Requires `python3` and forwards all remaining arguments verbatim to `linux/linux_packages.py`. |
 | `boot.sh --setup-tools` | The only setup mode: validates Linux and Debian/Ubuntu-family support, requires `apt-get`, installs exactly four prerequisites (`git`, `curl`, `ca-certificates`, `python3`), validates that the installed Python is 3.10+, then clones source to `$HOME/Downloads/mainframe` if that target does not exist. An older distribution Python is an explicit setup failure requiring a separate compatible runtime. It does not restore a backup. |
-| `boot.sh --real [args]` | **Live machine setup (the Windows irm flow, for Linux).** Runs `linux_real.py`: prerequisites, the plan executor for planned actions, direct installs of current Linux-native builds for the proven tools (pwsh hash-verified, vscode/discord debs, ngrok, node LTS hash-verified, pnpm, gcloud, steam), the vault login via the sealed-email blob plus the latest-release download, the private repository clone/pull (`~/Downloads/automata-private`, authenticated with the vault token, credential source named on screen, failed sync aborts the restore leg), then `copy_recovery` with `--apply-portable --convert-portable` and ACTIVATION of `home-staging/` into live HOME (overwritten files backed up first under `~/.local/share/mainframe/restore-backup/`). `--restore-global-agents` separately opts into restoring only the exact top-level quick-archive `AGENTS.md` to `$HOME/AGENTS.md`; without `--yes`, other candidates remain staged. `--skip-private-repo` opts out of the private checkout and says so. After a successful activation, `--muse-skills` also copies the restored skills from the staged `.agents/skills` tree into `~/workspace/custom-skills` — Muse reads only that directory, so without the sync the skills would sit at `~/.agents/skills` invisible to it. The sync is opt-in on purpose: other Linux boxes and other agents' VMs may keep skills somewhere else, so no flag means no sync on any machine. `--muse-skills-dir <path>` overrides the target for an agent with a different skill directory. Merge only: existing entries are never deleted or overwritten, collisions and symlink-carrying skills are skipped loudly, and a target that exists as a file fails the run instead of being written into. It is the only mode that writes live home. Activation is proven on a synthetic quick zip; the vault leg has now completed one live run on the muse container with the user's phone approval (the 1-hour session is cached, so a second run inside the TTL asks for nothing at all), and the secrets archive is still not decrypted or activated - that run staged the portable files and kept the recovered members raw. |
+| `boot.sh --real [args]` | **Live machine setup (the Windows irm flow, for Linux).** Runs `linux/linux_real.py`: prerequisites, the plan executor for planned actions, direct installs of current Linux-native builds for the proven tools (pwsh hash-verified, vscode/discord debs, ngrok, node LTS hash-verified, pnpm, gcloud, steam), the vault login via the sealed-email blob plus the latest-release download, the private repository clone/pull (`~/Downloads/automata-private`, authenticated with the vault token, credential source named on screen, failed sync aborts the restore leg), then `copy_recovery` with `--apply-portable --convert-portable` and ACTIVATION of `home-staging/` into live HOME (overwritten files backed up first under `~/.local/share/mainframe/restore-backup/`). `--restore-global-agents` separately opts into restoring only the exact top-level quick-archive `AGENTS.md` to `$HOME/AGENTS.md`; without `--yes`, other candidates remain staged. `--skip-private-repo` opts out of the private checkout and says so. After a successful activation, `--muse-skills` also copies the restored skills from the staged `.agents/skills` tree into `~/workspace/custom-skills` — Muse reads only that directory, so without the sync the skills would sit at `~/.agents/skills` invisible to it. The sync is opt-in on purpose: other Linux boxes and other agents' VMs may keep skills somewhere else, so no flag means no sync on any machine. `--muse-skills-dir <path>` overrides the target for an agent with a different skill directory. Merge only: existing entries are never deleted or overwritten, collisions and symlink-carrying skills are skipped loudly, and a target that exists as a file fails the run instead of being written into. It is the only mode that writes live home. Activation is proven on a synthetic quick zip; the vault leg has now completed one live run on the muse container with the user's phone approval (the 1-hour session is cached, so a second run inside the TTL asks for nothing at all), and the secrets archive is still not decrypted or activated - that run staged the portable files and kept the recovered members raw. |
 | no arguments or an unknown mode | Fails without changing the system. |
 
 The setup clone is source preparation only. It is not package restoration, account restoration, browser restoration, service activation, or a 100% runtime conversion.
@@ -71,7 +71,7 @@ Additional quick-archive data has explicit handling: Flameshot is limited to its
 
 ## Implemented conversion map: Git portable settings v1
 
-`linux_migrations.py` contains a versioned explicit map for root `.gitconfig` to
+`linux/linux_migrations.py` contains a versioned explicit map for root `.gitconfig` to
 offline `home-staging/.gitconfig`. It is enabled **only** by `--recover
 --convert-portable`; default inventory, ordinary recovery, and
 `--apply-portable` alone do not run it. Git must already be installed; nothing
@@ -207,9 +207,9 @@ equivalence remain unverified.
 
 ## Implemented conversion map: Flameshot portable preferences v1
 
-The tracked Windows [backup script](../backup.ps1#L501-L512) copies only
+The tracked Windows [backup script](../windows/backup.ps1#L501-L512) copies only
 `%APPDATA%\Flameshot\flameshot.ini` to the exact archive member
-`quick-persist/flameshot/flameshot.ini`; the tracked [restore script](../restore.ps1#L934-L952)
+`quick-persist/flameshot/flameshot.ini`; the tracked [restore script](../windows/restore.ps1#L934-L952)
 uses that same source only on a fresh Windows box. The current [Scoop Extras
 Flameshot manifest](https://raw.githubusercontent.com/ScoopInstaller/Extras/master/bucket/flameshot.json)
 has no `persist` declaration, so this adapter is deliberately tied to Mainframe's
@@ -259,11 +259,11 @@ equivalence therefore remain unverified.
 
 ## Implemented conversion map: qBittorrent portable preferences v1
 
-The tracked Windows [backup script](../backup.ps1#L606-L619) copies the Scoop
+The tracked Windows [backup script](../windows/backup.ps1#L606-L619) copies the Scoop
 custom-profile tree `persist/qbittorrent/profile/qBittorrent` to a `qbittorrent/`
-directory in the output tree; its [split-ZIP packaging](../backup.ps1#L934-L960)
+directory in the output tree; its [split-ZIP packaging](../windows/backup.ps1#L934-L960)
 puts that directory at the quick-ZIP root and excludes the separate `persist/`
-tree. The tracked [restore script](../restore.ps1#L1287-L1297) puts it back under
+tree. The tracked [restore script](../windows/restore.ps1#L1287-L1297) puts it back under
 the same Windows profile root. The only recognized source file is therefore the exact quick-ZIP member
 `qbittorrent/config/qBittorrent.ini`; other qBittorrent profile paths are raw-only.
 
@@ -318,8 +318,8 @@ full profile behavior, and operational equivalence remain unverified.
 
 ## Implemented conversion map: OBS Studio user preferences v1
 
-The tracked [backup script](../backup.ps1#L591-L601) copies the Scoop OBS config
-root to the quick-archive member tree `obs-studio/`; the [restore script](../restore.ps1#L1272-L1285)
+The tracked [backup script](../windows/backup.ps1#L591-L601) copies the Scoop OBS config
+root to the quick-archive member tree `obs-studio/`; the [restore script](../windows/restore.ps1#L1272-L1285)
 puts that tree back under the Windows Scoop persist config root. Only the exact
 member `obs-studio/user.ini` is eligible. The [OBS upstream application source](https://github.com/obsproject/obs-studio/blob/master/frontend/OBSApp.cpp#L638-L650)
 opens `obs-studio/user.ini` under its user-config location. The platform helpers
@@ -378,9 +378,9 @@ equivalence remain unverified.
 
 ## Implemented conversion map: user environment LESS options v1
 
-The tracked [backup script](../backup.ps1#L628-L629) exports `HKCU\Environment`
-to `user-env.reg` at the backup output root. The [quick-ZIP packager](../backup.ps1#L924-L960)
-includes that root member in `mainframe-quick.zip`; the Windows [restore script](../restore.ps1#L1332-L1340)
+The tracked [backup script](../windows/backup.ps1#L628-L629) exports `HKCU\Environment`
+to `user-env.reg` at the backup output root. The [quick-ZIP packager](../windows/backup.ps1#L924-L960)
+includes that root member in `mainframe-quick.zip`; the Windows [restore script](../windows/restore.ps1#L1332-L1340)
 imports it, but Linux never imports a registry file. Microsoft documents that
 [`reg export`](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/reg-export)
 copies the selected registry key and its subkeys/values, but does not specify the
@@ -424,7 +424,7 @@ operational equivalence remain unverified.
 
 ## File-association exports: raw-only blocker
 
-The tracked [Windows backup code](../backup.ps1#L870-L960) writes the qBittorrent
+The tracked [Windows backup code](../windows/backup.ps1#L870-L960) writes the qBittorrent
 members `qb-assoc-torrent.reg`, `qb-assoc-torrentclass.reg`,
 `qb-assoc-magnet.reg`, and `qb-assoc-urlhandler.reg`; it also exports
 `vlc-assoc-<extension-with-leading-dot-replaced-by-hyphen>.reg` plus
@@ -484,7 +484,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | Windows file-association exports | qBittorrent, VLC, and 7-Zip `*-assoc-*.reg` members are preserved byte-for-byte in the verified quick ZIP and materialized verbatim under `recovered/`. No selected-default source or complete target-handler map is established; no XDG `mimeapps.list` is generated and no registry value, command, path, or verb is imported. |
 | Scoop allowlist and version metadata | Windows exports Scoop configuration/app/version intent and persist data. Linux preserves manifests and maps only explicit package names in `APT_MAP`; Windows installers, shims, paths, and post-install hooks do not run. |
 | WinGet/native persist | AnyDesk and Directory Opus-style native persist is archived/quarantined as Windows state; no Linux identity, service, or file-manager import is performed. Only `AnyDesk.AnyDesk` package intent is covered by native `anydesk`; other WinGet IDs remain unsupported records. |
-| APT package mapping | `linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
+| APT package mapping | `linux/linux_packages.py` plans Debian/Ubuntu x86_64/aarch64 installs for explicit mappings such as `7zip→7zip`, `ffmpeg→ffmpeg`, `gh→gh`, `git→git`, `go→golang-go`, `python312→python3.12`, `rclone→rclone`, `vlc→vlc`, and `yt-dlp→yt-dlp`. `mpv-git` and `nodejs-lts` are blocked for variant drift rather than silently replaced. APT candidates must exist on the actual host before any selected install. Package planning is dry by default; execution requires `--execute`, and blockers prevent an unqualified full execution. |
 | Scoop extractor helper coverage | `7zip19.00-helper` is explicitly `covered` with `covered_by: "7zip"`, a reason, and no separate install command. One native APT `7zip` action covers the extractor role, even when only the helper is declared or declarations are reordered. Selecting the helper selects that native action with candidate preflight. This is not a Linux 19.00 pin, Scoop execution, or Windows settings migration. Execution reports covered helpers separately from skipped actions; unrelated blockers remain intact. |
 | Package holds and version mappings | Recorded Windows/Scoop versions are preserved as metadata/provenance, not silently asserted equivalent to APT versions. The Linux planner has no general package-hold or Windows-version-lock implementation; exact versions requiring holds, repositories, or manual pinning remain a scope item. |
 | Android Command-Line Tools (`android-clt`) | Same suite as Windows, including `sdkmanager`, via Google's Linux x86_64 ZIP. Current Scoop build and Windows URL must agree; Google's Linux URL and SHA-256 must match that build. Missing/ambiguous metadata or aarch64 blocks explicitly. Dry planning fetches public metadata only. Installation requires `--execute --select android-clt --android-sdk-root <new-directory> --android-sdk-terms-accepted`, verifies SHA-256 before safe extraction to `cmdline-tools/latest`, and refuses existing SDK roots. No Android CLI/adb substitution, automatic license files, SDK invocation, Java install, shell-profile changes, or Windows SDK-state migration. Java/runtime behavior requires separate testing. |
@@ -494,7 +494,7 @@ This table records the actual source actions, not hypothetical Linux work. Windo
 | uv tools | Windows records `graphifyy`; Linux plans `uv tool install graphifyy` without assuming Windows entry points or indexes. |
 | Go global | Linux plans the normal `go install github.com/openclaw/wacli/cmd/wacli@v0.15.0` with `sqlite_fts5` as dry-plan metadata `standard-linux-go-install`; normal explicit `GOBIN` or first `GOPATH/bin` (normally `~/go/bin`) and normal module/build caches apply. No portable/isolated HOME requirement. Execution is disabled before adapter preflight; compiler/CGO dependencies and resulting binary behavior remain untested. |
 | pip environment | **Superseded historical review:** older Windows backups may contain `pip-freeze.txt` as restore control metadata, but it is excluded from user data and ignored by the Linux planner with no action or blocker. Windows Full no longer installs it. Explicit repository-only `requirements.txt`/`requirements-linux.txt` files may be inspected for planning; generic Python execution remains blocked pending interpreter, dependency, install-script, and isolated-destination preflight. |
-| Private source clone/fork patchers | Windows full restore clones or fast-forward-pulls the mainframe and private automation repositories. Its alist/Ditto/opencode patch-build actions require the relevant private patcher source; the opencode fork patcher is version-guarded. The Linux **live** flow (`linux_real.py`) now clones or fast-forward-pulls the same private repository into `~/Downloads/automata-private` as part of the restore leg, authenticating with the vault GitHub token the release download already fetched; the credential source is named on screen, the token stays in the child's environment (never in argv, never on disk), and a failed sync aborts the restore leg instead of reporting success. The Linux **offline** recovery path (`restore.sh` / `linux_restore.py`) stays offline: it still does not clone private repositories, run private patchers, or fabricate credentials, so those remain blocked/unimplemented native actions there. |
+| Private source clone/fork patchers | Windows full restore clones or fast-forward-pulls the mainframe and private automation repositories. Its alist/Ditto/opencode patch-build actions require the relevant private patcher source; the opencode fork patcher is version-guarded. The Linux **live** flow (`linux/linux_real.py`) now clones or fast-forward-pulls the same private repository into `~/Downloads/automata-private` as part of the restore leg, authenticating with the vault GitHub token the release download already fetched; the credential source is named on screen, the token stays in the child's environment (never in argv, never on disk), and a failed sync aborts the restore leg instead of reporting success. The Linux **offline** recovery path (`restore.sh` / `linux/linux_restore.py`) stays offline: it still does not clone private repositories, run private patchers, or fabricate credentials, so those remain blocked/unimplemented native actions there. |
 | Pinned opencode v2 | Windows restore recognizes `opencode2` as the pinned v2 install and refuses to run the v1 fork patcher against it because that would overwrite v2; it only runs the v1 patcher when v1 is installed and v2 is absent. Linux stages opencode config/skills/plugins only, excludes `node_modules`, and does not install or activate the v2 runtime. |
 | Shortcuts and running processes | Windows package-manager hooks may create shell integration. The restore explicitly launches Edge during extension recovery, stops AnyDesk/Directory Opus processes for persist copying, and restarts processes that were previously running. Linux recovery does not activate `.lnk`, launch browsers, stop/restart apps, or infer startup services. A separately authorized AnyDesk DEB installation may start its vendor service; no Windows service-state migration is implied. |
 | Scheduled tasks | Windows exports only explicitly selected task XML (the default selection is empty). Linux preserves selected XML as documentation; no trigger, credential, SID, timezone, or action is converted to systemd/cron. |

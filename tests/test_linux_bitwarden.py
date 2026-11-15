@@ -13,8 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import bitwarden_cli_linux as bw
-import linux_packages as lp
+from linux import bitwarden_cli_linux as bw
+from linux import linux_packages as lp
 
 
 def elf_fixture() -> bytes:
@@ -129,8 +129,9 @@ class BitwardenTests(unittest.TestCase):
     def test_dry_plan_does_not_execute(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for name, key, value in (("scoop-allowed.json", "apps", ["bitwarden-cli"]), ("winget-allowed.json", "packages", []), ("pnpm-allowed.json", "packages", []), ("uv-allowed.json", "packages", []), ("go-allowed.json", "packages", [])):
-                (root / name).write_text(json.dumps({key: value}))
+                (root / "manifests" / name).write_text(json.dumps({key: value}))
             fixture = self.release();
             with patch.object(lp.bitwarden_tools, "resolve_release", return_value=fixture), patch.object(lp, "execute") as execute:
                 self.assertIn(lp.main(["--repo", str(root), "--distro", "ubuntu", "--arch", "x86_64"]), (0, 3))

@@ -51,18 +51,18 @@ none of those has it, it asks once and saves the answer for next time.
 (Users running a private fork may commit the file in their own fork instead
 — that is their exposure decision to make.)
 
-Separately, `publish-backup.ps1` detects the vault account email from
+Separately, `windows/publish-backup.ps1` detects the vault account email from
 `bw status` at publish time, stamps it into the (private) release notes as
 `bw-email:`, and seals it into `bw-email.enc.json` in this repo — encrypted
 with a key derived from the master password (PBKDF2-HMAC-SHA256, 600k
 iterations, AES-256-CBC + HMAC-SHA256), ciphertext only, nothing plaintext.
 `boot.ps1` unseals it with the master password setup asks for anyway, so a
 fresh machine never has to type the email. Seal once via publish, or any
-time with `seal-bw-email.ps1`; delete the blob and re-run to re-seal.
+time with `windows/seal-bw-email.ps1`; delete the blob and re-run to re-seal.
 
 #### Phone approval notification for headless restore
 
-During unattended headless restores on remote Linux boxes or containers (where stdin is not an interactive terminal), `linux_real.py` supports mobile approval:
+During unattended headless restores on remote Linux boxes or containers (where stdin is not an interactive terminal), `linux/linux_real.py` supports mobile approval:
 - Configured via `ntfyTopic` in `mainframe.config.json`, the `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`; there is no built-in default, so an unconfigured machine fails loudly instead of broadcasting requests on a public topic. Use a long random topic name and subscribe to it in the ntfy app.
 - Generates an ephemeral single-use RSA keypair and sends an urgent push notification to your phone via [ntfy.sh](https://ntfy.sh).
 - Tapping the notification opens the static `docs/vault-tab.html` page in your phone browser, encrypts the master password client-side using WebCrypto RSA-OAEP, and relays the ciphertext back to the runner via single-use topic. The relay and servers never see plaintext secrets.
@@ -87,7 +87,7 @@ make Windows and Linux behave identically on a machine whose egress proxy denies
   relay is not `ntfy.sh`, so the page posts the ciphertext back to the same
   relay the runner reads.
 
-Both Windows (`vault-approval.psm1`) and Linux (`linux_real.py`) read the same
+Both Windows (`windows/vault-approval.psm1`) and Linux (`linux/linux_real.py`) read the same
 `mainframe.config.json`, so one file drives both machines.
 
 **One phone tap per hour, not per run.** Windows has always cached the vault
@@ -99,8 +99,8 @@ the phone. Linux now does the same at
 `~/.local/share/mainframe/vault/session.key` (mode `600`): the first run asks
 for the tap, every run inside the hour reuses the session silently, and an
 expired session is locked and purged so the phone is asked again. Lock it by
-hand at any time with `python3 linux_real.py --lock-vault` — the Linux twin of
-`vault-lock.ps1`.
+hand at any time with `python3 -m linux.linux_real --lock-vault` — the Linux twin of
+`windows/vault-lock.ps1`.
 
 ### Linux: Bash (no PowerShell dependency)
 
@@ -113,7 +113,7 @@ feature of this repo side by side, with a tick or a cross per row and the
 shortest way to close each gap.
 Windows DPAPI/browser logins, Windows-only apps, services, task XML, registry,
 private build patchers, and live account-helper activation are not ported. Global
-agent instructions are unchanged by default; `linux_real.py --restore-global-agents`
+agent instructions are unchanged by default; `linux/linux_real.py --restore-global-agents`
 is a narrow opt-in for the exact top-level `AGENTS.md` only. No unqualified
 “100% working” claim is made.
 
@@ -149,7 +149,7 @@ streams and verifies bytes, checks free space, and limits expanded data to 100 G
 and any one member to 8 GiB by default. Limits can be raised explicitly with
 `--max-expanded-bytes` and `--max-member-bytes` after reviewing metadata.
 
-For a live Linux restore, `linux_real.py --restore-global-agents` copies the exact
+For a live Linux restore, `linux/linux_real.py --restore-global-agents` copies the exact
 top-level `AGENTS.md` from `mainframe-quick.zip` to `$HOME/AGENTS.md`, verifies
 the bytes, and backs up an existing destination. This option alone activates only
 that file; other staged candidates stay offline. Add `--yes` only when you also
@@ -254,7 +254,7 @@ explicitly selecting the helper selects that native action and its APT candidate
 check. Other blockers still prevent an unqualified full execution.
 
 ```bash
-python3 ./linux_packages.py
+python3 ./linux/linux_packages.py
 # Legacy pip-freeze.txt files in a backup are ignored; no Python action is planned.
 # Explicit repository requirements files are planning-only and remain blocked
 # until interpreter, dependency, install-script, and isolated-destination review.
@@ -275,7 +275,7 @@ After personally reading and accepting the [Google SDK terms](https://developer.
 an explicitly selected install into a **new** directory is:
 
 ```bash
-python3 ./linux_packages.py --execute --select android-clt \
+python3 ./linux/linux_packages.py --execute --select android-clt \
   --android-sdk-root /path/to/new/android-sdk --android-sdk-terms-accepted
 ```
 
@@ -301,7 +301,7 @@ Only after accepting the vendor terms and reviewing the service implications,
 a future, explicitly authorized system install can use:
 
 ```bash
-python3 ./linux_packages.py --execute --select anydesk \
+python3 ./linux/linux_packages.py --execute --select anydesk \
   --anydesk-terms-accepted --anydesk-service-allowed
 ```
 
@@ -329,7 +329,7 @@ unsupported by this adapter. Planning fetches public metadata only.
 For a separately authorized future installation into a **new** directory:
 
 ```bash
-python3 ./linux_packages.py --execute --select bitwarden-cli \
+python3 ./linux/linux_packages.py --execute --select bitwarden-cli \
   --bitwarden-cli-root /path/to/new/bitwarden-cli
 ```
 
@@ -384,7 +384,7 @@ Bun also retains `--bun-root` as a compatible alias for `--native-root bun=PATH`
 **Google Workspace CLI.** The unchanged `@googleworkspace/cli` allowlist entry
 resolves the registry's exact stable version to its official Linux GNU x86_64
 archive, matching the release asset digest and verified companion checksum.
-`python3 ./linux_packages.py --gws-root /absolute/new/gws-root` only previews
+`python3 ./linux/linux_packages.py --gws-root /absolute/new/gws-root` only previews
 isolated binary, HOME/config/cache/temp/work paths. Node/pnpm are explicitly not
 required for this native route; it is not a script-suppressed npm install.
 A future separately authorized partial install needs `--execute --select @googleworkspace/cli`
@@ -463,7 +463,7 @@ The existing `da.gd/f85Bj` short link remains Windows-only and unchanged.
 - Installed Scoop apps and held-package metadata
 - Scoop persisted app data from `$SCOOP\persist`
 - Native app installers and settings described in `native-apps.json`
-- Optional encrypted tool auth/config from `tool-secrets.manifest.json` (for tools not yet on vault-native secrets: gcloud, gws, firebase, tailscale, telegram, whatsapp, microsoft, bitwarden session)
+- Optional encrypted tool auth/config from `manifests/tool-secrets.manifest.json` (for tools not yet on vault-native secrets: gcloud, gws, firebase, tailscale, telegram, whatsapp, microsoft, bitwarden session)
 - Optional user-managed Agent skills from `%USERPROFILE%\.agents\skills` (+ the `.skill-lock.json` source/version record)
 - Optional Antigravity global config from `%USERPROFILE%\.gemini\config` (MCP servers, plugins, rules)
 - Optional Windsurf app data from `%USERPROFILE%\.codeium\windsurf`
@@ -471,36 +471,36 @@ The existing `da.gd/f85Bj` short link remains Windows-only and unchanged.
 
 ## Files
 
-- `backup.ps1` creates `mainframe-backup.zip` containing `scoopfile.json`, scoop persist data, native app artifacts, and encrypted secrets (unless `-ExcludeSecrets` is passed)
-- `restore.ps1` restores Scoop, persisted settings, buckets, apps, native app exceptions, and encrypted secrets from `mainframe-backup.zip`
-- `backup-secrets.ps1` creates standalone `tool-secrets.zip` from the paths in `tool-secrets.manifest.json` (used by `restore-secrets.ps1`)
-- `restore-secrets.ps1` restores `tool-secrets.zip` and backs up overwritten targets first
-- `vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata-private\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
-- `account-contract.ps1` checks that every `*-account.ps1` helper keeps the shared mainframe account command contract
-- `scoop-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`, and `winget-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot. The automatic frozen pip snapshot is retired: backup no longer creates `pip-freeze.txt`, and Windows Full no longer installs it. A legacy `pip-freeze.txt` remains restore control metadata only, excluded from user data and ignored by the Linux planner. Explicit repository-only `requirements.txt`/`requirements-linux.txt` files remain available for planning, but generic Python execution is blocked pending preflight; `Lib\site-packages` is not shipped.
-- `vercel-account.ps1` manages separate token-only Vercel CLI profiles by email
-- `neon-account.ps1` manages separate Neon CLI profiles by email using Neon CLI's per-profile config directory support
-- `gws-account.ps1` manages separate Google Workspace CLI profiles by email using `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; it also reuses those OAuth profiles for Google Search Console API commands
-- `gcloud-account.ps1` manages separate Google Cloud CLI profiles by email using `CLOUDSDK_CONFIG`
-- `firebase-account.ps1` manages separate Firebase CLI profiles by email using profile-local `XDG_CONFIG_HOME`
-- `render-account.ps1` manages separate Render CLI profiles by account email using Render's official `RENDER_CLI_CONFIG_PATH` setting
-- `cronjob-account.ps1` manages separate cron-job.org API key profiles by account email for creating, updating, disabling, and inspecting scheduled HTTP jobs
+- `windows/backup.ps1` creates `mainframe-backup.zip` containing `scoopfile.json`, scoop persist data, native app artifacts, and encrypted secrets (unless `-ExcludeSecrets` is passed)
+- `windows/restore.ps1` restores Scoop, persisted settings, buckets, apps, native app exceptions, and encrypted secrets from `mainframe-backup.zip`
+- `windows/backup-secrets.ps1` creates standalone `tool-secrets.zip` from the paths in `manifests/tool-secrets.manifest.json` (used by `windows/restore-secrets.ps1`)
+- `windows/restore-secrets.ps1` restores `tool-secrets.zip` and backs up overwritten targets first
+- `windows/vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata-private\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
+- `accounts/account-contract.ps1` checks that every `*-account.ps1` helper keeps the shared mainframe account command contract
+- `manifests/scoop-allowed.json`, `manifests/pnpm-allowed.json`, `manifests/uv-allowed.json`, `manifests/go-allowed.json`, and `manifests/winget-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot. The automatic frozen pip snapshot is retired: backup no longer creates `pip-freeze.txt`, and Windows Full no longer installs it. A legacy `pip-freeze.txt` remains restore control metadata only, excluded from user data and ignored by the Linux planner. Explicit repository-only `requirements.txt`/`requirements-linux.txt` files remain available for planning, but generic Python execution is blocked pending preflight; `Lib\site-packages` is not shipped.
+- `accounts/vercel-account.ps1` manages separate token-only Vercel CLI profiles by email
+- `accounts/neon-account.ps1` manages separate Neon CLI profiles by email using Neon CLI's per-profile config directory support
+- `accounts/gws-account.ps1` manages separate Google Workspace CLI profiles by email using `GOOGLE_WORKSPACE_CLI_CONFIG_DIR`; it also reuses those OAuth profiles for Google Search Console API commands
+- `accounts/gcloud-account.ps1` manages separate Google Cloud CLI profiles by email using `CLOUDSDK_CONFIG`
+- `accounts/firebase-account.ps1` manages separate Firebase CLI profiles by email using profile-local `XDG_CONFIG_HOME`
+- `accounts/render-account.ps1` manages separate Render CLI profiles by account email using Render's official `RENDER_CLI_CONFIG_PATH` setting
+- `accounts/cronjob-account.ps1` manages separate cron-job.org API key profiles by account email for creating, updating, disabling, and inspecting scheduled HTTP jobs
 - `cloudflare-account.ps1` manages separate Cloudflare profiles by detected account email, using either API tokens or isolated Wrangler browser auth for Wrangler commands, API calls, zone/DNS inspection, and private state exports (moved to `C:\Users\Admin\Downloads\automata-private\cloudflare.com\cloudflare-account.ps1` in 2026-08-17)
-- `github-account.ps1` manages separate GitHub CLI/API token profiles by detected account email for `gh` commands and API calls
-- `notion-account.ps1` manages separate Notion API token profiles by account email for API calls, optional `ntn` CLI commands, and page/block inspection
+- `accounts/github-account.ps1` manages separate GitHub CLI/API token profiles by detected account email for `gh` commands and API calls
+- `accounts/notion-account.ps1` manages separate Notion API token profiles by account email for API calls, optional `ntn` CLI commands, and page/block inspection
 - `microsoft-account.ps1` manages separate Microsoft Graph OAuth profiles by detected account email for delegated Microsoft automation across mail, calendar, contacts, files, tasks, and notes (moved to `C:\Users\Admin\Downloads\automata-private\outlook.com\microsoft-account.ps1` in 2026-08-17)
 - `outlook-account.ps1` is a compatibility wrapper around `microsoft-account.ps1` for mail-focused workflows (moved to `C:\Users\Admin\Downloads\automata-private\outlook.com\outlook-account.ps1` in 2026-08-17)
-- `hf-account.ps1` manages separate Hugging Face CLI profiles by detected account email using `HF_HOME` and profile-local token paths
-- `minimax-account.ps1` manages separate MiniMax Code sign-ins by account email. the desktop app keeps one plaintext credential pair per data dir and re-reads it every 250ms, so switching is a file swap and needs no restart. `login [email]` and `harvest <email>` take the email as an argument because MiniMax reports no email of its own for accounts bound to Google; `login` with no email signs in and installs the credential but banks nothing, reports phase `needs-name`, and waits for `harvest <email>` to name it -- the nickname MiniMax does return is shown, never used as a key. the profile stores `realUserID` beside the address so one account can never be banked under two addresses
+- `accounts/hf-account.ps1` manages separate Hugging Face CLI profiles by detected account email using `HF_HOME` and profile-local token paths
+- `accounts/minimax-account.ps1` manages separate MiniMax Code sign-ins by account email. the desktop app keeps one plaintext credential pair per data dir and re-reads it every 250ms, so switching is a file swap and needs no restart. `login [email]` and `harvest <email>` take the email as an argument because MiniMax reports no email of its own for accounts bound to Google; `login` with no email signs in and installs the credential but banks nothing, reports phase `needs-name`, and waits for `harvest <email>` to name it -- the nickname MiniMax does return is shown, never used as a key. the profile stores `realUserID` beside the address so one account can never be banked under two addresses
 - `devvit-account.ps1` manages separate Reddit Devvit CLI profiles by account email, swapping Devvit's official `%USERPROFILE%\.devvit\token` file into per-profile mainframe storage (moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\devvit-account.ps1` in 2026-08-17)
 - `reddit-account.ps1` manages separate Reddit API OAuth profiles by account email for posting as your own Reddit account (moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps1` in 2026-08-17)
 - `reddit-post.ps1` submits Reddit posts/comments through a saved `reddit-account.ps1` profile; it defaults to dry-run unless `-ConfirmPost` is passed (tracked in `C:\Users\Admin\Downloads\automata-private\reddit.com\` alongside reddit-account.ps1 - moved there 2026-10-08)
 - `scoopfile.json` is the exported package snapshot
 - `native-apps.json` describes non-Scoop apps that should be installed normally, plus settings-only entries with `SkipInstall`
-- `tool-secrets.manifest.json` is the editable list of auth/config/skill paths to carry across machines
+- `manifests/tool-secrets.manifest.json` is the editable list of auth/config/skill paths to carry across machines
 - `tool-secrets.zip` is the private archive created only when secret backup is requested
 
-`restore.ps1` intentionally fails if `scoop-persist.zip` is missing.
+`windows/restore.ps1` intentionally fails if `scoop-persist.zip` is missing.
 If native apps are enabled, it also fails without `native-persist.zip` unless you pass `-SkipNativePersist`.
 
 ## Backup
@@ -508,7 +508,7 @@ If native apps are enabled, it also fails without `native-persist.zip` unless yo
 Run from this folder:
 
 ```powershell
-.\backup.ps1
+.\windows\backup.ps1
 ```
 
 By default it uses `$env:SCOOP`, falling back to `C:\Softwares\Scoop`.
@@ -519,37 +519,37 @@ Entries with `SkipInstall: true` only save and restore settings; they do not run
 Use a custom Scoop root:
 
 ```powershell
-.\backup.ps1 -ScoopRoot C:\Softwares\Scoop
+.\windows\backup.ps1 -ScoopRoot C:\Softwares\Scoop
 ```
 
 Skip the large Scoop persist archive while updating the package snapshot. Native app artifacts are still refreshed unless you also pass their skip flags:
 
 ```powershell
-.\backup.ps1 -SkipPersist
+.\windows\backup.ps1 -SkipPersist
 ```
 
 Only refresh the public package snapshot:
 
 ```powershell
-.\backup.ps1 -SkipPersist -SkipNativePersist -SkipNativeInstallers
+.\windows\backup.ps1 -SkipPersist -SkipNativePersist -SkipNativeInstallers
 ```
 
 Include portable auth/config secrets in the backup (enabled by default):
 
 ```powershell
-.\backup.ps1
+.\windows\backup.ps1
 ```
 
 Skip the encrypted secrets archive:
 
 ```powershell
-.\backup.ps1 -ExcludeSecrets
+.\windows\backup.ps1 -ExcludeSecrets
 ```
 
 You can also refresh only the encrypted secrets archive:
 
 ```powershell
-.\backup-secrets.ps1
+.\windows\backup-secrets.ps1
 ```
 
 ## Tool Account Profiles
@@ -565,20 +565,20 @@ This keeps tool auth portable while still using the official CLIs. Mainframe acc
 Every `*-account.ps1` helper is expected to keep this baseline account contract: `login`, `use`, `current`, `list`, `status`, `status-all`, `path`, `env`, and `run`. Service-specific commands can be added on top, but the baseline keeps account muscle memory symmetric. Check the contract with:
 
 ```powershell
-.\account-contract.ps1
+.\accounts\account-contract.ps1
 ```
 
 Create and use Vercel token profiles. Vercel is token-only in mainframe because browser refresh sessions can go stale, but multi-account switching still works through one `token.txt` per email profile.
 
 ```powershell
-.\vercel-account.ps1 token-add
-.\vercel-account.ps1 login
-.\vercel-account.ps1 use user@example.com
-.\vercel-account.ps1 status user@example.com
-.\vercel-account.ps1 status-all
-.\vercel-account.ps1 run user@example.com whoami
-.\vercel-account.ps1 run user@example.com deploy --prod
-.\vercel-account.ps1 run deploy --prod
+.\accounts\vercel-account.ps1 token-add
+.\accounts\vercel-account.ps1 login
+.\accounts\vercel-account.ps1 use user@example.com
+.\accounts\vercel-account.ps1 status user@example.com
+.\accounts\vercel-account.ps1 status-all
+.\accounts\vercel-account.ps1 run user@example.com whoami
+.\accounts\vercel-account.ps1 run user@example.com deploy --prod
+.\accounts\vercel-account.ps1 run deploy --prod
 ```
 
 Each Vercel profile is saved as `%APPDATA%\mainframe\accounts\vercel\<email>\token.txt`, and the active email is saved as `current.json`. Legacy `current.txt` is still read during transition, but new writes use the same JSON pointer shape as the other helpers. Running `token-add` or `login` prompts for a token, calls Vercel's user API with that token, auto-detects the email, and saves the token under the detected email profile. There is no manual profile label fallback, Vercel browser login, refresh token, `auth.json`, or persistent Vercel CLI session storage in mainframe. Commands pass the selected token to the official Vercel CLI through `VERCEL_TOKEN` only while a command runs. Token-backed commands use a throwaway Vercel CLI config directory that is deleted after the run, with `VERCEL_TELEMETRY_DISABLED=1` set for that process. Treat every `token.txt` as a secret; back it up only through the encrypted backup flow.
@@ -586,14 +586,14 @@ Each Vercel profile is saved as `%APPDATA%\mainframe\accounts\vercel\<email>\tok
 Create and use Neon profiles:
 
 ```powershell
-.\neon-account.ps1 api-key-add
-.\neon-account.ps1 api-key-add user@example.com
-.\neon-account.ps1 use user@example.com
-.\neon-account.ps1 whoami user@example.com
-.\neon-account.ps1 status user@example.com
-.\neon-account.ps1 run user@example.com projects list
-.\neon-account.ps1 run projects list
-.\neon-account.ps1 run user@example.com branches list --project-id cool-project-123
+.\accounts\neon-account.ps1 api-key-add
+.\accounts\neon-account.ps1 api-key-add user@example.com
+.\accounts\neon-account.ps1 use user@example.com
+.\accounts\neon-account.ps1 whoami user@example.com
+.\accounts\neon-account.ps1 status user@example.com
+.\accounts\neon-account.ps1 run user@example.com projects list
+.\accounts\neon-account.ps1 run projects list
+.\accounts\neon-account.ps1 run user@example.com branches list --project-id cool-project-123
 ```
 
 Neon browser OAuth is intentionally disabled in mainframe. Save a Neon API key with `login`/`api-key-add`/`token-add`; the helper detects the owning email from Neon, stores the key under that email profile, and passes it as `NEON_API_KEY` only while a command runs.
@@ -603,20 +603,20 @@ Create and use Render profiles:
 Install the official Render CLI first: https://render.com/docs/cli
 
 ```powershell
-.\render-account.ps1 login
-.\render-account.ps1 list
-.\render-account.ps1 whoami user@example.com
-.\render-account.ps1 workspaces user@example.com
-.\render-account.ps1 services user@example.com
-.\render-account.ps1 run user@example.com deploys list SERVICE_ID -o json
-.\render-account.ps1 run workspaces -o json
-.\render-account.ps1 psql user@example.com my-database -c "SELECT NOW();" -o text
+.\accounts\render-account.ps1 login
+.\accounts\render-account.ps1 list
+.\accounts\render-account.ps1 whoami user@example.com
+.\accounts\render-account.ps1 workspaces user@example.com
+.\accounts\render-account.ps1 services user@example.com
+.\accounts\render-account.ps1 run user@example.com deploys list SERVICE_ID -o json
+.\accounts\render-account.ps1 run workspaces -o json
+.\accounts\render-account.ps1 psql user@example.com my-database -c "SELECT NOW();" -o text
 ```
 
 If Render cannot expose an email from `render whoami`, the helper fails instead of saving a username, account ID, or manual label fallback. You can pass the account email explicitly when you already know it:
 
 ```powershell
-.\render-account.ps1 login user@example.com
+.\accounts\render-account.ps1 login user@example.com
 ```
 
 Create and use cron-job.org API profiles:
@@ -624,35 +624,35 @@ Create and use cron-job.org API profiles:
 Create an API key in the cron-job.org Console settings page, then save it once:
 
 ```powershell
-.\cronjob-account.ps1 token-add user@example.com
-.\cronjob-account.ps1 use user@example.com
-.\cronjob-account.ps1 status user@example.com
-.\cronjob-account.ps1 jobs user@example.com
+.\accounts\cronjob-account.ps1 token-add user@example.com
+.\accounts\cronjob-account.ps1 use user@example.com
+.\accounts\cronjob-account.ps1 status user@example.com
+.\accounts\cronjob-account.ps1 jobs user@example.com
 ```
 
 Create a simple every-minute HTTP job, then inspect or pause it:
 
 ```powershell
-.\cronjob-account.ps1 create user@example.com https://example.com/api/cron "Example heartbeat"
-.\cronjob-account.ps1 job user@example.com 12345
-.\cronjob-account.ps1 history user@example.com 12345
-.\cronjob-account.ps1 disable user@example.com 12345
-.\cronjob-account.ps1 enable user@example.com 12345
+.\accounts\cronjob-account.ps1 create user@example.com https://example.com/api/cron "Example heartbeat"
+.\accounts\cronjob-account.ps1 job user@example.com 12345
+.\accounts\cronjob-account.ps1 history user@example.com 12345
+.\accounts\cronjob-account.ps1 disable user@example.com 12345
+.\accounts\cronjob-account.ps1 enable user@example.com 12345
 ```
 
 Export and import cron-job.org job definitions:
 
 ```powershell
-.\cronjob-account.ps1 export user@example.com
-.\cronjob-account.ps1 import user@example.com
-.\cronjob-account.ps1 import user@example.com -ConfirmImport -Disabled
+.\accounts\cronjob-account.ps1 export user@example.com
+.\accounts\cronjob-account.ps1 import user@example.com
+.\accounts\cronjob-account.ps1 import user@example.com -ConfirmImport -Disabled
 ```
 
 For custom cron-job.org API calls, use the raw API wrapper:
 
 ```powershell
-.\cronjob-account.ps1 run user@example.com PATCH /jobs/12345 '{"job":{"enabled":true}}'
-.\cronjob-account.ps1 run PATCH /jobs/12345 '{"job":{"enabled":true}}'
+.\accounts\cronjob-account.ps1 run user@example.com PATCH /jobs/12345 '{"job":{"enabled":true}}'
+.\accounts\cronjob-account.ps1 run PATCH /jobs/12345 '{"job":{"enabled":true}}'
 ```
 
 cron-job.org API keys are saved as `api-key.txt` under the account profile folder. Job exports are saved as `jobs-export.json` under that same folder by default. Treat both files as secrets; back them up only through the encrypted backup flow. If you enable cron-job.org IP restrictions, commands from non-allowlisted machines can fail with HTTP 403.
@@ -662,52 +662,52 @@ Create and use GitHub profiles:
 If you already have a normal machine-level GitHub CLI login, import it into mainframe once:
 
 ```powershell
-.\github-account.ps1 import-current
-.\github-account.ps1 use user@example.com
-.\github-account.ps1 whoami user@example.com
-.\github-account.ps1 repos user@example.com
-.\github-account.ps1 status-all
+.\accounts\github-account.ps1 import-current
+.\accounts\github-account.ps1 use user@example.com
+.\accounts\github-account.ps1 whoami user@example.com
+.\accounts\github-account.ps1 repos user@example.com
+.\accounts\github-account.ps1 status-all
 ```
 
 You can also save a GitHub token directly, or run the official `gh` CLI/API through the selected profile:
 
 ```powershell
-.\github-account.ps1 token-add user@example.com
-.\github-account.ps1 run user@example.com repo list --limit 20
-.\github-account.ps1 run repo list --limit 20
-.\github-account.ps1 api user@example.com GET /user
+.\accounts\github-account.ps1 token-add user@example.com
+.\accounts\github-account.ps1 run user@example.com repo list --limit 20
+.\accounts\github-account.ps1 run repo list --limit 20
+.\accounts\github-account.ps1 api user@example.com GET /user
 ```
 
 GitHub profiles use profile-local `GH_CONFIG_DIR`. Running `login`, `token-add`, or `import-current` detects the GitHub account email and refuses to save login/username/manual-label fallbacks. `login` and `token-add` accept an optional `<email>` first arg — when provided, mainframe asserts that the detected email matches and refuses to save a profile under a mismatched email (rule 17: keyed by asserted email). Tokens or CLI sessions must expose email, usually through `user:email` access. Portable tokens are saved as `token.txt` and are passed to official GitHub tooling as `GH_TOKEN` and `GITHUB_TOKEN` only while a profile command runs. Treat `token.txt` as a secret; back it up only through the encrypted backup flow.
 
-**Token class preference (rule 27: durable auth).** GitHub OAuth tokens emitted by `gh auth login` start with `gho_` and expire (8 hours to 1 year) or can be revoked by session GC. For durable mainframe auth, generate a classic PAT (`ghp_`) or fine-grained PAT (`github_pat_`) with full scopes and "No expiration" at https://github.com/settings/tokens, then run `github-account.ps1 token-add <email>`. Saving a `gho_` token triggers a non-blocking warning recommending a PAT.
+**Token class preference (rule 27: durable auth).** GitHub OAuth tokens emitted by `gh auth login` start with `gho_` and expire (8 hours to 1 year) or can be revoked by session GC. For durable mainframe auth, generate a classic PAT (`ghp_`) or fine-grained PAT (`github_pat_`) with full scopes and "No expiration" at https://github.com/settings/tokens, then run `accounts/github-account.ps1 token-add <email>`. Saving a `gho_` token triggers a non-blocking warning recommending a PAT.
 
 Create and use Notion profiles:
 
 If you already have a Notion token in `NOTION_API_TOKEN`, `NOTION_ACCESS_TOKEN`, or `NOTION_TOKEN`, import it into mainframe once. Mainframe calls Notion `/users/me`, detects the account email when Notion exposes it, and saves the profile under that email:
 
 ```powershell
-.\notion-account.ps1 import-current
-.\notion-account.ps1 use user@example.com
-.\notion-account.ps1 me user@example.com
-.\notion-account.ps1 users user@example.com
+.\accounts\notion-account.ps1 import-current
+.\accounts\notion-account.ps1 use user@example.com
+.\accounts\notion-account.ps1 me user@example.com
+.\accounts\notion-account.ps1 users user@example.com
 ```
 
 You can also save a Notion personal access token or integration token directly, inspect accessible pages/blocks, or run the official `ntn` CLI when installed:
 
 ```powershell
-.\notion-account.ps1 token-add
-.\notion-account.ps1 search user@example.com '{"page_size":10}'
-.\notion-account.ps1 page user@example.com PAGE_ID
-.\notion-account.ps1 blocks user@example.com BLOCK_ID
-.\notion-account.ps1 run user@example.com api v1/users/me
-.\notion-account.ps1 run api v1/users/me
-.\notion-account.ps1 api user@example.com GET /users/me
+.\accounts\notion-account.ps1 token-add
+.\accounts\notion-account.ps1 search user@example.com '{"page_size":10}'
+.\accounts\notion-account.ps1 page user@example.com PAGE_ID
+.\accounts\notion-account.ps1 blocks user@example.com BLOCK_ID
+.\accounts\notion-account.ps1 run user@example.com api v1/users/me
+.\accounts\notion-account.ps1 run api v1/users/me
+.\accounts\notion-account.ps1 api user@example.com GET /users/me
 ```
 
 Notion's script installer is currently macOS/Linux only and the `ntn` package reports native Windows as unsupported on this machine, so the API commands are the dependable native Windows path for now. The `run` command is still here for WSL/Linux/macOS or future Windows-compatible `ntn` releases.
 
-When Notion exposes the owner's email from `/users/me`, `token-add` and `import-current` auto-detect it. If a restricted token cannot reveal an email, the helper fails without saving anything and you can pass the account email explicitly, for example `.\notion-account.ps1 token-add user@example.com`. Notion profiles use profile-local `NOTION_HOME` for CLI config and pass saved tokens as `NOTION_API_TOKEN`, `NOTION_TOKEN`, and `NOTION_ACCESS_TOKEN` only while a profile command runs. Treat `token.txt` as a secret; back it up only through the encrypted backup flow.
+When Notion exposes the owner's email from `/users/me`, `token-add` and `import-current` auto-detect it. If a restricted token cannot reveal an email, the helper fails without saving anything and you can pass the account email explicitly, for example `.\accounts\notion-account.ps1 token-add user@example.com`. Notion profiles use profile-local `NOTION_HOME` for CLI config and pass saved tokens as `NOTION_API_TOKEN`, `NOTION_TOKEN`, and `NOTION_ACCESS_TOKEN` only while a profile command runs. Treat `token.txt` as a secret; back it up only through the encrypted backup flow.
 
 Create and use Microsoft Graph profiles:
 
@@ -718,19 +718,19 @@ Create and use Hugging Face profiles:
 If you already have a normal machine-level Hugging Face login, import it into mainframe once. Mainframe detects the account email after auth and uses that as the profile name:
 
 ```powershell
-.\hf-account.ps1 import-current
-.\hf-account.ps1 use user@example.com
-.\hf-account.ps1 whoami user@example.com
-.\hf-account.ps1 run user@example.com models list --author your-hf-account --limit 10
-.\hf-account.ps1 run models list --author your-hf-account --limit 10
+.\accounts\hf-account.ps1 import-current
+.\accounts\hf-account.ps1 use user@example.com
+.\accounts\hf-account.ps1 whoami user@example.com
+.\accounts\hf-account.ps1 run user@example.com models list --author your-hf-account --limit 10
+.\accounts\hf-account.ps1 run models list --author your-hf-account --limit 10
 ```
 
 You can also save a Hugging Face user access token directly:
 
 ```powershell
-.\hf-account.ps1 token-add
-.\hf-account.ps1 run user@example.com auth whoami --format json
-.\hf-account.ps1 run user@example.com repos create your-hf-account/private-dataset --type dataset --private
+.\accounts\hf-account.ps1 token-add
+.\accounts\hf-account.ps1 run user@example.com auth whoami --format json
+.\accounts\hf-account.ps1 run user@example.com repos create your-hf-account/private-dataset --type dataset --private
 ```
 
 Hugging Face profiles use profile-local `HF_HOME`, `HF_TOKEN_PATH`, and `HF_STORED_TOKENS_PATH`. `login`, `token-add`, and `import-current` always detect the account email after auth and save the profile under that email. If the email cannot be detected, mainframe fails instead of saving a fallback profile. Portable tokens are also saved as `token.txt` under the account profile folder so the encrypted backup flow can carry them across machines. Treat `token.txt`, `token`, and `stored_tokens` as secrets.
@@ -746,65 +746,65 @@ Moved to `C:\Users\Admin\Downloads\automata-private\reddit.com\reddit-account.ps
 Create and use Google Cloud CLI profiles:
 
 ```powershell
-.\gcloud-account.ps1 import-current
-.\gcloud-account.ps1 use user@example.com
-.\gcloud-account.ps1 whoami user@example.com
-.\gcloud-account.ps1 status user@example.com
-.\gcloud-account.ps1 projects user@example.com
-.\gcloud-account.ps1 run user@example.com config list
-.\gcloud-account.ps1 run config list
-.\gcloud-account.ps1 run user@example.com services enable firebase.googleapis.com --project my-project
+.\accounts\gcloud-account.ps1 import-current
+.\accounts\gcloud-account.ps1 use user@example.com
+.\accounts\gcloud-account.ps1 whoami user@example.com
+.\accounts\gcloud-account.ps1 status user@example.com
+.\accounts\gcloud-account.ps1 projects user@example.com
+.\accounts\gcloud-account.ps1 run user@example.com config list
+.\accounts\gcloud-account.ps1 run config list
+.\accounts\gcloud-account.ps1 run user@example.com services enable firebase.googleapis.com --project my-project
 ```
 
-`gcloud-account.ps1` stores each profile as a normal Google Cloud SDK config directory under `%APPDATA%\mainframe\accounts\gcloud\<email>` and selects it with `CLOUDSDK_CONFIG` only while a command runs. `import-current` copies the current default SDK config into an email-keyed profile, excluding logs. `login` runs `gcloud auth login` inside an isolated profile and refuses to save a project name or label fallback if it cannot detect the account email.
+`accounts/gcloud-account.ps1` stores each profile as a normal Google Cloud SDK config directory under `%APPDATA%\mainframe\accounts\gcloud\<email>` and selects it with `CLOUDSDK_CONFIG` only while a command runs. `import-current` copies the current default SDK config into an email-keyed profile, excluding logs. `login` runs `gcloud auth login` inside an isolated profile and refuses to save a project name or label fallback if it cannot detect the account email.
 
 Create and use Firebase CLI profiles:
 
 ```powershell
-.\firebase-account.ps1 import-current
-.\firebase-account.ps1 use user@example.com
-.\firebase-account.ps1 whoami user@example.com
-.\firebase-account.ps1 status user@example.com
-.\firebase-account.ps1 projects user@example.com
-.\firebase-account.ps1 run user@example.com init auth
-.\firebase-account.ps1 run projects:list
-.\firebase-account.ps1 run user@example.com deploy --only auth
+.\accounts\firebase-account.ps1 import-current
+.\accounts\firebase-account.ps1 use user@example.com
+.\accounts\firebase-account.ps1 whoami user@example.com
+.\accounts\firebase-account.ps1 status user@example.com
+.\accounts\firebase-account.ps1 projects user@example.com
+.\accounts\firebase-account.ps1 run user@example.com init auth
+.\accounts\firebase-account.ps1 run projects:list
+.\accounts\firebase-account.ps1 run user@example.com deploy --only auth
 ```
 
-`firebase-account.ps1` stores each Firebase CLI configstore under `%APPDATA%\mainframe\accounts\firebase\<email>` and selects it with `XDG_CONFIG_HOME` only while a command runs. `import-current` copies the current `firebase-tools.json` into an email-keyed profile. `login` runs `firebase login` inside an isolated profile and refuses to save a project name or label fallback if it cannot detect the account email.
+`accounts/firebase-account.ps1` stores each Firebase CLI configstore under `%APPDATA%\mainframe\accounts\firebase\<email>` and selects it with `XDG_CONFIG_HOME` only while a command runs. `import-current` copies the current `firebase-tools.json` into an email-keyed profile. `login` runs `firebase login` inside an isolated profile and refuses to save a project name or label fallback if it cannot detect the account email.
 
 Create and use Google Workspace CLI profiles:
 
 ```powershell
-.\gws-account.ps1 login user@example.com --services gmail,drive,sheets
-.\gws-account.ps1 use user@example.com
-.\gws-account.ps1 whoami user@example.com
-.\gws-account.ps1 status user@example.com
-.\gws-account.ps1 run user@example.com gmail users messages list --params '{"userId":"me"}'
-.\gws-account.ps1 run auth status
-.\gws-account.ps1 run user@example.com drive files list --params '{"pageSize":10}'
+.\accounts\gws-account.ps1 login user@example.com --services gmail,drive,sheets
+.\accounts\gws-account.ps1 use user@example.com
+.\accounts\gws-account.ps1 whoami user@example.com
+.\accounts\gws-account.ps1 status user@example.com
+.\accounts\gws-account.ps1 run user@example.com gmail users messages list --params '{"userId":"me"}'
+.\accounts\gws-account.ps1 run auth status
+.\accounts\gws-account.ps1 run user@example.com drive files list --params '{"pageSize":10}'
 ```
 
 Create and use a Search Console-capable Google profile:
 
 ```powershell
-.\gws-account.ps1 login user@example.com --scopes https://www.googleapis.com/auth/webmasters,https://www.googleapis.com/auth/siteverification
-.\gws-account.ps1 gsc user@example.com sites
-.\gws-account.ps1 gsc user@example.com add-site https://www.example.com/
-.\gws-account.ps1 gsc user@example.com sitemaps sc-domain:example.com
-.\gws-account.ps1 gsc user@example.com submit-sitemap sc-domain:example.com https://example.com/sitemap.xml
-.\gws-account.ps1 gsc user@example.com inspect-url https://example.com/news/story sc-domain:example.com
-.\gws-account.ps1 gsc user@example.com analytics sc-domain:example.com 28 query,page
-.\gws-account.ps1 gsc user@example.com verification-token https://example.com/ META SITE
-.\gws-account.ps1 gsc user@example.com verify-site https://example.com/ META SITE
-.\gws-account.ps1 gsc user@example.com scopes
+.\accounts\gws-account.ps1 login user@example.com --scopes https://www.googleapis.com/auth/webmasters,https://www.googleapis.com/auth/siteverification
+.\accounts\gws-account.ps1 gsc user@example.com sites
+.\accounts\gws-account.ps1 gsc user@example.com add-site https://www.example.com/
+.\accounts\gws-account.ps1 gsc user@example.com sitemaps sc-domain:example.com
+.\accounts\gws-account.ps1 gsc user@example.com submit-sitemap sc-domain:example.com https://example.com/sitemap.xml
+.\accounts\gws-account.ps1 gsc user@example.com inspect-url https://example.com/news/story sc-domain:example.com
+.\accounts\gws-account.ps1 gsc user@example.com analytics sc-domain:example.com 28 query,page
+.\accounts\gws-account.ps1 gsc user@example.com verification-token https://example.com/ META SITE
+.\accounts\gws-account.ps1 gsc user@example.com verify-site https://example.com/ META SITE
+.\accounts\gws-account.ps1 gsc user@example.com scopes
 ```
 
 Back these profiles up with the encrypted secrets flow:
 
 ```powershell
-.\backup.ps1
-.\restore.ps1 -IncludeSecrets
+.\windows\backup.ps1
+.\windows\restore.ps1 -IncludeSecrets
 ```
 
 The encrypted secrets flow also carries user-managed Agent skills from `%USERPROFILE%\.agents\skills`. Codex was uninstalled 2026-08-15 (scoop) and its config removed from this manifest, so `%USERPROFILE%\.codex` is no longer backed up.
@@ -842,41 +842,41 @@ or `MF_MODE=full` skips the prompt where there is no terminal.
 Extract `mainframe-backup.zip` on the new machine, then double-click `restore.cmd` or run:
 
 ```powershell
-.\restore.ps1
+.\windows\restore.ps1
 ```
 
-The zip is self-contained: it includes `restore.cmd`, `restore.ps1`, `restore-secrets.ps1`, and all backup data. Secrets travel beside it as `secrets/` (a plain `backup.ps1` run) or as a standalone `tool-secrets.zip` — `restore.ps1` restores whichever is present and warns loudly when neither is. For the remote one-liner (`irm https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/boot.ps1 | iex`), secrets ride inside `mainframe-quick.zip` as an AES-256-encrypted entry and are decrypted with the password held in Bitwarden item `mainframe-production`.
+The zip is self-contained: it includes `restore.cmd`, `windows/restore.ps1`, `windows/restore-secrets.ps1`, and all backup data. Secrets travel beside it as `secrets/` (a plain `windows/backup.ps1` run) or as a standalone `tool-secrets.zip` — `windows/restore.ps1` restores whichever is present and warns loudly when neither is. For the remote one-liner (`irm https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/boot.ps1 | iex`), secrets ride inside `mainframe-quick.zip` as an AES-256-encrypted entry and are decrypted with the password held in Bitwarden item `mainframe-production`.
 
 Run restore from an Administrator PowerShell if `native-apps.json` is present, because service-style native apps need elevation.
 
 Use exact pinned versions from the snapshot instead of latest:
 
 ```powershell
-.\restore.ps1 -Pinned
+.\windows\restore.ps1 -Pinned
 ```
 
 Skip native app install steps:
 
 ```powershell
-.\restore.ps1 -SkipNativeApps
+.\windows\restore.ps1 -SkipNativeApps
 ```
 
 Restore apps plus embedded secrets (enabled by default):
 
 ```powershell
-.\restore.ps1
+.\windows\restore.ps1
 ```
 
 Skip secrets restore:
 
 ```powershell
-.\restore.ps1 -ExcludeSecrets
+.\windows\restore.ps1 -ExcludeSecrets
 ```
 
 You can also restore from a standalone `tool-secrets.zip`:
 
 ```powershell
-.\restore-secrets.ps1
+.\windows\restore-secrets.ps1
 ```
 
 ## Safety
@@ -891,7 +891,7 @@ The private artifacts are ignored by Git on purpose. Store them in a private rel
 
 Plain `scoop import scoopfile.json` is useful, but it does not restore `$SCOOP\persist`. It also installs normal bucket apps from bucket manifests, which can move forward over time. `mainframe` restores from bucket manifests by default. Pass `-Pinned` to restore exact `bucket/app@version` snapshots instead.
 
-To support another tool later, add its natural config/auth path to `tool-secrets.manifest.json`, then run `.\backup.ps1` again.
+To support another tool later, add its natural config/auth path to `manifests/tool-secrets.manifest.json`, then run `.\windows\backup.ps1` again.
 
 ## Contributors
 

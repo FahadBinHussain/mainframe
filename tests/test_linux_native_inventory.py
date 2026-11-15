@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
+from linux import linux_packages as lp
 
 ROOT = Path(__file__).parents[1]
 
@@ -23,6 +23,7 @@ class NativeInventoryTests(unittest.TestCase):
     def fixture_plan(self, names):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, key, values in (
                 ("scoop-allowed.json", "apps", names),
                 ("winget-allowed.json", "packages", [{"id": "Vendor.Unknown"}]),
@@ -30,7 +31,7 @@ class NativeInventoryTests(unittest.TestCase):
                 ("uv-allowed.json", "packages", ["tool"]),
                 ("go-allowed.json", "packages", ["example.com/tool"]),
             ):
-                (root / filename).write_text(json.dumps({key: values}))
+                (root / "manifests" / filename).write_text(json.dumps({key: values}))
             with patch.object(lp, "_native_release", side_effect=lambda n, a: {"name": n, "version": "1.2.3"}):
                 return lp.build_plan(root)
 
@@ -48,12 +49,13 @@ class NativeInventoryTests(unittest.TestCase):
     def test_metadata_failure_is_an_explicit_named_blocker(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, key, value in (("scoop-allowed.json", "apps", ["bun"]),
                                          ("winget-allowed.json", "packages", ["Unknown"]),
                                          ("pnpm-allowed.json", "packages", ["tool"]),
                                          ("uv-allowed.json", "packages", ["tool"]),
                                          ("go-allowed.json", "packages", ["example.com/tool"])):
-                (root / filename).write_text(json.dumps({key: value}))
+                (root / "manifests" / filename).write_text(json.dumps({key: value}))
             with patch.object(lp, "_native_release", side_effect=RuntimeError("missing official digest")):
                 plan = lp.build_plan(root)
         action = plan.actions[0]

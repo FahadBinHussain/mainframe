@@ -2,7 +2,7 @@ import json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_real as lr
+from linux import linux_real as lr
 
 TOKEN = 'fake-vault-token-not-a-real-secret'
 

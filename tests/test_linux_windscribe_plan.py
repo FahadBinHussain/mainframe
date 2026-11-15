@@ -6,7 +6,7 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-import windscribe_linux as wind
+from linux import windscribe_linux as wind
 
 VERSION = "2.24.13"
 WIN_X64_SHA = "1" * 64

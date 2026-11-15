@@ -2,7 +2,7 @@ import hashlib, io, os, sys, tarfile, tempfile, unittest, zipfile
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import github_native_linux as g
+from linux import github_native_linux as g
 
 def elf(*, etype=2, version=1):
     b=bytearray(64); b[:7]=b"\x7fELF"+bytes((2,1,1)); b[16:18]=etype.to_bytes(2,'little'); b[18:20]=(62).to_bytes(2,'little'); b[20:24]=version.to_bytes(4,'little'); b[52:54]=(64).to_bytes(2,'little'); return bytes(b)+b'x'

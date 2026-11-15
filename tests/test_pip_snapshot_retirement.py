@@ -8,14 +8,15 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
-import linux_restore as lr
+from linux import linux_packages as lp
+from linux import linux_restore as lr
 
 ROOT = Path(__file__).parents[1]
 
 
 class PipSnapshotRetirementTests(unittest.TestCase):
     def repo(self, root):
+        (root / "manifests").mkdir(parents=True, exist_ok=True)
         for name, key, values in (
             ('scoop-allowed.json', 'apps', ['curl', 'python312']),
             ('winget-allowed.json', 'packages', [{'id': 'Synthetic.Tool'}]),
@@ -23,7 +24,7 @@ class PipSnapshotRetirementTests(unittest.TestCase):
             ('uv-allowed.json', 'packages', ['synthetic-tool']),
             ('go-allowed.json', 'packages', ['example.invalid/tool']),
         ):
-            (root / name).write_text(json.dumps({key: values}))
+            (root / "manifests" / name).write_text(json.dumps({key: values}))
 
     def plan(self, repo, backup=None):
         return lp.build_plan(repo, backup_root=backup, distro='ubuntu', architecture='x86_64')
@@ -111,8 +112,8 @@ class PipSnapshotRetirementTests(unittest.TestCase):
             self.assertIn('no command is executed', reason)
 
     def test_windows_no_capture_or_frozen_install_step(self):
-        backup = (ROOT / 'backup.ps1').read_text()
-        restore = (ROOT / 'restore.ps1').read_text()
+        backup = (ROOT / 'windows' / 'backup.ps1').read_text()
+        restore = (ROOT / 'windows' / 'restore.ps1').read_text()
         self.assertNotIn('pip-freeze.txt', backup)
         self.assertNotIn('$pipFreezeFile', backup + restore)
         self.assertNotIn('$freezeLines', backup)

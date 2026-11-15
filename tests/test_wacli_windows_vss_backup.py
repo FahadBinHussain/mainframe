@@ -14,7 +14,7 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
-MODULE = REPO / "wacli-vss-backup.psm1"
+MODULE = REPO / "windows" / "wacli-vss-backup.psm1"
 
 
 @unittest.skipUnless(shutil.which("pwsh"), "PowerShell Core is required")

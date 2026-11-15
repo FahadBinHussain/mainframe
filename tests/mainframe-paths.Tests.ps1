@@ -5,7 +5,7 @@
 # branch - which is exercised here by clearing $env:OS, the flag the module
 # uses to tell windows from linux.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../mainframe-paths.psm1'))
+$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe-paths.psm1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -87,7 +87,7 @@ try {
     try {
         [Environment]::SetEnvironmentVariable('USERPROFILE', $null)
         $expectedCheckout = Join-Path $HOME 'Downloads/mainframe'
-        if (Test-Path (Join-Path $expectedCheckout 'vault-secret.psm1')) {
+        if (Test-Path (Join-Path $expectedCheckout 'windows\vault-secret.psm1')) {
             Assert-Equal $expectedCheckout (Get-MainframeCheckoutRoot) `
                 'checkout root resolves through $HOME with no USERPROFILE'
         } else {

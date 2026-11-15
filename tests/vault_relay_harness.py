@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-MODULES = ("vault-approval.psm1", "vault-secret.psm1", "mainframe-paths.psm1", "mainframe-json.psm1")
+MODULES = ("windows/vault-approval.psm1", "windows/vault-secret.psm1", "windows/mainframe-paths.psm1", "windows/mainframe-json.psm1")
 
 
 def pwsh_executable() -> str | None:

@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import opencode2_linux as o
+from linux import opencode2_linux as o
 
 class R:
     def __init__(self, data): self.io=io.BytesIO(data); self.headers={"Content-Length":str(len(data))}

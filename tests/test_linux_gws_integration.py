@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
+from linux import linux_packages as lp
 
 PACKAGE = "@googleworkspace/cli"
 
@@ -21,6 +21,7 @@ class GwsIntegrationTests(unittest.TestCase):
         self.addCleanup(host.stop)
 
     def fixture(self, repo, *, gws_root=None, backup_root=None):
+        (repo / "manifests").mkdir(parents=True, exist_ok=True)
         for filename, key, entries in (
             ("scoop-allowed.json", "apps", ["curl"]),
             ("winget-allowed.json", "packages", [{"id": "Vendor.Unknown"}]),
@@ -28,7 +29,7 @@ class GwsIntegrationTests(unittest.TestCase):
             ("uv-allowed.json", "packages", ["graphifyy"]),
             ("go-allowed.json", "packages", ["example.com/tool"]),
         ):
-            (repo / filename).write_text(json.dumps({key: entries}))
+            (repo / "manifests" / filename).write_text(json.dumps({key: entries}))
         with patch.object(lp.gws_tools, "resolve_release", return_value={"version": "1.2.3", "sha256": "a" * 64}):
             return lp.build_plan(repo, backup_root=backup_root, gws_root=gws_root)
 

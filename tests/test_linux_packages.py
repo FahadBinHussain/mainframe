@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
+from linux import linux_packages as lp
 ROOT = Path(__file__).parents[1]
 ANDROID_RESOLVER = lp.android_tools.resolve_release
 ANYDESK_RESOLVER = lp.anydesk_tools.resolve_release
@@ -107,8 +107,9 @@ class LinuxPackagesTests(unittest.TestCase):
                     ]
                 }
             }
+            (repo / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, data in manifests.items():
-                (repo / filename).write_text(json.dumps(data))
+                (repo / "manifests" / filename).write_text(json.dumps(data))
             plan = lp.build_plan(repo, distro="ubuntu", architecture="x86_64")
             names = {a.name for a in plan.actions}
             self.assertIn("curl", names)
@@ -127,12 +128,12 @@ class LinuxPackagesTests(unittest.TestCase):
     def test_complete_allowlists_are_accounted_for(self):
         plan = lp.build_plan(ROOT, distro="ubuntu", architecture="x86_64")
         names = {a.name for a in plan.actions}
-        scoop_raw = json.loads((ROOT / "scoop-allowed.json").read_text())
+        scoop_raw = json.loads((ROOT / "manifests" / "scoop-allowed.json").read_text())
         scoop_disabled = set(scoop_raw.get("disabled", []) + scoop_raw.get("disabled_apps", []))
         scoop = [x if isinstance(x, str) else x["name"] for x in scoop_raw["apps"]
                  if ((isinstance(x, str) and x not in scoop_disabled) or
                      (isinstance(x, dict) and not x.get("disabled") and x.get("name") not in scoop_disabled))]
-        winget_raw = json.loads((ROOT / "winget-allowed.json").read_text())
+        winget_raw = json.loads((ROOT / "manifests" / "winget-allowed.json").read_text())
         winget_disabled = set(winget_raw.get("disabled", []) + winget_raw.get("disabled_packages", []))
         winget = [x["id"] for x in winget_raw["packages"]
                   if ((isinstance(x, dict) and not x.get("disabled") and x.get("id") not in winget_disabled) or
@@ -153,8 +154,9 @@ class LinuxPackagesTests(unittest.TestCase):
                 "uv-allowed.json": {"packages": [{"name": "synthetic-tool"}]},
                 "go-allowed.json": {"packages": ["example.com/synthetic-tool"]},
             }
+            (repo / "manifests").mkdir(parents=True, exist_ok=True)
             for name, value in manifests.items():
-                (repo / name).write_text(json.dumps(value))
+                (repo / "manifests" / name).write_text(json.dumps(value))
             runner = Mock(side_effect=AssertionError("default Vercel plan must not run commands"))
             with patch.object(lp.pnpm_global_tools, "build_dry_plan") as dry_plan, \
                  patch.object(lp.pnpm_global_tools, "manifest") as registry_manifest:
@@ -471,6 +473,7 @@ class LinuxPackagesTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
             repo = Path(d)
+            (repo / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, key, value in (
                 ("scoop-allowed.json", "apps", ["vscode"]),
                 ("winget-allowed.json", "packages", [{"id": "Vendor.Tool"}]),
@@ -478,7 +481,7 @@ class LinuxPackagesTests(unittest.TestCase):
                 ("uv-allowed.json", "packages", ["tool"]),
                 ("go-allowed.json", "packages", ["example.com/tool"]),
             ):
-                (repo / filename).write_text(json.dumps({key: value}))
+                (repo / "manifests" / filename).write_text(json.dumps({key: value}))
             detail = {
                 "package": {"name": "vscode", "version": "1.2.3", "version_is_restore_pin": False},
                 "linux_archive_candidate": {"url": "https://vscode.download.prss.microsoft.com/synthetic.tar.gz"},
@@ -556,9 +559,9 @@ class LinuxPackagesTests(unittest.TestCase):
             build.assert_not_called()
 
     def test_autohotkey_removed_from_both_allowlists_and_dry_plan(self):
-        scoop_raw = json.loads((ROOT / "scoop-allowed.json").read_text())["apps"]
+        scoop_raw = json.loads((ROOT / "manifests" / "scoop-allowed.json").read_text())["apps"]
         scoop = [x if isinstance(x, str) else x["name"] for x in scoop_raw]
-        winget = [x["id"] for x in json.loads((ROOT / "winget-allowed.json").read_text())["packages"]]
+        winget = [x["id"] for x in json.loads((ROOT / "manifests" / "winget-allowed.json").read_text())["packages"]]
         self.assertNotIn("autohotkey", scoop)
         self.assertNotIn("AutoHotkey.AutoHotkey", winget)
         output = io.StringIO()
@@ -575,6 +578,7 @@ class LinuxPackagesTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
             root = Path(d)
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, key, value in (
                 ("scoop-allowed.json", "apps", apps),
                 ("winget-allowed.json", "packages", winget if winget is not None else [{"id": "Vendor.Tool"}]),
@@ -582,7 +586,7 @@ class LinuxPackagesTests(unittest.TestCase):
                 ("uv-allowed.json", "packages", ["tool"]),
                 ("go-allowed.json", "packages", ["example.com/tool"]),
             ):
-                (root / filename).write_text(json.dumps({key: value}))
+                (root / "manifests" / filename).write_text(json.dumps({key: value}))
             return lp.build_plan(root, distro="ubuntu", architecture="x86_64", **kwargs)
 
     def test_anydesk_plans_official_package_and_covers_winget_duplicate(self):
@@ -954,6 +958,7 @@ class LinuxPackagesTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as d:
             root = Path(d)
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, key, value in (
                 ("scoop-allowed.json", "apps", ["curl"]),
                 ("winget-allowed.json", "packages", [{"id": []}, {"id": "  "}, None, 42, {"id": "Vendor.Valid"}]),
@@ -961,7 +966,7 @@ class LinuxPackagesTests(unittest.TestCase):
                 ("uv-allowed.json", "packages", [{"name": "tool"}]),
                 ("go-allowed.json", "packages", ["example.com/tool"]),
             ):
-                (root / filename).write_text(json.dumps({key: value}))
+                (root / "manifests" / filename).write_text(json.dumps({key: value}))
             plan = lp.build_plan(root, distro="ubuntu", architecture="x86_64")
         invalid = [a for a in plan.actions if a.kind == "winget" and a.status == "blocked"]
         self.assertEqual(len(invalid), 5)

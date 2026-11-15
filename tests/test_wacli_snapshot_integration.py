@@ -16,7 +16,7 @@ from unittest.mock import patch
 from zipfile import ZipFile
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import wacli_snapshot as snapshot
+from wacli import wacli_snapshot as snapshot
 
 HAS_AES = importlib.util.find_spec('pyzipper') is not None
 

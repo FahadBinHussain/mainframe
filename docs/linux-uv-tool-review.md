@@ -4,7 +4,7 @@ Graphifyy supports Linux; lack of a Linux release is not the blocker. A complete
 
 ## What the declarations actually say
 
-The external offline recovery's `mainframe-quick.zip` recovered directory contains two control manifests declaring the string `graphifyy`: `uv-allowed.json` and `uv-tools.json`, with no version. These are external recovery evidence, not two tracked files in this checkout; `uv-tools.json` is not checked into the repository. The repository allowlist also uses that string. The Linux planner reads the allowlist, not `uv-tools.json`, and preserves the original unpinned proposal `uv tool install -- graphifyy` as a **blocked** action. It does not silently replace the declaration with today's latest release. Neither allowlists nor backup/export behavior are changed here.
+The external offline recovery's `mainframe-quick.zip` recovered directory contains two control manifests declaring the string `graphifyy`: `manifests/uv-allowed.json` and `uv-tools.json`, with no version. These are external recovery evidence, not two tracked files in this checkout; `uv-tools.json` is not checked into the repository. The repository allowlist also uses that string. The Linux planner reads the allowlist, not `uv-tools.json`, and preserves the original unpinned proposal `uv tool install -- graphifyy` as a **blocked** action. It does not silently replace the declaration with today's latest release. Neither allowlists nor backup/export behavior are changed here.
 
 ## Published package and runtime evidence
 

@@ -8,7 +8,7 @@
 # is faked and the profile root is a temp directory.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$flow = Join-Path $repo 'vault-flow.ps1'
+$flow = Join-Path $repo 'windows\vault-flow.ps1'
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {

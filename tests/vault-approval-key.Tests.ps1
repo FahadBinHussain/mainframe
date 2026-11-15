@@ -16,7 +16,7 @@
 #     its own pair and proceeds - no registration step, no stop
 #   - the credential resolver picks the right shape
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../vault-approval.psm1'))
+$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
 $page = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../docs/vault-tab.html'))
 
 $script:checks = 0
@@ -121,7 +121,7 @@ try {
 
 # 7. there is no credential resolver any more - topic-only auth means no
 #    header or token is ever resolved, sent, or read from the config
-$source = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../vault-approval.psm1') -Raw
+$source = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\windows\vault-approval.psm1') -Raw
 Assert-True ($source -notmatch 'function Get-VaultNtfyCredential') 'there is no credential resolver'
 Assert-True ($source -notmatch 'MAINFRAME_NTFY_AUTH') 'there is no ntfy auth environment variable'
 Assert-True ($source -notmatch "'ntfyAuth'") 'the config carries no ntfy auth key'

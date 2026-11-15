@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
+from linux import linux_packages as lp
 
 PATH = "github.com/openclaw/wacli/cmd/wacli"
 COMMAND = ["go", "install", "-tags", "sqlite_fts5", PATH + "@v0.15.0"]
@@ -27,15 +27,16 @@ class WacliReviewTests(unittest.TestCase):
                 "uv-allowed.json": {"packages": ["fixture-python-tool"]},
                 "go-allowed.json": {"packages": [declaration]},
             }
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, value in manifests.items():
-                (root / filename).write_text(json.dumps(value), encoding="utf-8")
-            before = {p.name: p.read_bytes() for p in root.iterdir()}
+                (root / "manifests" / filename).write_text(json.dumps(value), encoding="utf-8")
+            before = {p.name: p.read_bytes() for p in (root / "manifests").iterdir()}
             environment = dict(os.environ)
             with patch.object(lp, "_native_release", side_effect=AssertionError("no metadata fetch")), \
                     patch.object(lp.subprocess, "run", side_effect=AssertionError("no processes")), \
                     patch.object(lp.shutil, "which", side_effect=AssertionError("no global binary fallback")):
                 plan = lp.build_plan(root, distro="ubuntu", architecture=architecture)
-            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir()})
+            self.assertEqual(before, {p.name: p.read_bytes() for p in (root / "manifests").iterdir()})
             self.assertEqual(environment, dict(os.environ))
             return plan
 

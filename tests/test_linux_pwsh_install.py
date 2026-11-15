@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import pwsh_linux as pwsh
+from linux import pwsh_linux as pwsh
 
 VERSION = "9.8.7"
 LINUX_NAME = f"powershell-{VERSION}-linux-x64.tar.gz"

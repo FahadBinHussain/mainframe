@@ -12,7 +12,7 @@
 # is the only credential, no header or token is ever sent, and a refused
 # push must say so instead of dying quietly.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../vault-approval.psm1'))
+$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {

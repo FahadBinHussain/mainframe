@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 
 import sys
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
-import pnpm_global_plan as plan
+from linux import linux_packages as lp
+from linux import pnpm_global_plan as plan
 
 
 class PnpmGlobalPlanTests(unittest.TestCase):
@@ -311,7 +311,8 @@ class PnpmGlobalPlanTests(unittest.TestCase):
     def test_linux_integration_passes_config_and_blocks_metadata_plan(self):
         with tempfile.TemporaryDirectory() as d:
             repo = Path(d); manifests = {"scoop-allowed.json": {"apps": []}, "winget-allowed.json": {"packages": []}, "pnpm-allowed.json": {"packages": ["vercel"]}, "uv-allowed.json": {"packages": ["x"]}, "go-allowed.json": {"packages": ["example.com/x"]}}
-            for name, value in manifests.items(): (repo / name).write_text(json.dumps(value))
+            (repo / "manifests").mkdir(parents=True, exist_ok=True)
+            for name, value in manifests.items(): (repo / "manifests" / name).write_text(json.dumps(value))
             metadata_plan = {"package": {"version": "1.0.0"},
                              "vercel_cli_review": {"package_version": "1.0.0", "node_engine_requirement": ">=20",
                                                    "optional_linux_native_packages": [{}, {}]},

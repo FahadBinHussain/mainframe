@@ -2,7 +2,7 @@ import hashlib, io, json, os, sys, tarfile, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import node_lts_linux as node
+from linux import node_lts_linux as node
 
 class Response:
     def __init__(self, data): self.data=io.BytesIO(data); self.headers={}

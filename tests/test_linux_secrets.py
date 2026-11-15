@@ -23,11 +23,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-import linux_secrets as ls  # noqa: E402
+from linux import linux_secrets as ls  # noqa: E402
 
 SEVEN_ZIP = shutil.which("7z") or shutil.which("7za")
 PASSWORD = "unit-test-password-1!"
-MANIFEST = REPO / "tool-secrets.manifest.json"
+MANIFEST = REPO / "manifests" / "tool-secrets.manifest.json"
 
 # the manifest's own layout, one file per mapped item
 PAYLOAD = {

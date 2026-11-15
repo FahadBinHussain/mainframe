@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
+from linux import linux_packages as lp
 
 
 class PipPlatformTests(unittest.TestCase):

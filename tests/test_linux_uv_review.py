@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_packages as lp
+from linux import linux_packages as lp
 
 
 class UvReviewTests(unittest.TestCase):
@@ -21,15 +21,16 @@ class UvReviewTests(unittest.TestCase):
                 "uv-allowed.json": {"packages": [declaration]},
                 "go-allowed.json": {"packages": ["example.invalid/tool"]},
             }
+            (root / "manifests").mkdir(parents=True, exist_ok=True)
             for filename, value in manifests.items():
-                (root / filename).write_text(json.dumps(value), encoding="utf-8")
-            before = {p.name: p.read_bytes() for p in root.iterdir()}
+                (root / "manifests" / filename).write_text(json.dumps(value), encoding="utf-8")
+            before = {p.name: p.read_bytes() for p in (root / "manifests").iterdir()}
             # This path needs no release resolution, process, or package download.
             with patch.object(lp, "_native_release", side_effect=AssertionError("unexpected metadata fetch")), \
                     patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network")), \
                     patch.object(lp.subprocess, "run", side_effect=AssertionError("unexpected process")):
                 plan = lp.build_plan(root, distro="ubuntu", architecture="x86_64")
-            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir()})
+            self.assertEqual(before, {p.name: p.read_bytes() for p in (root / "manifests").iterdir()})
             return plan
 
     def test_unpinned_declarations_remain_original_and_precisely_blocked(self):

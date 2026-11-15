@@ -5,9 +5,9 @@ fail() { printf 'FATAL: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
 Usage: boot.sh --restore [restore.sh arguments]
-       boot.sh --packages [linux_packages.py arguments]
+       boot.sh --packages [linux.linux_packages arguments]
        boot.sh --setup-tools
-       boot.sh --real [linux_real.py arguments]
+       boot.sh --real [linux.linux_real arguments]
        boot.sh --help
 
 Restore and package planning require a reviewed local checkout. Defaults are
@@ -31,15 +31,15 @@ case "$mode" in
         exec bash "$script_dir/restore.sh" "$@"
         ;;
     --packages)
-        [[ -f "$script_dir/linux_packages.py" ]] || fail 'Package restoration requires a reviewed local checkout containing linux_packages.py.'
+        [[ -f "$script_dir/linux/linux_packages.py" ]] || fail 'Package restoration requires a reviewed local checkout containing linux/linux_packages.py.'
         command -v python3 >/dev/null || fail 'Python 3 is required for Linux package planning.'
-        exec python3 "$script_dir/linux_packages.py" "$@"
+        exec env PYTHONPATH="$script_dir" python3 -m linux.linux_packages "$@"
         ;;
     --setup-tools) (($# == 0)) || fail '--setup-tools accepts no extra arguments.' ;;
     --real)
-        if [[ -f "$script_dir/linux_real.py" ]]; then
+        if [[ -f "$script_dir/linux/linux_real.py" ]]; then
             command -v python3 >/dev/null || fail 'Python 3 is required for real mode.'
-            exec python3 "$script_dir/linux_real.py" "$@"
+            exec env PYTHONPATH="$script_dir" python3 -m linux.linux_real "$@"
         fi
         # Remote one-liner path: only boot.sh itself was downloaded, so
         # fetch the checkout first (reuse it if a previous run left one).
@@ -65,9 +65,9 @@ case "$mode" in
             mkdir -p "$(dirname "$mainframe_dir")"
             git clone https://github.com/FahadBinHussain/mainframe.git "$mainframe_dir"
         fi
-        [[ -f "$mainframe_dir/linux_real.py" ]] || fail 'Checkout has no linux_real.py; nothing has been changed.'
+        [[ -f "$mainframe_dir/linux/linux_real.py" ]] || fail 'Checkout has no linux/linux_real.py; nothing has been changed.'
         command -v python3 >/dev/null || fail 'Python 3 is required for real mode.'
-        exec python3 "$mainframe_dir/linux_real.py" "$@"
+        exec env PYTHONPATH="$mainframe_dir" python3 -m linux.linux_real "$@"
         ;;
     '') usage >&2; fail 'Select --restore, --packages, --setup-tools, or --real. Nothing has been changed.' ;;
     *) usage >&2; fail "Unknown mode: $mode" ;;

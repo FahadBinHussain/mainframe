@@ -69,7 +69,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
         return "'" + value.replace("'", "''") + "'"
 
     def test_backup_guards_reject_sqlite_variants_only_inside_whatsapp(self):
-        for script in (ROOT / "backup.ps1", ROOT / "backup-secrets.ps1"):
+        for script in (ROOT / "windows" / "backup.ps1", ROOT / "windows" / "backup-secrets.ps1"):
             with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-guard-") as td:
                 root = Path(td)
                 whatsapp = root / "WhatsApp"
@@ -82,7 +82,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
                 self.assertIn("live SQLite state", output)
 
     def test_backup_guards_allow_absent_non_whatsapp_and_metadata_only_trees(self):
-        for script in (ROOT / "backup.ps1", ROOT / "backup-secrets.ps1"):
+        for script in (ROOT / "windows" / "backup.ps1", ROOT / "windows" / "backup-secrets.ps1"):
             with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-safe-") as td:
                 root = Path(td)
                 self.assertEqual(self.invoke_guard(script, root)[0], True)
@@ -95,7 +95,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
                 self.assertEqual(self.invoke_guard(script, root)[0], True)
 
     def test_backup_guards_reject_when_source_itself_is_whatsapp(self):
-        for script in (ROOT / "backup.ps1", ROOT / "backup-secrets.ps1"):
+        for script in (ROOT / "windows" / "backup.ps1", ROOT / "windows" / "backup-secrets.ps1"):
             with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-direct-") as td:
                 whatsapp = Path(td) / "whatsapp"
                 whatsapp.mkdir()
@@ -104,7 +104,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
                 self.assertFalse(passed, output)
 
     def test_backup_vss_guard_checks_remapped_source(self):
-        script = ROOT / "backup.ps1"
+        script = ROOT / "windows" / "backup.ps1"
         text = script.read_text(encoding="utf-8")
         self.assertLess(text.index("$actualSource = $source"), text.index("Assert-WindowsWhatsappCaptureSafe -Source $actualSource"))
         with tempfile.TemporaryDirectory(prefix="wacli-win-vss-") as td:
@@ -120,7 +120,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
             self.assertIn("live SQLite state", output)
 
     def test_only_exact_verified_vss_root_bypasses_the_live_sqlite_guard(self):
-        for script in (ROOT / "backup.ps1", ROOT / "backup-secrets.ps1"):
+        for script in (ROOT / "windows" / "backup.ps1", ROOT / "windows" / "backup-secrets.ps1"):
             with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-verified-vss-") as td:
                 root = Path(td)
                 accounts = root / "accounts"
@@ -143,7 +143,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
                 self.assertIn("BLOCK", blocked)
 
     def test_restore_reserved_native_tree_is_blocked_for_custom_manifest_sources(self):
-        for script in (ROOT / "restore.ps1", ROOT / "restore-secrets.ps1"):
+        for script in (ROOT / "windows" / "restore.ps1", ROOT / "windows" / "restore-secrets.ps1"):
             with self.subTest(script=script.name), tempfile.TemporaryDirectory(prefix="wacli-win-reserved-") as td:
                 root = Path(td)
                 native = root / "NativeState" / "wacli"
@@ -158,7 +158,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
                 self.assertFalse(self.invoke_reserved_check(script, safe))
 
     def test_restore_embedded_native_payload_is_report_only(self):
-        script = ROOT / "restore.ps1"
+        script = ROOT / "windows" / "restore.ps1"
         with tempfile.TemporaryDirectory(prefix="wacli-win-embedded-") as td:
             root = Path(td)
             (root / "NativeState" / "wacli").mkdir(parents=True)
@@ -173,7 +173,7 @@ if (-not $definition) { throw "function not found: $FunctionName" }
             self.assertFalse((root / "activated").exists())
 
     def test_restore_standalone_native_payload_is_report_only(self):
-        script = ROOT / "restore-secrets.ps1"
+        script = ROOT / "windows" / "restore-secrets.ps1"
         with tempfile.TemporaryDirectory(prefix="wacli-win-standalone-") as td:
             archive = Path(td) / "tool-secrets.zip"
             with ZipFile(archive, "w") as zf:

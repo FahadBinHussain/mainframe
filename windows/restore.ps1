@@ -1,0 +1,1648 @@
+param(
+    [string]$ScoopRoot = $(if ($env:SCOOP) { $env:SCOOP } else { "$env:USERPROFILE\scoop" }),
+    [string]$BackupRoot,
+    [ValidateSet('quick', 'full')][string]$Mode,
+    [switch]$Pinned,
+    [switch]$ExcludeSecrets,
+    [string]$SecretsManifestPath,
+    [switch]$SkipNativePersist,
+    [hashtable]$CloneRepos = @{
+        'mainframe'         = 'https://github.com/FahadBinHussain/mainframe.git'
+        'automata-private'  = 'https://github.com/FahadBinHussain/automata-private.git'
+    },
+    [string]$DownloadsRoot = "$env:USERPROFILE\Downloads"
+)
+
+$AutomataPrivateDir = Join-Path $DownloadsRoot 'automata-private'
+
+$ErrorActionPreference = 'Stop'
+# Native commands (uv, pip, etc.) that write to stderr (e.g. "already
+# installed") would otherwise become terminating errors under Stop and abort
+# the whole restore. Let $LASTEXITCODE checks handle native failures instead.
+$PSNativeCommandUseErrorActionPreference = $false
+
+# robocopy /COPYALL (ACLs, owner, auditing) requires the "Manage Auditing" user
+# right, which only elevated shells have. Running non-elevated used to make every
+# /COPYALL robocopy exit 16 (copied nothing) while restore still deleted the
+# existing profile first -> silent data loss. Detect elevation once and degrade to
+# /COPY:DAT (data, attributes, timestamps) when not elevated so restores always work.
+$script:IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$script:RoboCopyFlag = if ($script:IsElevated) { '/COPYALL' } else { '/COPY:DAT' }
+if (-not $script:IsElevated) {
+    Write-Warning 'Not running elevated: robocopy will use /COPY:DAT instead of /COPYALL (file ACLs/owner/auditing will not be restored, data will).'
+}
+
+if (-not $BackupRoot) {
+    if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'scoopfile.json')) {
+        $BackupRoot = $PSScriptRoot
+    } elseif (Test-Path -LiteralPath (Join-Path $PWD 'scoopfile.json')) {
+        $BackupRoot = $PWD
+    } else {
+        $BackupRoot = $PSScriptRoot
+    }
+}
+
+if (-not $Mode) {
+    $modeChoice = Read-Host 'Select restore mode: (F)ull restore, or (Q)uick (Edge + opencode + mainframe secrets + automata-private) [F]'
+    $Mode = if ($modeChoice -match '^[Qq]') { 'quick' } else { 'full' }
+    Write-Host "Mode selected: $Mode"
+}
+
+$scoopfile = Join-Path $BackupRoot 'scoopfile.json'
+$persistDir = Join-Path $BackupRoot 'persist'
+$nativePersistDir = Join-Path $BackupRoot 'native'
+$secretsDir = Join-Path $BackupRoot 'secrets'
+
+if (-not $SecretsManifestPath) {
+    $SecretsManifestPath = Join-Path $BackupRoot 'tool-secrets.manifest.json'
+}
+
+if ($Mode -ne 'quick' -and -not (Test-Path -LiteralPath $scoopfile)) {
+    throw "Missing scoopfile.json next to restore.ps1: $scoopfile"
+}
+
+if ($Mode -ne 'quick' -and -not (Test-Path -LiteralPath $persistDir)) {
+    throw "Missing persist directory next to restore.ps1: $persistDir"
+}
+
+[Environment]::SetEnvironmentVariable('SCOOP', $ScoopRoot, 'User')
+$env:SCOOP = $ScoopRoot
+
+function Resolve-TemplateString {
+    param(
+        [AllowNull()][string]$Value,
+        [hashtable]$Values = @{}
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $resolved = [Environment]::ExpandEnvironmentVariables($Value)
+    foreach ($key in $Values.Keys) {
+        $resolved = $resolved.Replace("{$key}", [string]$Values[$key])
+    }
+
+    return $resolved
+}
+
+function Get-MainframeConfigPath {
+    param([string]$FileName)
+
+    $candidate = Join-Path $BackupRoot $FileName
+    if (Test-Path -LiteralPath $candidate) {
+        return $candidate
+    }
+
+    throw "Missing required mainframe allowlist: $candidate"
+}
+
+function Get-ActiveAllowlistItems {
+    param(
+        [Parameter(Mandatory=$true)]$Config,
+        [Parameter(Mandatory=$true)][string]$ItemsProperty,
+        [string]$IdProperty = 'name'
+    )
+    $disabledList = @($Config.disabled) + @($Config."disabled_$ItemsProperty")
+    $rawItems = @($Config.$ItemsProperty)
+    $result = @()
+    foreach ($item in $rawItems) {
+        if ($null -eq $item) { continue }
+        if ($item -is [string]) {
+            $id = $item.Trim()
+            if (-not $id -or $id -in $disabledList) { continue }
+            $result += $id
+        } elseif ($item -is [PSCustomObject] -or $item -is [hashtable]) {
+            if ($item.disabled -eq $true) { continue }
+            $id = if ($item.$IdProperty) { $item.$IdProperty } elseif ($item.id) { $item.id } elseif ($item.path) { $item.path } elseif ($item.name) { $item.name } else { $null }
+            if ($id -and $id -in $disabledList) { continue }
+            $result += $item
+        }
+    }
+    return $result
+}
+
+function Get-ScoopCommand {
+    $cmd = Get-Command scoop -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $shim = Join-Path $ScoopRoot 'shims\scoop.ps1'
+    if (Test-Path -LiteralPath $shim) {
+        return $shim
+    }
+
+    return $null
+}
+
+function Invoke-Scoop {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+
+    $cmd = Get-ScoopCommand
+    if (-not $cmd) {
+        throw 'Scoop command was not found after installation.'
+    }
+
+    & $cmd @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "scoop $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Enable-ScoopExternal7zip {
+    # Scoop uses its own 7zip helper by default and ignores 7z.exe on PATH.
+    # boot.ps1 already requires system 7-Zip for archive extraction, so tell
+    # Scoop to use that verified executable instead of leaving its helper path
+    # empty when it extracts .tgz packages such as opencode2.
+    $sevenZip = Get-Command '7z' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $sevenZip -or [string]::IsNullOrWhiteSpace($sevenZip.Source)) {
+        throw "7z.exe was not found on PATH. Install 7-Zip before restoring (for example: winget install --id 7zip.7zip)."
+    }
+
+    Invoke-Scoop config use_external_7zip true
+}
+
+# Run a native command while suppressing $ErrorActionPreference='Stop' aborts
+# from native stderr. Windows PowerShell 5.1 turns ANY native stderr line into
+# an error record, and under 'Stop' that terminates the whole restore (seen
+# with `uv tool install` on an already-installed tool). Restore the caller's
+# preference afterwards so cmdlet errors still behave as the script intends.
+function Invoke-Native {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Arguments[0] @($Arguments | Select-Object -Skip 1) 2>&1 | Out-Host
+        return $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedEap
+    }
+}
+
+# private repo holding the ditto/alist/opencode patchers; both restore modes
+# need it. a failed clone/pull throws - continuing would ship unpatched
+# binaries without saying so.
+#
+# the credential source is named, not inherited: gh's own git credential
+# helper (the line `gh auth setup-git` writes) returns $env:GH_TOKEN verbatim
+# when it is set - boot exports the vault's github token, so a fresh machine
+# authenticates without a gh login - and otherwise falls back to gh's stored
+# login. `credential.helper=` clears whatever the machine has configured
+# first, so the clone cannot silently go out as some other account.
+function Get-GhCredentialAuthArgs {
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Host 'gh not found - using this machine''s own git credentials for the private repo' -ForegroundColor Yellow
+        return @()
+    }
+    if ($env:GH_TOKEN) {
+        Write-Host 'authenticating with the GH_TOKEN github profile (gh auth git-credential)'
+    } else {
+        Write-Host "authenticating with gh's stored login (no GH_TOKEN in the environment)"
+    }
+    return @('-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential')
+}
+
+function Sync-AutomataPrivateRepo {
+    $repo = $CloneRepos['automata-private']
+    $auth = Get-GhCredentialAuthArgs
+    if (Test-Path -LiteralPath $AutomataPrivateDir) {
+        Write-Host "automata-private repo already exists at $AutomataPrivateDir, pulling latest"
+        $code = Invoke-Native git @auth -C $AutomataPrivateDir pull --ff-only
+    } else {
+        Write-Host "Cloning $repo to $AutomataPrivateDir"
+        $code = Invoke-Native git @auth clone $repo $AutomataPrivateDir
+    }
+    if ($code -ne 0) {
+        $source = if ($env:GH_TOKEN) { 'the GH_TOKEN github profile' } else { "gh's stored login / this machine's git credentials" }
+        throw "automata-private sync failed (git exit $code) at $AutomataPrivateDir using $source. the token must be able to read $repo. quick and full restore both need its ditto/alist/opencode patchers; fix github auth and re-run."
+    }
+}
+
+function Get-PnpmCommand {
+    $cmd = Get-Command pnpm -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    foreach ($candidate in @(
+        (Join-Path $ScoopRoot 'shims\pnpm.ps1'),
+        (Join-Path $ScoopRoot 'shims\pnpm.cmd'),
+        (Join-Path $ScoopRoot 'apps\pnpm\current\pnpm.exe')
+    )) {
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function Invoke-Pnpm {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+
+    $cmd = Get-PnpmCommand
+    if (-not $cmd) {
+        throw 'pnpm command was not found after Scoop restore.'
+    }
+
+    & $cmd @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "pnpm $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Add-BucketIfMissing {
+    param(
+        [string]$Name,
+        [string]$Source
+    )
+
+    $bucketPath = Join-Path $ScoopRoot "buckets\$Name"
+    if (Test-Path -LiteralPath $bucketPath) {
+        return
+    }
+
+    Invoke-Scoop bucket add $Name $Source
+}
+
+function Import-AppRegistryFile {
+    param(
+        [string]$AppName,
+        [string]$RelativePath
+    )
+
+    $cmd = Get-ScoopCommand
+    if (-not $cmd) {
+        return
+    }
+
+    $savedEapLocal = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $prefix = & $cmd prefix $AppName 2>$null
+    $ErrorActionPreference = $savedEapLocal
+    if ($LASTEXITCODE -ne 0 -or -not $prefix) {
+        return
+    }
+
+    $regFile = Join-Path $prefix $RelativePath
+    if (Test-Path -LiteralPath $regFile) {
+        Invoke-Native reg import $regFile
+    }
+}
+
+function Report-WacliPayloadPreserved {
+    param([Parameter(Mandatory)][string]$Path)
+    if ($script:WacliPayloadReported) { return }
+    $found = @()
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $found = @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName.Substring($Path.TrimEnd('\').Length).TrimStart('\/') -replace '\\','/' -match '(?i)(^|/)NativeState/wacli(/|$)' })
+    } elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        $zip = $null
+        try {
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+            $found = @($zip.Entries | Where-Object { $_.FullName -replace '\\','/' -match '(?i)(^|/)NativeState/wacli(/|$)' })
+        } finally { if ($zip) { $zip.Dispose() } }
+    }
+    if ($found.Count -gt 0) {
+        $script:WacliPayloadReported = $true
+        Write-Warning 'Preserved WACLI NativeState/wacli payload detected; it is Linux-native state and is not activated or remapped into Windows accounts.'
+    }
+}
+
+function Test-WacliReservedArchiveSource {
+    param([Parameter(Mandatory)][string]$Source)
+
+    # A custom manifest may point at NativeState/wacli itself, a descendant,
+    # or a parent directory containing that tree.  Never selectively merge
+    # such a source into a Windows account target.
+    $normalized = $Source -replace '\\', '/'
+    if ($normalized -match '(?i)(^|/)NativeState/wacli(/|$)') {
+        return $true
+    }
+    if (Test-Path -LiteralPath $Source -PathType Container) {
+        $reserved = Get-ChildItem -LiteralPath $Source -Directory -Recurse -Force -ErrorAction Stop |
+            Where-Object { ($_.FullName -replace '\\', '/') -match '(?i)(^|/)NativeState/wacli(/|$)' } |
+            Select-Object -First 1
+        if ($reserved) { return $true }
+    }
+    return $false
+}
+
+function Restore-SecretItem {
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$Item,
+        [string]$SecretsDir
+    )
+
+    $archiveRelativePath = $Item.ArchivePath -replace '^[\\/]+', ''
+    $source = Join-Path $SecretsDir $archiveRelativePath
+    $target = Resolve-TemplateString -Value $Item.Source -Values @{
+        AppData = $env:APPDATA
+        LocalAppData = $env:LOCALAPPDATA
+        ProgramData = $env:ProgramData
+        UserProfile = $env:USERPROFILE
+    }
+
+    Write-Host "DEBUG: source = $source"
+    Write-Host "DEBUG: target = $target"
+    Write-Host "DEBUG: source exists = $(Test-Path -LiteralPath $source)"
+
+    if (-not (Test-Path -LiteralPath $source)) {
+        Write-Warning "Secret entry not found in backup, skipping $($Item.Name): $archiveRelativePath"
+        return
+    }
+
+    if (Test-WacliReservedArchiveSource -Source $source) {
+        Write-Warning "Skipping secret item '$($Item.Name)': archive source contains reserved NativeState/wacli payload; it is preserved and never copied to a Windows target."
+        return
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+    if (Test-Path -LiteralPath $source -PathType Container) {
+        $null = & robocopy $source $target /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL /XJ /XD 'Cache' 'Code Cache' 'GPUCache'
+        if ($LASTEXITCODE -gt 7) {
+            throw "Robocopy failed restoring secret directory for $($Item.Name) with exit code $LASTEXITCODE"
+        }
+    } else {
+        Copy-Item -LiteralPath $source -Destination $target -Force
+    }
+    Write-Host "Restored secret: $($Item.Name)"
+    Write-Host "DEBUG: target exists after copy = $(Test-Path -LiteralPath $target)"
+}
+
+function Restore-ToolSecretsArchive {
+    param(
+        # Only restore items whose Name matches these strings.
+        [string[]]$ItemNames = @(),
+        # Skip items whose Name matches these strings (used to avoid re-copying
+        # items that were already restored in the early opencode pass).
+        [string[]]$SkipNames = @()
+    )
+
+    if ($ExcludeSecrets) {
+        return
+    }
+
+    if (Test-Path -LiteralPath $secretsDir) {
+        Report-WacliPayloadPreserved -Path $secretsDir
+        Write-Host "Restoring secrets from embedded backup..."
+        $manifest = Get-Content -LiteralPath $SecretsManifestPath -Raw | ConvertFrom-Json
+        $disabledSecrets = @($manifest.disabled) + @($manifest.disabled_items)
+        $manifestItems = @($manifest.items | Where-Object { (-not $_.Disabled) -and ($_.Name -notin $disabledSecrets) })
+        if ($ItemNames.Count -gt 0) {
+            $manifestItems = @($manifestItems | Where-Object {
+                $name = $_.Name
+                $match = $false
+                foreach ($n in $ItemNames) {
+                    if ($name -like "*$n*") { $match = $true; break }
+                }
+                $match
+            })
+        }
+        if ($SkipNames.Count -gt 0) {
+            $manifestItems = @($manifestItems | Where-Object {
+                $name = $_.Name
+                $match = $false
+                foreach ($n in $SkipNames) {
+                    if ($name -like "*$n*") { $match = $true; break }
+                }
+                -not $match
+            })
+        }
+        foreach ($item in $manifestItems) {
+            Restore-SecretItem -Item $item -SecretsDir $secretsDir
+        }
+        return
+    }
+
+    $standaloneZip = Join-Path $BackupRoot 'tool-secrets.zip'
+    if (Test-Path -LiteralPath $standaloneZip) {
+        Report-WacliPayloadPreserved -Path $standaloneZip
+        $script = Join-Path $PSScriptRoot 'restore-secrets.ps1'
+        if (-not (Test-Path -LiteralPath $script)) {
+            throw "Missing restore-secrets.ps1 next to restore.ps1: $script"
+        }
+        # no $LASTEXITCODE check here: restore-secrets.ps1 runs no native commands, so
+        # that variable still holds whatever robocopy/git in THIS script left behind
+        # (robocopy exits 1 for "files copied OK") and the check failed the restore
+        # spuriously. it throws on real failures and $ErrorActionPreference is Stop,
+        # so the exception is the contract.
+        & $script -ManifestPath $SecretsManifestPath -ArchivePath $standaloneZip -ItemNames $ItemNames -SkipNames $SkipNames
+        return
+    }
+
+    Write-Warning 'No secrets found in backup (no secrets/ directory or tool-secrets.zip).'
+}
+
+function Restore-AgentInstructionsAndSkills {
+    $agentsMdSrc = Join-Path $BackupRoot 'AGENTS.md'
+    if (Test-Path -LiteralPath $agentsMdSrc) {
+        $agentsMdDest = Join-Path $env:USERPROFILE 'AGENTS.md'
+        Copy-Item -LiteralPath $agentsMdSrc -Destination $agentsMdDest -Force
+        Write-Host 'Restored AGENTS.md'
+    }
+
+    # the lock goes down BEFORE the skills so a fresh box can immediately run
+    # restore-from-lock.ps1 / `npx skills update -g` against it
+    $skillLockSrc = Join-Path $BackupRoot '.agents\.skill-lock.json'
+    if (Test-Path -LiteralPath $skillLockSrc) {
+        $skillLockDestDir = Join-Path $env:USERPROFILE '.agents'
+        New-Item -ItemType Directory -Force -Path $skillLockDestDir | Out-Null
+        Copy-Item -LiteralPath $skillLockSrc -Destination (Join-Path $skillLockDestDir '.skill-lock.json') -Force
+        Write-Host 'Restored .agents\.skill-lock.json'
+    } else {
+        Write-Warning 'No .agents\.skill-lock.json in backup - skills restore as plain folders with no recorded source/version (pre-2026-11-02 backups did not carry it).'
+    }
+
+    $agentSkillsSrc = Join-Path $BackupRoot '.agents\skills'
+    if (Test-Path -LiteralPath $agentSkillsSrc) {
+        $agentSkillsDest = Join-Path $env:USERPROFILE '.agents\skills'
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $agentSkillsDest) | Out-Null
+        & robocopy $agentSkillsSrc $agentSkillsDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            Write-Warning "Robocopy .agents\skills failed with exit code $LASTEXITCODE"
+        } else {
+            Write-Host 'Restored .agents\skills'
+        }
+    }
+}
+
+function Restore-EdgeProfile {
+    $edgeBackupDir = Join-Path $BackupRoot 'edge-profile'
+    if (Test-Path -LiteralPath $edgeBackupDir) {
+        $edgeDest = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
+        $edgeStaging = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data.restore-staging'
+        $edgeProcs = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
+        if ($edgeProcs) {
+            Write-Host 'Closing Edge for restore...'
+            $edgeProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+        }
+        # Copy to a staging dir FIRST, and only swap it into place after the copy
+        # succeeds, so a failed robocopy can never leave the user with a deleted,
+        # empty profile (happened when /COPYALL failed with exit 16 non-elevated).
+        if (Test-Path -LiteralPath $edgeStaging) {
+            Remove-Item -LiteralPath $edgeStaging -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $edgeStaging | Out-Null
+        $rcExit = & robocopy $edgeBackupDir $edgeStaging /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL
+        if ($LASTEXITCODE -gt 7) {
+            Remove-Item -LiteralPath $edgeStaging -Recurse -Force -ErrorAction SilentlyContinue
+            throw "Robocopy Edge profile failed with exit code $LASTEXITCODE. Existing Edge profile left untouched - fix the source backup or rerun elevated, then try again."
+        }
+        if (Test-Path -LiteralPath $edgeDest) {
+            Remove-Item -LiteralPath $edgeDest -Recurse -Force
+            Write-Host "Removed existing Edge User Data at $edgeDest"
+        }
+        Move-Item -LiteralPath $edgeStaging -Destination $edgeDest
+        Write-Host "Restored Edge browser profile to $edgeDest"
+        # Backups taken while Edge was running carry stale first-run/reset markers
+        # (First Run, FirstLaunchAfterInstallation, lockfile, Singleton*). If left in
+        # place, Edge treats the restored profile as a fresh install and RESETS it on
+        # first launch, wiping the restored Local State/keys, cookies, bookmarks, and
+        # preferences. Delete them so Edge loads the restored data as-is.
+        foreach ($marker in @('First Run', 'FirstLaunchAfterInstallation', 'lockfile', 'SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort')) {
+            $markerPath = Join-Path $edgeDest $marker
+            if (Test-Path -LiteralPath $markerPath) {
+                Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+                Write-Host "Removed stale Edge state marker: $marker"
+            }
+        }
+    } else {
+        Write-Warning "No edge-profile backup found, skipping"
+    }
+}
+
+function Restore-EdgeExtensions {
+    $edgeDest = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data'
+    $extListPath = Join-Path $BackupRoot 'edge-profile\extensions-list.json'
+    if (-not (Test-Path -LiteralPath $extListPath)) {
+        Write-Host "  No extensions-list.json in backup, skipping Edge extension reinstall"
+        return
+    }
+    try {
+        $exts = Get-Content -LiteralPath $extListPath -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "  Could not read extensions-list.json: $($_.Exception.Message)"
+        return
+    }
+    if (-not $exts -or $exts.Count -eq 0) {
+        Write-Host "  extensions-list.json is empty, skipping Edge extension reinstall"
+        return
+    }
+
+    # Edge 151+ prunes cross-machine-restored store extensions (machine-bound
+    # install signature check). The cross-machine restore path differs for
+    # ENABLED vs DISABLED extensions:
+    #
+    # ENABLED (Edge-store) -> ExtensionInstallForcelist policy. Edge
+    # force-installs from the Edge store URL. The forcelist only accepts
+    # the Edge store URL -- CWS URLs are silently dropped by the policy handler.
+    #
+    # ENABLED (CWS-only) + DISABLED (any store) -> Windows registry external
+    # loader (HKLM\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions\<id>).
+    # The forcelist CANNOT preserve disabled state (GetDisableReasonsOnInstalled
+    # returns {} for policy installs). The registry loader installs as loc=6
+    # (external pre-download), NOT policy-controlled: it loads disabled
+    # (dr=[8192] DISABLE_EXTERNAL_EXTENSION) and STAYS disabled across
+    # relaunches (verified). For enabled CWS-only extensions, the registry
+    # loader also installs them disabled -- Edge re-downloads external
+    # extensions whenever Secure Preferences is rewritten (ConvertTo-Json
+    # triggers it), so ack_external can't be set via prefs edit. The user
+    # must enable them once in edge://extensions (one click each).
+    # The update_url must be the extension's OWN store URL (from backup):
+    # Edge store for Edge-store extensions, clients2.google.com for CWS-only.
+    $enabledEdgeExts = @($exts | Where-Object { -not $_.disable_reason -and $_.update_url -match 'edge.microsoft.com' })
+    $enabledCwsExts = @($exts | Where-Object { -not $_.disable_reason -and $_.update_url -match 'clients2.google.com' })
+    $disabledExts = @($exts | Where-Object { $_.disable_reason })
+    $regBase = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions'
+    $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist'
+    $edgeUpdateUrl = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
+
+    try {
+        # Write forcelist for ENABLED Edge-store extensions only.
+        if (Test-Path -LiteralPath $policyPath) {
+            Remove-Item -LiteralPath $policyPath -Recurse -Force
+        }
+        New-Item -Path $policyPath -Force | Out-Null
+        $i = 0
+        foreach ($ext in $enabledEdgeExts) {
+            $i++
+            New-ItemProperty -Path $policyPath -Name "$i" -Value "$($ext.id);$edgeUpdateUrl" -PropertyType String -Force | Out-Null
+        }
+        Write-Host "  Wrote ExtensionInstallForcelist for $($enabledEdgeExts.Count) enabled Edge-store extensions"
+    } catch {
+        Write-Warning "  Could not write ExtensionInstallForcelist policy (need admin?): $($_.Exception.Message)"
+        return
+    }
+
+    # Write registry external loader keys for DISABLED extensions AND enabled
+    # CWS-only extensions (the Edge store can't serve CWS-only ones, so the
+    # forcelist path can't install them). Each uses its own update_url from the
+    # backup (Edge store or CWS).
+    try {
+        $regCount = 0
+        foreach ($ext in ($enabledCwsExts + $disabledExts)) {
+            $url = if ($ext.update_url) { $ext.update_url } else { $edgeUpdateUrl }
+            $rk = "$regBase\$($ext.id)"
+            if (Test-Path $rk) { Remove-Item $rk -Recurse -Force }
+            New-Item -Path $rk -Force | Out-Null
+            New-ItemProperty -Path $rk -Name 'update_url' -Value $url -PropertyType String -Force | Out-Null
+            $regCount++
+        }
+        Write-Host "  Wrote registry external loader keys for $regCount extensions ($($enabledCwsExts.Count) enabled CWS, $($disabledExts.Count) disabled)"
+    } catch {
+        Write-Warning "  Could not write registry external loader keys: $($_.Exception.Message)"
+    }
+
+    # Let Edge apply the policies so extensions land. Launch once, wait, then stop.
+    $edgeExe = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
+    if (Test-Path -LiteralPath $edgeExe) {
+        $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
+        Start-Process -FilePath $edgeExe -ArgumentList '--no-first-run', 'about:blank' | Out-Null
+        Start-Sleep -Seconds 25
+        Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        Write-Host "  Launched Edge once to apply extension policy"
+    }
+
+    if ($enabledEdgeExts.Count -gt 0) {
+        Write-Host "  $($enabledEdgeExts.Count) enabled Edge-store extensions requested via forcelist."
+    }
+    if ($disabledExts.Count -gt 0) {
+        Write-Host "  $($disabledExts.Count) disabled extensions restored via registry external loader (dr=8192, persistent)."
+    }
+    if ($enabledCwsExts.Count -gt 0) {
+        Write-Host "  $($enabledCwsExts.Count) Chrome-Web-Store-only extensions installed via registry loader but DISABLED."
+        Write-Host "  Enable them once in edge://extensions (one click each): $($enabledCwsExts.id -join ', ')"
+    }
+
+    # Unpacked developer-mode extensions (loc=4). Edge 151+ prunes these from a
+    # cross-machine profile too, and --load-extension re-registers them as loc=8
+    # (command-line loaded) -- but loc=8 is SKIPPED by InstalledLoader on plain
+    # relaunches (extension_registrar/installed_loader.cc), so command-line
+    # extensions only persist while the flag is passed.
+    # 2nd-run-drop trap: after run1 the extensions live only as volatile loc=8,
+    # so a later backup finds no loc=4 and writes no unpacked list -- run2 then
+    # has nothing to restore. Fix: this machine remembers its unpacked
+    # extensions in a breadcrumb file OUTSIDE the Edge profile (survives profile
+    # wipes + Edge relaunches), and backup.ps1 re-captures from the same file.
+    # Each run restores the union of backup list + breadcrumb, and rewrites the
+    # breadcrumb with what it actually registered (manifest-guarded).
+    # backup.ps1 copied the source folders to edge-profile\unpacked-extensions\
+    # and wrote unpacked-extensions.json with their original source paths.
+    $unpackedListPath = Join-Path $BackupRoot 'edge-profile\unpacked-extensions.json'
+    $localCrumbPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\unpacked-extensions.local.json'
+    $backupEntries = @()
+    if (Test-Path -LiteralPath $unpackedListPath) {
+        try {
+            $backupEntries = @(Get-Content -LiteralPath $unpackedListPath -Raw | ConvertFrom-Json | Where-Object { $_ })
+        } catch {
+            $backupEntries = @()
+        }
+    }
+    $crumbEntries = @()
+    if (Test-Path -LiteralPath $localCrumbPath) {
+        try {
+            $crumbEntries = @(Get-Content -LiteralPath $localCrumbPath -Raw | ConvertFrom-Json | Where-Object { $_ })
+        } catch {
+            $crumbEntries = @()
+        }
+    }
+    if ($backupEntries.Count -gt 0 -or $crumbEntries.Count -gt 0) {
+        $unpackedSrc = Join-Path $BackupRoot 'edge-profile\unpacked-extensions'
+        $restoredPaths = @()
+        $effective = @()
+        foreach ($ux in $backupEntries) {
+            $backupPath = Join-Path $unpackedSrc $ux.relative_path
+            $orig = $ux.path
+            if (Test-Path -LiteralPath $backupPath) {
+                # restore to the same path as the source machine if possible
+                $target = $orig
+                if ($target -and $target -notmatch '^C:\\Users\\Admin') {
+                    # different windows user root - just keep original path;
+                    # robocopy handles it if the dir exists, else skip
+                }
+                $dir = Split-Path -Parent $target
+                try {
+                    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+                    & robocopy $backupPath $target /E /COPYALL /R:1 /W:1 /NP /NDL /NFL | Out-Null
+                    if (Test-Path -LiteralPath (Join-Path $target 'manifest.json')) {
+                        $restoredPaths += $target
+                        $effective += [pscustomobject]@{ id = $ux.id; name = $ux.name; path = $target }
+                        Write-Host "  Restored unpacked extension $($ux.name) to $target"
+                    } else {
+                        Write-Warning "  Unpacked extension $($ux.name) restore produced no manifest at $target - skipped"
+                    }
+                } catch {
+                    Write-Warning "  Could not restore unpacked extension $($ux.name): $($_.Exception.Message)"
+                }
+            } else {
+                Write-Warning "  Unpacked extension backup folder not found: $backupPath"
+            }
+        }
+        # Breadcrumb-only entries: folders already on disk from an earlier run
+        # (no copy needed) -- register if the manifest is still there.
+        foreach ($cx in $crumbEntries) {
+            if ($effective.id -contains $cx.id) { continue }
+            if ($cx.path -and (Test-Path -LiteralPath (Join-Path $cx.path 'manifest.json'))) {
+                $restoredPaths += $cx.path
+                $effective += [pscustomobject]@{ id = $cx.id; name = $cx.name; path = $cx.path }
+                Write-Host "  Re-registering unpacked extension $($cx.name) from local breadcrumb: $($cx.path)"
+            }
+        }
+        if ($restoredPaths.Count -gt 0 -and (Test-Path -LiteralPath $edgeExe)) {
+            $loadArg = '--load-extension=' + ($restoredPaths -join ',')
+            Write-Host "  Launching Edge once with --load-extension to register unpacked extensions..."
+            $existing = Get-Process -Name 'msedge' -ErrorAction SilentlyContinue
+            Start-Process -FilePath $edgeExe -ArgumentList '--no-first-run', $loadArg, 'about:blank' | Out-Null
+            Start-Sleep -Seconds 25
+            Get-Process -Name 'msedge' -ErrorAction SilentlyContinue | Where-Object { $_ -notin $existing } | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Write-Host "  Registered $($restoredPaths.Count) unpacked extensions via --load-extension"
+        }
+        # convert the volatile loc=8 registrations into persistent loc=4 by patching
+        # Secure Preferences directly with valid protection MACs. Chromium MAC scheme
+        # (verified 53/53 + super_mac on Edge 152): HMAC-SHA256(key=empty seed,
+        # msg = device_id + path + canonical_json(value)) where device_id = machine
+        # account SID WITHOUT the RID, path = "extensions.settings.<id>", json =
+        # sorted keys + pruned empty dicts + < escapes \u003C uppercase hex.
+        # Edge 152 also stores _encrypted_hash entries (authoritative when present)
+        # which must be deleted for the rewritten value; super_mac covers the whole
+        # macs dict and must be recomputed. result: extensions survive PLAIN
+        # relaunches with no --load-extension flag at all.
+        if ($restoredPaths.Count -gt 0) {
+            try {
+                    $spPath = Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data\Default\Secure Preferences'
+                    if (Test-Path -LiteralPath $spPath) {
+                        # machine account SID = user SID minus RID (verified equivalent:
+                        # LookupAccountNameW(computername) resolves the machine account
+                        # whose SID is the user SID without its RID on standalone machines)
+                        $devId = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value -replace '-\d+$', '')
+                    $python = Get-Command python -ErrorAction SilentlyContinue
+                    if ($python) {
+                        $patchScript = Join-Path $env:TEMP 'edge-loc4-patch.py'
+                        @'
+import json, hmac, hashlib, sys
+
+SPECIAL = {"\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t",
+           "\\": "\\\\", '"': '\\"', "<": "\\u003C",
+           "\u2028": "\\u2028", "\u2029": "\\u2029"}
+
+def esc_str(s):
+    out = ['"']
+    for c in s:
+        if c in SPECIAL: out.append(SPECIAL[c])
+        elif ord(c) < 32: out.append("\\u%04X" % ord(c))
+        else: out.append(c)
+    out.append('"')
+    return "".join(out)
+
+def sort_prune(v):
+    if isinstance(v, dict):
+        out = {}
+        for k in sorted(v.keys()):
+            sub = sort_prune(v[k])
+            if not (isinstance(sub, (dict, list)) and len(sub) == 0):
+                out[k] = sub
+        return out
+    if isinstance(v, list):
+        return [sort_prune(i) for i in v if not (isinstance(sort_prune(i), (dict, list)) and len(sort_prune(i)) == 0)]
+    return v
+
+def write_json(v):
+    if v is None: return "null"
+    if v is True: return "true"
+    if v is False: return "false"
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float):
+        r = repr(v)
+        return r + ".0" if ("." not in r and "e" not in r and "E" not in r) else r
+    if isinstance(v, str): return esc_str(v)
+    if isinstance(v, dict):
+        return "{" + ",".join(esc_str(k) + ":" + write_json(val) for k, val in v.items()) + "}"
+    if isinstance(v, list):
+        return "[" + ",".join(write_json(x) for x in v) + "]"
+    raise TypeError(repr(type(v)))
+
+def mac(dev, path, value):
+    msg = dev.encode("utf-8") + path.encode("utf-8") + write_json(sort_prune(value)).encode("utf-8")
+    return hmac.new(b"", msg, hashlib.sha256).hexdigest().upper()
+
+sp_file, dev_id, ids_file = sys.argv[1], sys.argv[2], sys.argv[3]
+d = json.load(open(sp_file, encoding="utf-8"))
+ids = [l.strip() for l in open(ids_file, encoding="utf-8") if l.strip()]
+changed = 0
+for ext_id in ids:
+    e = d.get("extensions", {}).get("settings", {}).get(ext_id)
+    if not e: continue
+    e["location"] = 4
+    e["was_installed_by_default"] = False
+    e["was_installed_by_oem"] = False
+    d["protection"]["macs"]["extensions"]["settings"][ext_id] = mac(dev_id, "extensions.settings." + ext_id, e)
+    eh = d["protection"]["macs"].get("extensions.settings_encrypted_hash")
+    if eh and ext_id in eh: del eh[ext_id]
+    changed += 1
+d["protection"]["super_mac"] = mac(dev_id, "", d["protection"]["macs"])
+json.dump(d, open(sp_file, "w", encoding="utf-8"), indent=2)
+print(f"patched {changed} extensions to loc=4 with valid MACs")
+'@ | Set-Content -LiteralPath $patchScript -Encoding UTF8
+                        $idsFile = Join-Path $env:TEMP 'edge-loc4-ids.txt'
+                        # map restored paths back to their ids via the effective entries
+                        $idList = @($effective | ForEach-Object { $_.id }) -join "`n"
+                        Set-Content -LiteralPath $idsFile -Value $idList -Encoding UTF8
+                        & python $patchScript $spPath $devId $idsFile
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host '  Converted unpacked extensions to persistent loc=4 (MAC-patched Secure Preferences)'
+                        } else {
+                            Write-Warning "  loc=4 MAC patch failed (exit $LASTEXITCODE) - extensions stay volatile loc=8; --load-extension still needed on relaunch"
+                        }
+                    } else {
+                        Write-Warning '  python not available for loc=4 MAC patch - extensions stay volatile loc=8'
+                    }
+                }
+            } catch {
+                Write-Warning "  loc=4 MAC patch error: $($_.Exception.Message)"
+            }
+        }
+        if ($effective.Count -gt 0) {
+            $effective | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $localCrumbPath -Encoding UTF8
+            Write-Host "  Wrote local unpacked-extension breadcrumb for $($effective.Count) extensions"
+        } elseif (Test-Path -LiteralPath $localCrumbPath) {
+            Remove-Item -LiteralPath $localCrumbPath -Force -ErrorAction SilentlyContinue
+            Write-Host '  Cleared local unpacked-extension breadcrumb (none registered)'
+        }
+    }
+}
+
+function Install-OpencodePinned {
+    # Pinned opencode install shared by quick + full. Runs right after scoop/git
+    # setup in both routes so the binary exists early; the bulk apps loop later
+    # skips it as already-installed.
+    #
+    # opencode2 (v2) since 2026-10-07 - we moved to v2 and v2's config is
+    # incompatible with v1's (scoop: uninstall `opencode` before `opencode2`).
+    # the old default was `opencode`, which installed v1.18.34 over a restored
+    # v2 config, and the catch below then re-ran `install opencode` as a SILENT
+    # fallback - a second method nobody was told about, that also produced v1.
+    $opencodeSpec = 'versions/opencode2'
+    # the `versions` bucket carries opencode2 and quick restore can have no
+    # scoopfile.json at all, so make sure that bucket exists before installing.
+    Add-BucketIfMissing -Name 'versions' -Source 'https://github.com/ScoopInstaller/Versions'
+    $bucketNames = @('versions')
+    if (Test-Path -LiteralPath $scoopfile) {
+        $scoopImport = Get-Content -LiteralPath $scoopfile -Raw | ConvertFrom-Json
+        foreach ($bucket in $scoopImport.buckets) {
+            Add-BucketIfMissing -Name $bucket.Name -Source $bucket.Source
+            $bucketNames += $bucket.Name
+        }
+        $opencodeItem = @($scoopImport.apps | Where-Object { $_.Name -eq 'opencode2' }) | Select-Object -First 1
+        if ($opencodeItem) {
+            if ($opencodeItem.Version) {
+                if ($opencodeItem.Source -in $bucketNames) {
+                    $opencodeSpec = "$($opencodeItem.Source)/opencode2@$($opencodeItem.Version)"
+                } elseif ($opencodeItem.Source -eq '<auto-generated>') {
+                    $opencodeSpec = "opencode2@$($opencodeItem.Version)"
+                } else {
+                    $opencodeSpec = "$($opencodeItem.Source)@$($opencodeItem.Version)"
+                }
+            }
+        } else {
+            $v1Item = @($scoopImport.apps | Where-Object { $_.Name -eq 'opencode' }) | Select-Object -First 1
+            if ($v1Item) {
+                Write-Warning "scoopfile.json predates the v2 move: it lists 'opencode' (up to $($v1Item.Version)) and no 'opencode2'. Ignoring it and installing $opencodeSpec instead - re-run backup.ps1 on a machine with v2 installed to refresh scoopfile.json."
+            }
+        }
+    }
+    Enable-ScoopExternal7zip
+    Write-Host "Installing $opencodeSpec"
+    try {
+        Invoke-Scoop install $opencodeSpec --no-update-scoop --independent
+    } catch {
+        # deliberately NO fallback: installing v1 here would leave a binary that
+        # cannot read the restored v2 config, and it would happen unannounced.
+        throw "Failed to install $opencodeSpec -- $_. opencode v1 (`opencode`) is intentionally not installed; add the 'versions' bucket / fix the version and re-run."
+    }
+}
+
+function Install-DittoQuick {
+    # Ditto for the QUICK route, symmetric with what full mode already does
+    # (persist restore -> allowlist install -> fork rebuild in the patcher step).
+    # full mode reads its settings from mainframe-persist.zip; quick never
+    # downloads that zip, so backup.ps1 also drops Ditto.Settings into
+    # mainframe-quick.zip under quick-persist\ditto and this function links it
+    # into scoop's persist dir BEFORE installing. the FULL clip DB is shipped in
+    # neither mode, but BOTH modes carry a starred-only Ditto.db (built at
+    # backup time by strip-ditto-favorites.py) - placed here only when the box
+    # has no existing db, so a live machine's clip history is never overwritten.
+    $dittoSpec = 'extras/ditto'
+    # extras carries ditto and a quick restore can have no scoopfile.json at all,
+    # so make sure that bucket exists before installing.
+    Add-BucketIfMissing -Name 'extras' -Source 'https://github.com/ScoopInstaller/Extras'
+    $bucketNames = @('extras')
+    if (Test-Path -LiteralPath $scoopfile) {
+        $scoopImport = Get-Content -LiteralPath $scoopfile -Raw | ConvertFrom-Json
+        foreach ($bucket in $scoopImport.buckets) {
+            Add-BucketIfMissing -Name $bucket.Name -Source $bucket.Source
+            $bucketNames += $bucket.Name
+        }
+        $dittoItem = @($scoopImport.apps | Where-Object { $_.Name -eq 'ditto' }) | Select-Object -First 1
+        if ($dittoItem -and $dittoItem.Version) {
+            if ($dittoItem.Source -in $bucketNames) {
+                $dittoSpec = "$($dittoItem.Source)/ditto@$($dittoItem.Version)"
+            } elseif ($dittoItem.Source -eq '<auto-generated>') {
+                $dittoSpec = "ditto@$($dittoItem.Version)"
+            } else {
+                $dittoSpec = "$($dittoItem.Source)@$($dittoItem.Version)"
+            }
+        }
+    }
+
+    # settings first: Ditto.Settings must be in persist before scoop runs the
+    # manifest's pre_install (it only creates that file when it is missing).
+    $settingsSrc = Join-Path $BackupRoot 'quick-persist\ditto'
+    $settingsDest = Join-Path $ScoopRoot 'persist\ditto'
+    if (Test-Path -LiteralPath $settingsSrc) {
+        New-Item -ItemType Directory -Force -Path $settingsDest | Out-Null
+        # /XF Ditto.db: the settings robocopy never carries a clip DB - the
+        # starred-only db gets its own guarded placement right below.
+        & robocopy $settingsSrc $settingsDest /E $script:RoboCopyFlag /XF 'Ditto.db' /R:1 /W:1 /NP /NDL /NFL | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            Write-Warning "Robocopy quick-persist\ditto failed with exit code $LASTEXITCODE"
+        } else {
+            Write-Host "Restored Ditto settings to $settingsDest"
+        }
+        # starred-clips db: FRESH box only - never overwrite an existing clip DB
+        $favDbSrc = Join-Path $settingsSrc 'Ditto.db'
+        $favDbDest = Join-Path $settingsDest 'Ditto.db'
+        if (Test-Path -LiteralPath $favDbSrc) {
+            if (Test-Path -LiteralPath $favDbDest) {
+                Write-Warning "existing $favDbDest kept - the backup's starred-only db was NOT applied (fresh-box only)"
+            } else {
+                Copy-Item -LiteralPath $favDbSrc -Destination $favDbDest
+                Write-Host 'Restored starred-only Ditto.db (fresh clip DB: starred clips only)'
+            }
+        }
+    } else {
+        Write-Warning "Backup carries no quick-persist\ditto - Ditto starts with default settings. (Full mode ships them in mainframe-persist.zip; refresh the release with .\windows\backup.ps1 -Publish.)"
+    }
+
+    if (Test-Path -LiteralPath (Join-Path $ScoopRoot 'apps\ditto\current')) {
+        Write-Host 'Skip (installed): ditto'
+        return
+    }
+
+    Write-Host "Installing $dittoSpec"
+    try {
+        Invoke-Scoop install $dittoSpec --no-update-scoop --independent
+    } catch {
+        # second method, announced loudly - same shape as the full-mode apps loop.
+        Write-Warning "pinned install failed ($_) - installing extras/ditto at the bucket head instead."
+        Invoke-Scoop install 'extras/ditto' --no-update-scoop --independent
+    }
+}
+
+function Rebuild-DittoFork {
+    # shared by quick + full: a scoop install writes the official 3.25.113.0
+    # binary, the fork build puts back the user's merged-but-unreleased
+    # starred-clips PRs. Called right after Ditto is installed in either route.
+    $dittoPatcher = Join-Path $AutomataPrivateDir 'github.com\sabrogden\Ditto\ditto-fork-build.ps1'
+    if (Test-Path -LiteralPath $dittoPatcher) {
+        Write-Host 'Re-building Ditto from fork (starred-clips PRs)...'
+        & pwsh -NoProfile -File $dittoPatcher 2>&1 | Write-Host
+    } else {
+        Write-Warning "ditto patcher not found: $dittoPatcher"
+    }
+}
+
+function Install-FlameshotQuick {
+    # flameshot for the QUICK route (full mode already gets it from the
+    # allowlist loop). pinned from scoopfile like ditto; extras carries it, and
+    # a quick restore can have no scoopfile.json at all, so ensure the bucket
+    # before installing.
+    $flameSpec = 'extras/flameshot'
+    Add-BucketIfMissing -Name 'extras' -Source 'https://github.com/ScoopInstaller/Extras'
+    $bucketNames = @('extras')
+    if (Test-Path -LiteralPath $scoopfile) {
+        $scoopImport = Get-Content -LiteralPath $scoopfile -Raw | ConvertFrom-Json
+        foreach ($bucket in $scoopImport.buckets) {
+            Add-BucketIfMissing -Name $bucket.Name -Source $bucket.Source
+            $bucketNames += $bucket.Name
+        }
+        $flameItem = @($scoopImport.apps | Where-Object { $_.Name -eq 'flameshot' }) | Select-Object -First 1
+        if ($flameItem -and $flameItem.Version) {
+            if ($flameItem.Source -in $bucketNames) {
+                $flameSpec = "$($flameItem.Source)/flameshot@$($flameItem.Version)"
+            } elseif ($flameItem.Source -eq '<auto-generated>') {
+                $flameSpec = "flameshot@$($flameItem.Version)"
+            } else {
+                $flameSpec = "$($flameItem.Source)@$($flameItem.Version)"
+            }
+        }
+    }
+
+    if (Test-Path -LiteralPath (Join-Path $ScoopRoot 'apps\flameshot\current')) {
+        Write-Host 'Skip (installed): flameshot'
+        return
+    }
+
+    Write-Host "Installing $flameSpec"
+    try {
+        Invoke-Scoop install $flameSpec --no-update-scoop --independent
+    } catch {
+        # second method, announced loudly - same shape as the ditto install.
+        Write-Warning "pinned install failed ($_) - installing extras/flameshot at the bucket head instead."
+        Invoke-Scoop install 'extras/flameshot' --no-update-scoop --independent
+    }
+}
+
+function Restore-FlameshotSettings {
+    # flameshot's scoop manifest has NO persist entry, so the settings file is
+    # shipped by backup.ps1 as quick-persist\flameshot\flameshot.ini (quick zip
+    # always downloads, in both modes) and lands in %APPDATA%\Flameshot. same
+    # fresh-box-only rule as the starred-only Ditto.db: an existing config is
+    # never overwritten, warned loud.
+    $flameSrc = Join-Path $BackupRoot 'quick-persist\flameshot\flameshot.ini'
+    $flameDestDir = Join-Path $env:APPDATA 'Flameshot'
+    $flameDest = Join-Path $flameDestDir 'flameshot.ini'
+    if (-not (Test-Path -LiteralPath $flameSrc)) {
+        Write-Warning "Backup carries no quick-persist\flameshot\flameshot.ini - flameshot starts with default settings. (Refresh the release with .\windows\backup.ps1 -Publish.)"
+        return
+    }
+    if (Test-Path -LiteralPath $flameDest) {
+        Write-Warning "existing $flameDest kept - the backup's flameshot settings were NOT applied (fresh-box only)"
+    } else {
+        New-Item -ItemType Directory -Force -Path $flameDestDir | Out-Null
+        Copy-Item -LiteralPath $flameSrc -Destination $flameDest
+        Write-Host "Restored flameshot settings to $flameDest"
+    }
+}
+
+$totalSteps = if ($Mode -eq 'quick') { 8 } else { 16 }
+$currentStep = 0
+
+function Update-Step {
+    param([string]$Activity)
+    $script:currentStep++
+    $pct = [Math]::Min(($script:currentStep / $totalSteps) * 100, 100)
+    Write-Progress -Activity 'Restoring mainframe' -Status "$Activity ($script:currentStep/$totalSteps)" -PercentComplete $pct
+}
+
+if ($Mode -eq 'quick') {
+    Update-Step 'Restoring Edge browser profile'
+    Restore-EdgeProfile
+    Restore-EdgeExtensions
+
+    Update-Step 'Restoring opencode config'
+    Restore-ToolSecretsArchive -ItemNames @('opencode')
+
+    Update-Step 'Restoring mainframe secrets and Agent files'
+    Restore-ToolSecretsArchive -SkipNames @('opencode')
+    Restore-AgentInstructionsAndSkills
+
+    Update-Step 'Setting up Scoop'
+    if (-not (Get-ScoopCommand)) {
+        try { Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force } catch {}
+        $env:SCOOP_ALLOW_ADMIN = 'true'
+        [Environment]::SetEnvironmentVariable('SCOOP_ALLOW_ADMIN', 'true', 'User')
+        $installScript = Join-Path $env:TEMP 'install-scoop.ps1'
+        Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $installScript
+        $env:SCOOP = $ScoopRoot
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript -RunAsAdmin -ScoopDir $ScoopRoot
+    }
+
+    New-Item -ItemType Directory -Force -Path $ScoopRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $ScoopRoot 'shims') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $ScoopRoot 'buckets') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $ScoopRoot 'apps') | Out-Null
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host 'Git not found. Installing via Scoop...'
+        Invoke-Scoop install git
+    }
+
+    Update-Step 'Installing opencode2 (v2)'
+    Install-OpencodePinned
+
+    Update-Step 'Syncing automata-private repo'
+    Sync-AutomataPrivateRepo
+
+    Update-Step 'Installing Ditto (settings + fork build)'
+    Install-DittoQuick
+    Rebuild-DittoFork
+
+    Update-Step 'Installing Flameshot (settings)'
+    Install-FlameshotQuick
+    Restore-FlameshotSettings
+
+    Write-Progress -Activity 'Restoring mainframe' -Completed
+    Write-Host 'Quick restore complete: Edge profile, opencode v2 config, mainframe secrets, Agent instructions and skills, opencode2 (v2), automata-private checkout, Ditto and Flameshot installed.'
+    return
+}
+
+Update-Step 'Restoring Edge browser profile'
+Restore-EdgeProfile
+Restore-EdgeExtensions
+
+Update-Step 'Restoring opencode config'
+Restore-ToolSecretsArchive -ItemNames @('opencode')
+
+Update-Step 'Setting up Scoop'
+if (-not (Get-ScoopCommand)) {
+    try { Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force } catch {}
+    $env:SCOOP_ALLOW_ADMIN = 'true'
+    [Environment]::SetEnvironmentVariable('SCOOP_ALLOW_ADMIN', 'true', 'User')
+    $installScript = Join-Path $env:TEMP 'install-scoop.ps1'
+    Invoke-WebRequest -Uri 'https://get.scoop.sh' -OutFile $installScript
+    $env:SCOOP = $ScoopRoot
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript -RunAsAdmin -ScoopDir $ScoopRoot
+}
+
+New-Item -ItemType Directory -Force -Path $ScoopRoot | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $ScoopRoot 'shims') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $ScoopRoot 'buckets') | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $ScoopRoot 'apps') | Out-Null
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host 'Git not found. Installing via Scoop...'
+    Invoke-Scoop install git
+}
+
+Update-Step 'Installing opencode2 (v2)'
+Install-OpencodePinned
+
+Update-Step 'Restoring persist data'
+Write-Host "Restoring persisted Scoop settings from $persistDir"
+$persistDest = Join-Path $ScoopRoot 'persist'
+New-Item -ItemType Directory -Force -Path $persistDest | Out-Null
+# /XF Ditto.db: the starred-only clip DB gets a guarded fresh-box-only placement
+# below (same rule as the quick route) instead of riding the blanket overwrite.
+& robocopy $persistDir $persistDest /E $script:RoboCopyFlag /XF 'Ditto.db' /R:1 /W:1 /NP /NDL /NFL | Out-Null
+if ($LASTEXITCODE -gt 7) {
+    Write-Warning "Robocopy persist data failed with exit code $LASTEXITCODE"
+} else {
+    Write-Host "Restored persist data to $persistDest"
+}
+# starred-clips db from mainframe-persist.zip: FRESH box only - never overwrite
+# an existing clip DB (live history wins, backup db skipped loud)
+$favDbSrc = Join-Path $persistDir 'ditto\Ditto.db'
+$favDbDest = Join-Path $persistDest 'ditto\Ditto.db'
+if (Test-Path -LiteralPath $favDbSrc) {
+    if (Test-Path -LiteralPath $favDbDest) {
+        Write-Warning "existing $favDbDest kept - the backup's starred-only db was NOT applied (fresh-box only)"
+    } else {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $favDbDest) | Out-Null
+        Copy-Item -LiteralPath $favDbSrc -Destination $favDbDest
+        Write-Host 'Restored starred-only Ditto.db (fresh clip DB: starred clips only)'
+    }
+}
+# flameshot settings (install itself comes from the allowlist loop below)
+Restore-FlameshotSettings
+
+$import = Get-Content -LiteralPath $scoopfile -Raw | ConvertFrom-Json
+
+foreach ($item in $import.config.PSObject.Properties) {
+    Invoke-Scoop config $item.Name $item.Value
+}
+
+foreach ($bucket in $import.buckets) {
+    Add-BucketIfMissing -Name $bucket.Name -Source $bucket.Source
+}
+
+Update-Step 'Installing Scoop apps'
+$scoop = Get-ScoopCommand
+$installed = @{}
+$listOutput = & $scoop list 2>$null
+foreach ($line in $listOutput) {
+    if ($line -match '^\s*(\S+)\s+') {
+        $appName = $matches[1]
+        if ($appName -ne 'Name' -and $appName -ne '----') {
+            $installed[$appName] = $true
+        }
+    }
+}
+# Also check apps directory for apps that scoop list might miss
+$appsDir = Join-Path $ScoopRoot 'apps'
+if (Test-Path -LiteralPath $appsDir) {
+    Get-ChildItem -LiteralPath $appsDir -Directory | ForEach-Object {
+        $installed[$_.Name] = $true
+    }
+}
+
+$bucketNames = @($import.buckets | ForEach-Object { $_.Name })
+$importAppsByName = @{}
+foreach ($item in @($import.apps)) {
+    $importAppsByName[$item.Name] = $item
+}
+
+$allowedAppsFile = Get-MainframeConfigPath -FileName 'scoop-allowed.json'
+$rawScoop = Get-Content -LiteralPath $allowedAppsFile -Raw | ConvertFrom-Json
+$allowedApps = @(Get-ActiveAllowlistItems -Config $rawScoop -ItemsProperty 'apps' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
+$restoreApps = @($allowedApps | ForEach-Object {
+    if ($importAppsByName.ContainsKey($_)) {
+        $importAppsByName[$_]
+    } else {
+        [PSCustomObject]@{
+            Name = $_
+            Version = $null
+            Source = $null
+            Info = ''
+            Updated = $null
+        }
+    }
+})
+Write-Host "Using Scoop allowlist: $allowedAppsFile ($($restoreApps.Count) apps)"
+
+$appCount = @($restoreApps).Count
+$appIndex = 0
+$skipped = 0
+$installed_count = 0
+
+foreach ($item in $restoreApps) {
+    $appIndex++
+    $info = @($item.Info -split ', ' | Where-Object { $_ })
+
+    if ($installed.ContainsKey($item.Name)) {
+        Write-Host "Skip (installed): $($item.Name) $($installed[$item.Name])"
+        $skipped++
+        continue
+    }
+
+    $installArgs = @('--no-update-scoop', '--independent')
+    $holdArgs = @()
+
+    if ('Global install' -in $info) {
+        $installArgs += '--global'
+        $holdArgs += '--global'
+    }
+
+    if ('64bit' -in $info) {
+        $installArgs += @('--arch', '64bit')
+    } elseif ('32bit' -in $info) {
+        $installArgs += @('--arch', '32bit')
+    } elseif ('arm64' -in $info) {
+        $installArgs += @('--arch', 'arm64')
+    }
+
+    $appSpec = if ($item.Version) {
+        if ($item.Source -in $bucketNames) {
+            "$($item.Source)/$($item.Name)@$($item.Version)"
+        } elseif ($item.Source -eq '<auto-generated>') {
+            "$($item.Name)@$($item.Version)"
+        } else {
+            "$($item.Source)@$($item.Version)"
+        }
+    } else {
+        $item.Name
+    }
+
+    Write-Progress -Activity 'Restoring mainframe' -Status "Installing $appSpec ($appIndex/$appCount)" -PercentComplete (($currentStep / $totalSteps) * 100)
+    Write-Host "Installing $appSpec"
+    try {
+        Invoke-Scoop install $appSpec @installArgs
+        $installed_count++
+    } catch {
+        Write-Warning "Failed to install $appSpec -- $_. Attempting fallback to latest..."
+        $fallbackSpec = if ($item.Source -in $bucketNames) { "$($item.Source)/$($item.Name)" } else { $item.Name }
+        try {
+            Invoke-Scoop install $fallbackSpec @installArgs
+            $installed_count++
+            Write-Host "  Fallback succeeded: $fallbackSpec"
+        } catch {
+            Write-Warning "Fallback also failed for $fallbackSpec -- $_. Skipping."
+            continue
+        }
+    }
+
+    if ('Held package' -in $info) {
+        Invoke-Scoop hold $item.Name @holdArgs
+    }
+}
+
+Write-Host "`nDone: $installed_count installed, $skipped skipped (already present)"
+
+Update-Step 'Installing pnpm global packages'
+$pnpmAllowedFile = Get-MainframeConfigPath -FileName 'pnpm-allowed.json'
+$pnpmCmd = Get-PnpmCommand
+if (-not $pnpmCmd) {
+    throw 'pnpm command was not found after Scoop restore.'
+}
+
+$pnpmConfigFile = Join-Path $BackupRoot 'pnpm-config.json'
+$pnpmGlobalBin = Join-Path $env:USERPROFILE '.pnpm-global\bin'
+if (Test-Path -LiteralPath $pnpmConfigFile) {
+    $pnpmConfig = Get-Content -LiteralPath $pnpmConfigFile -Raw | ConvertFrom-Json
+    if ($pnpmConfig.globalBinDir) {
+        $pnpmGlobalBin = $pnpmConfig.globalBinDir
+    }
+}
+
+Write-Host "Setting pnpm global-bin-dir to: $pnpmGlobalBin"
+New-Item -ItemType Directory -Force -Path $pnpmGlobalBin | Out-Null
+& $pnpmCmd config set global-bin-dir $pnpmGlobalBin
+if ($LASTEXITCODE -ne 0) {
+    throw "pnpm config set global-bin-dir failed with exit code $LASTEXITCODE"
+}
+
+$rawPnpm = Get-Content -LiteralPath $pnpmAllowedFile -Raw | ConvertFrom-Json
+$pnpmPackages = @(Get-ActiveAllowlistItems -Config $rawPnpm -ItemsProperty 'packages' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
+Write-Host "Using pnpm allowlist: $pnpmAllowedFile ($($pnpmPackages.Count) packages)"
+foreach ($pkg in $pnpmPackages) {
+    Write-Host "Installing pnpm global: $pkg"
+    $env:CI = 'true'
+    $stdinFile = [IO.Path]::GetTempFileName()
+    $stdoutFile = [IO.Path]::GetTempFileName()
+    $stderrFile = [IO.Path]::GetTempFileName()
+    try {
+        $proc = Start-Process -FilePath $pnpmCmd -ArgumentList "add","-g",$pkg -RedirectStandardInput $stdinFile -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile -NoNewWindow -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            throw "pnpm add -g $pkg failed with exit code $($proc.ExitCode)"
+        }
+    } catch {
+        Write-Warning "Failed to install pnpm global $pkg -- $_. Skipping."
+    } finally {
+        Remove-Item -LiteralPath $stdinFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrFile -ErrorAction SilentlyContinue
+    }
+}
+Write-Host "Done: $($pnpmPackages.Count) pnpm global packages"
+
+if (Test-Path -LiteralPath $pnpmGlobalBin) {
+    $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+    if ($userPath -notlike "*$pnpmGlobalBin*") {
+        [Environment]::SetEnvironmentVariable('PATH', "$pnpmGlobalBin;$userPath", 'User')
+        $env:PATH = "$pnpmGlobalBin;$env:PATH"
+        Write-Host "Added $pnpmGlobalBin to user PATH"
+    }
+}
+
+Update-Step 'Installing uv tools'
+$uvAllowedFile = Get-MainframeConfigPath -FileName 'uv-allowed.json'
+$uvCmd = Get-Command uv -ErrorAction SilentlyContinue
+if (-not $uvCmd) {
+    throw 'uv command was not found after Scoop restore.'
+}
+$rawUv = Get-Content -LiteralPath $uvAllowedFile -Raw | ConvertFrom-Json
+$uvPackages = @(Get-ActiveAllowlistItems -Config $rawUv -ItemsProperty 'packages' | ForEach-Object {
+    if ($_ -is [string]) { $_ } else { $_.name }
+})
+Write-Host "Using uv allowlist: $uvAllowedFile ($($uvPackages.Count) tools)"
+foreach ($pkg in $uvPackages) {
+    Write-Host "Installing uv tool: $pkg"
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & uv tool install $pkg 2>&1 | Out-Host
+    $ErrorActionPreference = $savedEap
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "uv tool install $pkg failed with exit code $LASTEXITCODE. Skipping."
+    }
+}
+Write-Host "Done: $($uvPackages.Count) uv tools"
+
+# Legacy pip-freeze.txt is inert restore metadata, not user data or an install
+# input. Python/pip tooling remains available for explicit future package installs.
+Update-Step 'Restoring OBS Studio settings'
+$obsBackupDir = Join-Path $BackupRoot 'obs-studio'
+if (Test-Path -LiteralPath $obsBackupDir) {
+    $obsDest = Join-Path $ScoopRoot 'persist\obs-studio\config\obs-studio'
+    New-Item -ItemType Directory -Force -Path $obsDest | Out-Null
+    $rcExit = & robocopy $obsBackupDir $obsDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL
+    if ($LASTEXITCODE -gt 7) {
+        Write-Warning "Robocopy OBS settings failed with exit code $LASTEXITCODE"
+    } else {
+        Write-Host "Restored OBS scenes, profiles, and config to $obsDest"
+    }
+} else {
+    Write-Warning "No obs-studio backup found, skipping"
+}
+
+Update-Step 'Restoring qBittorrent settings'
+$qbtBackupDir = Join-Path $BackupRoot 'qbittorrent'
+if (Test-Path -LiteralPath $qbtBackupDir) {
+    $qbtDest = Join-Path $ScoopRoot 'persist\qbittorrent\profile\qBittorrent'
+    New-Item -ItemType Directory -Force -Path $qbtDest | Out-Null
+    $rcExit = & robocopy $qbtBackupDir $qbtDest /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL
+    if ($LASTEXITCODE -gt 7) {
+        Write-Warning "Robocopy qBittorrent settings failed with exit code $LASTEXITCODE"
+    } else {
+        Write-Host "Restored qBittorrent config (WebUI creds, save path, sequential/first-last piece flags) to $qbtDest"
+    }
+} else {
+    Write-Warning "No qbittorrent backup found, skipping"
+}
+
+Update-Step 'Cloning mainframe repo'
+$mainframeRepo = $CloneRepos['mainframe']
+$mainframeDest = Join-Path $DownloadsRoot 'mainframe'
+if (-not (Test-Path -LiteralPath $mainframeDest)) {
+    Write-Host "Cloning $mainframeRepo to $mainframeDest"
+    Invoke-Native git clone $mainframeRepo $mainframeDest
+} else {
+    Write-Host "Mainframe repo already exists at $mainframeDest, pulling latest"
+    Invoke-Native git -C $mainframeDest pull --ff-only
+}
+
+Sync-AutomataPrivateRepo
+
+Import-AppRegistryFile -AppName 'python' -RelativePath 'install-pep-514.reg'
+Import-AppRegistryFile -AppName '7zip' -RelativePath 'install-context.reg'
+
+# qBittorrent / VLC file associations — exported per key by backup.ps1
+$appAssoc = Get-ChildItem -LiteralPath $BackupRoot -Filter '*-assoc-*.reg' -ErrorAction SilentlyContinue
+foreach ($f in $appAssoc) {
+    Write-Host "Importing $($f.Name)"
+    Invoke-Native reg.exe import $f.FullName
+}
+
+# mpv context menu ("Play with mpv") + user environment (PATH with python312 /
+# site-packages\vapoursynth) - sign out or reboot after restore for the PATH to
+# reach new processes.
+foreach ($mpvReg in @('mpv-contextmenu.reg', 'user-env.reg')) {
+    $f = Join-Path $BackupRoot $mpvReg
+    if (Test-Path -LiteralPath $f) {
+        Write-Host "Importing $mpvReg"
+        Invoke-Native reg.exe import $f
+    }
+}
+
+Update-Step 'Restoring scheduled tasks'
+$tasksDir = Join-Path $BackupRoot 'scheduled-tasks'
+if (Test-Path -LiteralPath $tasksDir) {
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $taskFailures = @()
+    Get-ChildItem -LiteralPath $tasksDir -Filter '*.xml' | ForEach-Object {
+        $taskName = $_.BaseName
+        Write-Host "Importing scheduled task: $taskName"
+        [xml]$xml = Get-Content -LiteralPath $_.FullName -Raw
+        $ns = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+        $ns.AddNamespace("t", "http://schemas.microsoft.com/windows/2004/02/mit/task")
+        $userIdNode = $xml.SelectSingleNode("//t:UserId", $ns)
+        if ($userIdNode) {
+            $userIdNode.InnerText = $currentUser
+        }
+        try {
+            Register-ScheduledTask -Xml $xml.OuterXml -TaskName $taskName -Force | Out-Null
+            Write-Host "  Installed: $taskName"
+        } catch {
+            # Tasks with RunLevel=HighestAvailable need admin to register
+            # (HRESULT 0x80070005). Do not abort the whole restore over it -
+            # warn and keep going; the task can be installed from an elevated shell.
+            $taskFailures += $taskName
+            Write-Warning "  Could not register $taskName ($($_.Exception.Message))"
+        }
+    }
+    if ($taskFailures.Count -gt 0) {
+        Write-Warning "Scheduled tasks not installed (need elevation): $($taskFailures -join ', '). Re-run restore.ps1 from an elevated shell to install them."
+    }
+}
+
+Update-Step 'Restoring secrets'
+Restore-ToolSecretsArchive -SkipNames @('opencode')
+Restore-AgentInstructionsAndSkills
+$gitconfigSrc = Join-Path $BackupRoot '.gitconfig'
+if (Test-Path -LiteralPath $gitconfigSrc) {
+    $gitconfigDest = Join-Path $env:USERPROFILE '.gitconfig'
+    Copy-Item -LiteralPath $gitconfigSrc -Destination $gitconfigDest -Force
+    Write-Host 'Restored .gitconfig'
+}
+
+$goCmd = Get-Command go -ErrorAction SilentlyContinue
+if (-not $goCmd) {
+    throw 'go command was not found after Scoop restore.'
+}
+$goAllowedFile = Get-MainframeConfigPath -FileName 'go-allowed.json'
+$goPkgImport = Get-Content -LiteralPath $goAllowedFile -Raw | ConvertFrom-Json
+$activeGoPackages = @(Get-ActiveAllowlistItems -Config $goPkgImport -ItemsProperty 'packages' -IdProperty 'path')
+Write-Host "Using Go allowlist: $goAllowedFile ($($activeGoPackages.Count) packages)"
+foreach ($pkg in $activeGoPackages) {
+    $pkgPath = if ($pkg -is [string]) { $pkg } else { $pkg.path }
+    $tags = if ($pkg -is [string]) { @() } else { @($pkg.tags) }
+    $version = if ($pkg -is [string]) { 'latest' } else { if ($pkg.version) { $pkg.version } else { 'latest' } }
+    # Derive the binary name from the last path segment (e.g. .../cmd/wacli -> wacli)
+    $binaryName = ($pkgPath -split '/')[-1]
+    $goBinDir = if ($env:GOPATH) { $env:GOPATH } else { Join-Path $env:USERPROFILE 'go' }
+    $binaryPath = Join-Path $goBinDir "bin\$binaryName.exe"
+    if (Test-Path -LiteralPath $binaryPath) {
+        Write-Host "Skip (installed): $binaryName"
+        continue
+    }
+    Write-Host "Installing Go package: $pkgPath@$version"
+    $env:CGO_ENABLED = '1'
+    $installArgs = @('install')
+    if ($tags.Count -gt 0) {
+        $installArgs += @('-tags', ($tags -join ','))
+    }
+    $installArgs += "$pkgPath@$version"
+    Invoke-Native go @installArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "go $($installArgs -join ' ') failed with exit code $LASTEXITCODE. Skipping."
+    } else {
+        Write-Host "Installed $pkgPath"
+    }
+}
+$goBin = Join-Path $env:USERPROFILE 'go\bin'
+if (Test-Path -LiteralPath $goBin) {
+    $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+    if ($userPath -notlike "*$goBin*") {
+        [Environment]::SetEnvironmentVariable('PATH', "$goBin;$userPath", 'User')
+        Write-Host "Added $goBin to user PATH"
+    }
+}
+
+Update-Step 'Installing winget packages'
+$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
+if (-not $wingetCmd) {
+    Write-Warning 'winget not found, skipping winget package install.'
+} else {
+    $wingetAllowedFile = Get-MainframeConfigPath -FileName 'winget-allowed.json'
+    $wingetImport = Get-Content -LiteralPath $wingetAllowedFile -Raw | ConvertFrom-Json
+    $activeWingetPackages = @(Get-ActiveAllowlistItems -Config $wingetImport -ItemsProperty 'packages' -IdProperty 'id')
+    Write-Host "Using winget allowlist: $wingetAllowedFile ($($activeWingetPackages.Count) packages)"
+    $installed_count = 0
+    $skipped = 0
+    foreach ($pkg in $activeWingetPackages) {
+        $pkgId = if ($pkg -is [string]) { $pkg } else { $pkg.id }
+        # Check if already installed
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $existing = winget list --id $pkgId -e --accept-source-agreements 2>$null | Out-String
+        $ErrorActionPreference = $savedEap
+        if ($LASTEXITCODE -eq 0 -and $existing -match [regex]::Escape($pkgId)) {
+            Write-Host "Skip (installed): $pkgId"
+            $skipped++
+            continue
+        }
+        Write-Host "Installing winget package: $pkgId"
+        Invoke-Native winget install --id $pkgId -e --scope machine --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -ne 0) {
+            # 0x8a150010 = APPINSTALLER_CLI_ERROR_NO_APPLICABLE_INSTALLER. manifests
+            # with no declared Scope (Unknown) can never match a forced --scope machine
+            # (observed: Windscribe, Wakatime.DesktopWakatime). retry without the
+            # scope flag so winget uses the installer's own scope.
+            if (([uint32]$LASTEXITCODE) -eq 0x8a150010) {
+                Write-Warning "winget install $pkgId failed with 0x8a150010 (no applicable installer for machine scope). Retrying without --scope..."
+                Invoke-Native winget install --id $pkgId -e --accept-package-agreements --accept-source-agreements
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "winget install $pkgId (unscoped retry) failed with exit code $LASTEXITCODE. Skipping."
+                } else {
+                    Write-Host "Installed $pkgId"
+                    $installed_count++
+                }
+            } else {
+                Write-Warning "winget install $pkgId failed with exit code $LASTEXITCODE. Skipping."
+            }
+        } else {
+            Write-Host "Installed $pkgId"
+            $installed_count++
+        }
+    }
+    Write-Host "Done: $installed_count installed, $skipped skipped (already present)"
+
+    # Restore persist data for winget packages that have it (AnyDesk, Directory Opus, etc.).
+    # Backup wrote these under <BackupRoot>\native\<archivePath> using the same Write-NativePersistArchive function.
+    $wingetPersistPkgs = @($activeWingetPackages | Where-Object { $_.persist })
+    if ($wingetPersistPkgs.Count -gt 0 -and -not $SkipNativePersist) {
+        foreach ($pkg in $wingetPersistPkgs) {
+            Write-Host "Restoring persist for $($pkg.id)..."
+            # Stop the service if it's a service-style app (DirectoryOpus/AnyDesk run as processes, not services, so this is mostly a no-op)
+            $procName = if ($pkg.id -eq 'AnyDesk.AnyDesk') { 'anydesk' } elseif ($pkg.id -eq 'GPSoftware.DirectoryOpus') { 'dopus','dopusrt' } else { $null }
+            $procsWereRunning = @()
+            if ($procName) {
+                foreach ($pn in @($procName)) {
+                    $running = Get-Process -Name $pn -ErrorAction SilentlyContinue
+                    if ($running) {
+                        $procsWereRunning += $pn
+                        $running | Stop-Process -Force -ErrorAction SilentlyContinue
+                        Write-Host "  Stopped $pn for persist restore"
+                    }
+                }
+                if ($procsWereRunning.Count -gt 0) { Start-Sleep -Seconds 2 }
+            }
+            try {
+                foreach ($entry in @($pkg.persist)) {
+                    $src = Join-Path $nativePersistDir $entry.archivePath
+                    if (-not (Test-Path -LiteralPath $src)) {
+                        Write-Warning "  Persist entry not found in backup: $($entry.archivePath)"
+                        continue
+                    }
+                    $target = Resolve-TemplateString -Value $entry.path
+                    New-Item -ItemType Directory -Force -Path $target | Out-Null
+                    & robocopy $src $target /E $script:RoboCopyFlag /R:1 /W:1 /NP /NDL /NFL | Out-Null
+                    if ($LASTEXITCODE -gt 7) {
+                        Write-Warning "  Robocopy persist ($($entry.archivePath)) failed with exit code $LASTEXITCODE"
+                    } else {
+                        Write-Host "  Restored $($entry.archivePath) -> $target"
+                    }
+                }
+            } finally {
+                # Restart processes we stopped (DOpus at least benefits from it)
+                foreach ($pn in $procsWereRunning) {
+                    Start-Process -FilePath $pn -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+}
+
+# Re-apply local patches that the fresh scoop installs wipe out.
+# - alist: terabox dm-domain fix (scoop reinstalls official binary without the patch)
+# - ditto: user's merged-but-unreleased starred-clips PRs (scoop reinstalls official 3.25.113.0)
+# - opencode v1 fork ONLY: bash pipe hang fix #44601. we run opencode2 now (see the
+#   guard below) - that patcher builds v1, so applying it to a v2 install would
+#   overwrite v2 with a binary that cannot read the restored config.
+# All patchers live in automata-private; Sync-AutomataPrivateRepo above has already made
+# the checkout a hard requirement, so only an individual missing patcher warns here.
+Update-Step 'Re-applying local binary patches (alist, ditto, opencode v1 fork)'
+$automataPrivate = $AutomataPrivateDir
+$alistPatcher = Join-Path $automataPrivate 'github.com\AlistGo\alist\alist-terabox-patcher.ps1'
+if (Test-Path -LiteralPath $alistPatcher) {
+    Write-Host 'Re-applying AList terabox patch...'
+    & pwsh -NoProfile -File $alistPatcher -NoRestart 2>&1 | Write-Host
+} else {
+    Write-Warning "alist patcher not found: $alistPatcher"
+}
+Rebuild-DittoFork
+$opencodePatcher = Join-Path $automataPrivate 'github.com\anomalyco\opencode\opencode-patcher.ps1'
+$v1Installed = Test-Path -LiteralPath (Join-Path $ScoopRoot 'apps\opencode\current')
+$v2Installed = Test-Path -LiteralPath (Join-Path $ScoopRoot 'apps\opencode2\current')
+if (-not (Test-Path -LiteralPath $opencodePatcher)) {
+    Write-Warning "opencode patcher not found: $opencodePatcher"
+} elseif ($v2Installed) {
+    # refusing to run a v1 patcher against a v2 install: it would replace the
+    # opencode2 binary with a v1 fork build (same failure mode as the pinned
+    # install defaulting to v1). re-derive the #44601 patch against v2 first.
+    Write-Warning "skipping opencode fork patcher: opencode2 (v2) is installed and that patcher builds the v1 fork (bash pipe hang #44601), which would overwrite v2."
+} elseif ($v1Installed) {
+    Write-Host 'Re-building opencode v1 fork from patcher (bash pipe hang #44601)...'
+    & pwsh -NoProfile -File $opencodePatcher 2>&1 | Write-Host
+} else {
+    Write-Warning "opencode patcher present but neither opencode nor opencode2 is installed under $ScoopRoot\apps - not running it: $opencodePatcher"
+}
+
+Write-Progress -Activity 'Restoring mainframe' -Completed
+Write-Host 'Bootstrap complete. Restart PowerShell or log out/in if shell integration is not visible yet.'
+
+# failures throw (ErrorActionPreference=Stop) and propagate to the caller. this
+# explicit exit keeps caller checks like boot.ps1's "$LASTEXITCODE -ne 0" honest:
+# without it that variable still holds the last NATIVE command's code, and robocopy
+# exits 1 for "files copied OK" - so a successful restore reported itself as failed.
+exit 0
+

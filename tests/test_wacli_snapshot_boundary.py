@@ -10,8 +10,8 @@ import os
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import wacli_snapshot as snapshot
-from wacli_snapshot_stage import _prepare_staged_snapshot
+from wacli import wacli_snapshot as snapshot
+from wacli.wacli_snapshot_stage import _prepare_staged_snapshot
 
 
 def database(stack, path, mode='DELETE'):

@@ -13,10 +13,10 @@ from unittest.mock import patch
 from zipfile import ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import linux_restore as lr
-import wacli_go_plan as gp
-import wacli_state as ws
-from wacli_restore_contract import WINDOWS_PREFIX, restoration_status
+from linux import linux_restore as lr
+from linux import wacli_go_plan as gp
+from wacli import wacli_state as ws
+from wacli.wacli_restore_contract import WINDOWS_PREFIX, restoration_status
 
 
 # The restore path opens archives through linux_restore.secure_directory, which

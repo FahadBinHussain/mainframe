@@ -17,7 +17,7 @@ The official [release workflow](https://github.com/googleworkspace/cli/blob/v0.2
 A proposed new absolute root is supplied with `--gws-root`. Supplying it alone remains a dry plan:
 
 ```bash
-python3 ./linux_packages.py --gws-root /absolute/new/gws-root
+python3 ./linux/linux_packages.py --gws-root /absolute/new/gws-root
 ```
 
 The detailed layout identifies `bin/gws`, an empty `home`, config/Google Workspace config, discovery cache, general cache, temporary, work, data and state paths under that root. Node and pnpm are explicitly **not required, installed, discovered or invoked**: this is the official native binary, not a Node package installation. No ambient Node/pnpm path or npm configuration participates.

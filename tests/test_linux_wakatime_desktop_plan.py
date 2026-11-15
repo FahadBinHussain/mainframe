@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-import wakatime_desktop_linux as wd
+from linux import wakatime_desktop_linux as wd
 
 
 SHA_X64 = "a" * 64

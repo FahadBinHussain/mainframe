@@ -5,7 +5,7 @@
 > ## **`mainframe` IS A PUBLIC REPO, AND IT IS NOT THE HOME FOR YOUR PROJECT'S STUFF.**
 >
 > **this repo holds ONE kind of thing: the shared, portable account layer.**
-> that is the `*-account.ps1` helpers + `account-contract.ps1`, the bitwarden
+> that is the `*-account.ps1` helpers + `accounts/account-contract.ps1`, the bitwarden
 > modules (`vault-*.psm1`), and the bootstrap / backup / restore / linux-parity
 > plumbing that carries them to every box.
 >
@@ -19,8 +19,8 @@
 > permission to extend it here.**
 >
 > **what that looks like in practice (real incident, 2026-11-01):** the automata
-> monitor's account pool needed extra verbs on `minimax-account.ps1` /
-> `adcode-account.ps1`. an agent added them straight into `mainframe` because
+> monitor's account pool needed extra verbs on `accounts/minimax-account.ps1` /
+> `accounts/adcode-account.ps1`. an agent added them straight into `mainframe` because
 > the pool already lived here. **wrong.** the pool *reads* helpers from here;
 > the monitor's own work belongs in the private `automata-private` repo beside
 > the minimax / adcode / trae vendor notes, wired through its own
@@ -57,28 +57,42 @@ conventions used below:
 - `<repo>` — the path to this repo clone (default `%USERPROFILE%\Downloads\mainframe`)
 - profile dirs: `%APPDATA%\mainframe\accounts\<tool>\<email>\`
 
+## repo layout (restructured 2026-11-15)
+
+the root used to hold 86 files flat. now it holds entry points only; everything else lives in its subsystem dir:
+
+- root: `boot.ps1`, `boot.sh`, `bootstrap.ps1`, `bootstrap.sh`, `boot-remote.sh`, `restore.sh`, `backup.cmd`, `restore.cmd`, `wipe.cmd`, docs, `mainframe.config.example.json`, `bw-email.enc.json`
+- `accounts/` — the 17 `*-account.ps1` helpers + `account-contract.ps1`
+- `windows/` — backup/restore/vault powershell (`backup.ps1`, `restore.ps1`, `vault-*.ps1`, `vault-*.psm1`, `mainframe-*.psm1`) + `strip-ditto-favorites.py`
+- `linux/` — the linux restore engine as a python package (`linux_real.py`, `linux_restore.py`, `linux_packages.py`, `linux_secrets.py`, `linux_migrations.py` + the 16 per-app plans). run it as `python3 -m linux.linux_real` from the repo root — `boot.sh` / `restore.sh` set `PYTHONPATH` for you, so the entry points work from anywhere
+- `wacli/` — the wacli snapshot/state python package
+- `manifests/` — the allowlists (`scoop-allowed.json`, `winget-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`) + `tool-secrets.manifest.json`
+- `tests/`, `docs/`, `patches/wacli/`, `wacli-vss-client/`, `workers/`, `bucket/` — unchanged
+
+path rules that follow from the layout: a script inside `accounts/` or `windows/` reaches the repo root with `(Split-Path $PSScriptRoot -Parent)`, never `$PSScriptRoot` alone. `restore.ps1`, `restore-secrets.ps1` and `wipe.ps1` are the exception — they are copied INTO the backup, so their `$PSScriptRoot` means the backup dir at runtime and their sibling references stay as-is. `linux_packages.build_plan(repo)` takes the checkout root and reads the allowlists from `repo/manifests/`; test fixtures write theirs to `<tmpdir>/manifests/`.
+
 ## account helper contract
 
-every `*-account.ps1` helper implements the same contract (`login`, `use`, `current`, `list`, `status`, `status-all`, `path`, `env`, `run`) plus tool-specific subcommands. `account-contract.ps1` validates the contract across all helpers — run it after adding or editing a helper.
+every `*-account.ps1` helper implements the same contract (`login`, `use`, `current`, `list`, `status`, `status-all`, `path`, `env`, `run`) plus tool-specific subcommands. `accounts/account-contract.ps1` validates the contract across all helpers — run it after adding or editing a helper.
 
 - profiles are keyed by account email only; if email cannot be detected after auth, fail or ask — never save a username/label/workspace fallback.
-- **invoking the helpers on this box (2026-10-10)**: the default powershell execution policy blocks `& <helper>.ps1 ...` with `UnauthorizedAccess` — call them as `pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\<tool>-account.ps1 ...` instead. `run` takes the target tool's raw subcommand args with the binary name OMITTED and an optional `<email>` first: `<helper> run auth status` / `<helper> run <email> repo view <owner>/<repo> --json name,visibility` — passing `gh`/`hf`/etc. as the first arg fails loud with `unknown command "gh" for "gh"` (the helper already invokes the binary). also note `gh auth logout` REFUSES to run while `GH_TOKEN` is in the environment (*"first clear the value from the environment"*, exit 1) — to forget a stored host entry run it with only `GH_CONFIG_DIR` set (`Remove-Item Env:GH_TOKEN` first), then re-check via the helper. fixed a stale invalid `default`-style user entry in the github profile's `hosts.yml` this way on 2026-10-10 — it made `run auth status` exit 1 (*"X Failed to log in ... The token in default is invalid"*) while the GH_TOKEN profile was fine all along. **and run `account-contract.ps1` under pwsh, never `powershell`**: under 5.1 it aborts on `agent-browser-account.ps1` with *"17 error(s)"* (first: `Unexpected token 'usually'`) because these helpers use PS7 syntax, so the alphabetically-earlier file dies before minimax is ever reached and the whole run is meaningless; `[Parser]::ParseFile` agrees — 0 errors under pwsh 7.6, 17 under 5.1.
-- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata-private\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `publish-backup.ps1` and `github-account.ps1` match that pattern.
+- **invoking the helpers on this box (2026-10-10)**: the default powershell execution policy blocks `& <helper>.ps1 ...` with `UnauthorizedAccess` — call them as `pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\<tool>-account.ps1 ...` instead. `run` takes the target tool's raw subcommand args with the binary name OMITTED and an optional `<email>` first: `<helper> run auth status` / `<helper> run <email> repo view <owner>/<repo> --json name,visibility` — passing `gh`/`hf`/etc. as the first arg fails loud with `unknown command "gh" for "gh"` (the helper already invokes the binary). also note `gh auth logout` REFUSES to run while `GH_TOKEN` is in the environment (*"first clear the value from the environment"*, exit 1) — to forget a stored host entry run it with only `GH_CONFIG_DIR` set (`Remove-Item Env:GH_TOKEN` first), then re-check via the helper. fixed a stale invalid `default`-style user entry in the github profile's `hosts.yml` this way on 2026-10-10 — it made `run auth status` exit 1 (*"X Failed to log in ... The token in default is invalid"*) while the GH_TOKEN profile was fine all along. **and run `accounts/account-contract.ps1` under pwsh, never `powershell`**: under 5.1 it aborts on `accounts/agent-browser-account.ps1` with *"17 error(s)"* (first: `Unexpected token 'usually'`) because these helpers use PS7 syntax, so the alphabetically-earlier file dies before minimax is ever reached and the whole run is meaningless; `[Parser]::ParseFile` agrees — 0 errors under pwsh 7.6, 17 under 5.1.
+- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `windows/vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata-private\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `windows/publish-backup.ps1` and `accounts/github-account.ps1` match that pattern.
 - **github: a bare-handle `login.username` makes a valid token look missing (2026-10-06)**: `Find-VaultItemByEmail` matches `login.username == profile email` first, then falls back to a notes line equal to the email. a `github.com - <handle>` item with `login.username = <handle>` satisfies neither, so `Read-ProfileToken` returns null — `status-all` prints `HasToken=False / TokenStatus=missing` and `run <email> gh ...` fails with *"populate the GH_TOKEN environment variable"* (exit 4) — while the `ghp_` in the notes is perfectly valid. **diagnose first**: read the item and probe the token directly (`Authorization: Bearer <token>` against `api.github.com/user`, check `x-oauth-scopes`) before believing it expired. **fix**: set `login.username` to the profile email. bw 2026.5.0 has no `bw item edit` command and no `--username` flag — use `bw edit item <id> <base64-of-full-item-json>` (get the item, mutate `login.username`, re-encode; posting the whole item back is the only safe form). same class of bug as the huggingface trap below.
-- **vault cache (2026-09-01)**: `vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles. **unwrap gotcha (2026-10-08)**: the function returns the whole 1256-item collection as ONE wrapped object — piping it straight into `Where-Object` runs the predicate ONCE against the array (member-enumerated `.name` contains the needle → truthy → everything passes), so a naive filter silently selects ALL items; a write loop using that pattern clobbered 10 unrelated items' `DATABASE_URL` before being caught (all 10 restored same day from local clones + `vercel env pull`). ALWAYS unwrap first — `$items = @(@(Get-VaultItems)[0])` — and assert the filtered match count is what you expect (usually 1) BEFORE any write.
+- **vault cache (2026-09-01)**: `windows/vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles. **unwrap gotcha (2026-10-08)**: the function returns the whole 1256-item collection as ONE wrapped object — piping it straight into `Where-Object` runs the predicate ONCE against the array (member-enumerated `.name` contains the needle → truthy → everything passes), so a naive filter silently selects ALL items; a write loop using that pattern clobbered 10 unrelated items' `DATABASE_URL` before being caught (all 10 restored same day from local clones + `vercel env pull`). ALWAYS unwrap first — `$items = @(@(Get-VaultItems)[0])` — and assert the filtered match count is what you expect (usually 1) BEFORE any write.
 - **`Read-VaultSecret` needs `-ValueRegex` or it silently returns null (2026-10-08)**: `Get-SecretFromNotes` returns null when `ValueRegex` is blank (no default), so `Read-VaultSecret -NamePattern 'github.com - *'` — no `-ValueRegex`, no `-Email` — always comes back null and reads like "vault broken / token missing" when it is a call-shape error. `-Email` also matters: `Find-VaultItemByEmail` with an empty email falls back to matching a BLANK line in the notes, so item selection becomes non-deterministic. for a token read that cannot go wrong use the `boot.ps1` recipe: `bw list items --search 'github.com' --raw` → exact `name -eq 'github.com - <owner>'` item → notes regex `(gh[pousr]_[A-Za-z0-9_]{30,})`; in a fresh shell set `$env:BW_SESSION` from `%APPDATA%\mainframe\accounts\bitwarden\session.key` first (or run via the module, which reads that file itself).
 - before using a service, check the active account first (`status-all`/`current`); if the task targets a specific project/repo/space, verify which account owns it and switch before proceeding.
 
 ## gws: invalid_client is a stale client secret, not a dead session (fixed 2026-10-11)
 
-helper: `<repo>\gws-account.ps1` (google workspace cli `@googleworkspace/cli`, native `gws.exe`). profiles at `%APPDATA%\mainframe\accounts\gws\<email>\`. this is the **gmail send route** — `--scopes` defaults to the full set including `https://www.googleapis.com/auth/gmail.modify` (which covers send).
+helper: `<repo>\accounts\gws-account.ps1` (google workspace cli `@googleworkspace/cli`, native `gws.exe`). profiles at `%APPDATA%\mainframe\accounts\gws\<email>\`. this is the **gmail send route** — `--scopes` defaults to the full set including `https://www.googleapis.com/auth/gmail.modify` (which covers send).
 
 ```powershell
 # send — userId is a REQUIRED path param; omitting it fails loud with
 #   "Required path parameter userId is missing. Provide it via --params" (400, exit 3)
-pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages send --params '{"userId":"me"}' --json '{"raw":"<base64url rfc2822>"}'
-pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages list --params '{"userId":"me","maxResults":1}'
-pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users messages get   --params '{"userId":"me","id":"<id>","format":"full"}'
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\accounts\gws-account.ps1 run <email> gmail users messages send --params '{"userId":"me"}' --json '{"raw":"<base64url rfc2822>"}'
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\accounts\gws-account.ps1 run <email> gmail users messages list --params '{"userId":"me","maxResults":1}'
+pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\accounts\gws-account.ps1 run <email> gmail users messages get   --params '{"userId":"me","id":"<id>","format":"full"}'
 ```
 
 **every** `gmail users ...` call needs `--params '{"userId":"me"}'`, not just `get`/`list`. the error names the missing param precisely, so read it — do not re-derive auth or scope from a 400.
@@ -136,7 +150,7 @@ $out=[byte[]]::new(12+$newPt.Length+16)
 ```
 
 - **⚠️ `AesGcm.Encrypt` argument order is `(nonce, plaintext, CIPHERTEXT, tag)`** — ciphertext third, tag fourth. `Decrypt` is `(nonce, ciphertext, tag, plaintext)`. passing tag third on the encrypt side makes .NET compare your plaintext against the 16-byte tag and throw `Plaintext and ciphertext must have the same length` *even when both arrays are the same length* — and the throw happens AFTER the write in a naive loop, so the on-disk file is already corrupt. always round-trip-decrypt the file you just wrote and assert the secret before moving to the next profile.
-- keep `client_secret.json` in sync with the same value so any other reader stays consistent; patch **every** gws profile dir at once — a half-repaired set is how this bug hides (one account works, the others look like dead sessions). list them with `<repo>\gws-account.ps1 list`.
+- keep `client_secret.json` in sync with the same value so any other reader stays consistent; patch **every** gws profile dir at once — a half-repaired set is how this bug hides (one account works, the others look like dead sessions). list them with `<repo>\accounts\gws-account.ps1 list`.
 
 ### scope checks per account (2026-10-11)
 
@@ -150,7 +164,7 @@ POST https://oauth2.googleapis.com/token   (same body as the mint above)
 a missing scope is the one thing that genuinely requires `login <email>` (a browser consent click) — nothing else about a broken profile does. run it detached — `gws auth login` blocks on the loopback callback and will hang an agent shell for the full timeout:
 
 ```powershell
-Start-Process pwsh -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','<repo>\gws-account.ps1','login','<email>' -RedirectStandardOutput 'C:\tmp\gws-login-out.txt' -RedirectStandardError 'C:\tmp\gws-login-err.txt' -WindowStyle Hidden
+Start-Process pwsh -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','<repo>\accounts\gws-account.ps1','login','<email>' -RedirectStandardOutput 'C:\tmp\gws-login-out.txt' -RedirectStandardError 'C:\tmp\gws-login-err.txt' -WindowStyle Hidden
 ```
 
 the auth url is printed on **stderr** with `redirect_uri=http://localhost:<port>`; if no browser tab appeared, extract it from the err file and `Start-Process` it by hand. completion signal = the `gws.exe` process named `auth login` exits and stdout prints `"status": "success"` with the scope list.
@@ -186,7 +200,7 @@ client id and same quota project across the three (the values live in each profi
 `credentials.enc` and are not repo material). there is **no `invalid_client` anywhere** - the
 2026-10-11 secret patch is still holding, so do not mint a new oauth client for this.
 
-- `<primary profile>` (whatever `gws-account.ps1 current` prints, `IsActive True`): healthy. gmail
+- `<primary profile>` (whatever `accounts/gws-account.ps1 current` prints, `IsActive True`): healthy. gmail
   `users.messages.list` and drive `files.list` both exit 0, `token_valid true`, 16 scopes including
   `drive`.
 - `<institution profile>` (the work/school account): every call, gmail AND drive, dies 403
@@ -211,11 +225,11 @@ dir name. nothing errors: the profile looks healthy, mints fine, and simply serv
   `token_valid true` for a wrong-account token. the only truth is the identity endpoint:
 
   ```powershell
-  pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\gws-account.ps1 run <email> gmail users getProfile --params '{"userId":"me"}'
+  pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\accounts\gws-account.ps1 run <email> gmail users getProfile --params '{"userId":"me"}'
   # -> {"emailAddress":"...","messagesTotal":N}   emailAddress MUST equal <email>
   ```
 
-- **`gws-account.ps1 login <email>` cannot pre-select the account** - it builds and `Start-Process`es
+- **`accounts/gws-account.ps1 login <email>` cannot pre-select the account** - it builds and `Start-Process`es
   the auth URL itself, so there is nowhere to inject a hint. for a wrong-account repair, run the raw
   command with the helper's env and open the URL yourself:
 
@@ -276,52 +290,52 @@ context: neon projects can be under personal accounts or organizations. `project
 
 1. **check which account is active**
    ```
-   <repo>\neon-account.ps1 current
+   <repo>\accounts\neon-account.ps1 current
    ```
 
 2. **switch to the target account if needed**
    ```
-   <repo>\neon-account.ps1 use <email>
+   <repo>\accounts\neon-account.ps1 use <email>
    ```
 
 3. **list organizations for the account**
    ```
-   <repo>\neon-account.ps1 run <email> orgs list --output json
+   <repo>\accounts\neon-account.ps1 run <email> orgs list --output json
    ```
    or via api:
    ```
-   <repo>\neon-account.ps1 api <email> GET organizations
+   <repo>\accounts\neon-account.ps1 api <email> GET organizations
    ```
 
 4. **list projects — personal first**
    ```
-   <repo>\neon-account.ps1 run <email> projects list --output json
+   <repo>\accounts\neon-account.ps1 run <email> projects list --output json
    ```
 
 5. **list projects per organization**
    for each org id from step 3:
    ```
-   <repo>\neon-account.ps1 run <email> projects list --org-id <org-id> --output json
+   <repo>\accounts\neon-account.ps1 run <email> projects list --org-id <org-id> --output json
    ```
 
 6. **shortcut: projects-json helper** (auto-detects org if only one exists)
    ```
-   <repo>\neon-account.ps1 projects-json <email>
+   <repo>\accounts\neon-account.ps1 projects-json <email>
    ```
    if multiple orgs, specify `--org-id`:
    ```
-   <repo>\neon-account.ps1 projects-json <email> --org-id <org-id>
+   <repo>\accounts\neon-account.ps1 projects-json <email> --org-id <org-id>
    ```
 
 7. **get connection string for a project**
    ```
-   <repo>\neon-account.ps1 run <email> connection-string --project-id <project-id> --branch main --database <dbname> --role <role> --output json --no-color
+   <repo>\accounts\neon-account.ps1 run <email> connection-string --project-id <project-id> --branch main --database <dbname> --role <role> --output json --no-color
    ```
 
 8. **count projects across all accounts (or one) — REST, no neonctl**
    ```
-   <repo>\neon-account.ps1 projects-count
-   <repo>\neon-account.ps1 projects-count <email>
+   <repo>\accounts\neon-account.ps1 projects-count
+   <repo>\accounts\neon-account.ps1 projects-count <email>
    ```
    lists each profile with its project count (org-scoped keys auto-detected via
    `GET /api/v2/users/me/organizations` + `GET /api/v2/projects?org_id=...`), then prints
@@ -334,13 +348,13 @@ context: neon projects can be under personal accounts or organizations. `project
 - if `projects list` returns empty, check orgs first
 - the helper supports json output for programmatic parsing: add `--output json --no-color --no-analytics`
 - api key auth (`--api-key`) is preferred over browser oauth for automation
-- the `neon-account.ps1` helper preserves the api key per profile and injects it into `neonctl` commands
+- the `accounts/neon-account.ps1` helper preserves the api key per profile and injects it into `neonctl` commands
 
 ## neon: bulk scripts (moved to automata-private 2026-10-08)
 
 **2026-10-08: `neon-hours-table.ps1` + `neon-projects-table.ps1` moved to
 `automata-private\neon.com\`** (mainframe -> automata merge) - edit them THERE,
-not here; this repo no longer has a copy (both now import `vault-secret.psm1`
+not here; this repo no longer has a copy (both now import `windows/vault-secret.psm1`
 by its mainframe absolute path, uptimerobot-account.ps1 style). everything
 below still describes the behavior.
 
@@ -361,7 +375,7 @@ both `neon-hours-table.ps1` and `neon-projects-table.ps1` read api keys from
 `<profile>\api-key.txt`, but the 2026-08-22 vault migration deleted those files (keys now
 live in Bitwarden item `console.neon.tech` under `[api keys]`, regex `napi_`).
 result: the scripts skipped EVERY account and printed `No Neon projects found.` — looked
-like an outage, was a stale read path. fixed: both now `Import-Module vault-secret.psm1` and
+like an outage, was a stale read path. fixed: both now `Import-Module windows/vault-secret.psm1` and
 `Read-VaultSecret -Email <profile-email> -NamePattern 'console.neon.tech*' -ValueRegex
 'napi_[A-Za-z0-9]+'` per profile (same pattern as `vercel-usage-table.ps1`); profiles
 without a vault entry are skipped. when the table prints zero rows, check the read path is
@@ -370,7 +384,7 @@ updated (2026-10-05) to read via `Read-VaultSecret -NamePattern '*render.com*' -
 
 **2026-10-18: `render-services-table.ps1` moved to `automata-private\render.com\`**
 (mainframe -> automata merge) - edit it THERE; this repo no longer has a copy
-(it imports `vault-secret.psm1` by its mainframe absolute path, uptimerobot-account.ps1
+(it imports `windows/vault-secret.psm1` by its mainframe absolute path, uptimerobot-account.ps1
 style, like the neon/vercel/supabase tables). the render bulk tooling (this table +
 `render-quota.ps1`) now all lives under `automata-private\render.com\`.
 
@@ -434,14 +448,14 @@ foreach ($org in $orgs) {
 }
 ```
 **to get a project's DATABASE_URL** (common reason agents are looking at neon in the first place).
-⚠️ `neon-account.ps1 run <email> connection-string ...` does NOT work on this box — with the
+⚠️ `accounts/neon-account.ps1 run <email> connection-string ...` does NOT work on this box — with the
 broken pnpm `neonctl` shim it **hangs indefinitely with zero output** (2026-10-14: 240s, no
 stdout/stderr at all, not even a throw), so a `run` that "does nothing" is this, not a dead
 network. `current`/`use` still respond instantly (they only touch profile files). use the
 REST route below instead. also note `api-key.txt` no longer exists (2026-08-22 vault
 migration) — the key comes from the vault:
 ```powershell
-Import-Module "C:\Users\Admin\Downloads\mainframe\vault-secret.psm1" -Force
+Import-Module "C:\Users\Admin\Downloads\mainframe\windows\vault-secret.psm1" -Force
 $key = Read-VaultSecret -Email '<email>' -NamePattern 'console.neon.tech*' -ValueRegex 'napi_[A-Za-z0-9]+'
 $headers = @{ 'Authorization' = "Bearer $key"; 'Accept' = 'application/json' }
 $projectId = '<project-id>'
@@ -482,32 +496,32 @@ endpoints that do NOT exist: `/api/v2/orgs`, `/api/v2/users/me/orgs`, `/api/v2/u
 6. compute per project: `cu_h_used = compute_time_seconds / 3600`, `cu_h_left = (360000 - compute_time_seconds) / 3600`. status OVER >= 100%, LOW >= 85%, else OK.
 
 ### gotcha: native stderr aborts restore under Windows PowerShell 5.1
-`restore.ps1` sets `$ErrorActionPreference='Stop'`. In PS 5.1, ANY native command stderr line becomes an error record, and under 'Stop' that terminates the whole restore. Commands like `uv tool install` ("already installed"), `reg.exe import` ("The operation completed successfully."), and `git` (divergence hints) all write to stderr and silently killed the restore at those points. The fix is `Invoke-Native` helper (line 134): it runs the command with `$ErrorActionPreference='Continue'` temporarily and `2>&1 | Out-Host` so stderr lines are displayed but don't terminate. Wrap every new native-command call in `Invoke-Native` or the savedEap pattern, NOT bare `& cmd`. Checked call sites as of 2026-08-23: git, reg, go, winget, uv, pip are wrapped; robocopy and scoop/pnpm were empirically safe (their stderr didn't trip). If a future restore step aborts mid-way, check for a bare `& <native>` call and wrap it.
+`windows/restore.ps1` sets `$ErrorActionPreference='Stop'`. In PS 5.1, ANY native command stderr line becomes an error record, and under 'Stop' that terminates the whole restore. Commands like `uv tool install` ("already installed"), `reg.exe import` ("The operation completed successfully."), and `git` (divergence hints) all write to stderr and silently killed the restore at those points. The fix is `Invoke-Native` helper (line 134): it runs the command with `$ErrorActionPreference='Continue'` temporarily and `2>&1 | Out-Host` so stderr lines are displayed but don't terminate. Wrap every new native-command call in `Invoke-Native` or the savedEap pattern, NOT bare `& cmd`. Checked call sites as of 2026-08-23: git, reg, go, winget, uv, pip are wrapped; robocopy and scoop/pnpm were empirically safe (their stderr didn't trip). If a future restore step aborts mid-way, check for a bare `& <native>` call and wrap it.
 
 ### gotcha: mainframe had drifted back to opencode v1 (fixed 2026-10-07)
 three places still said `opencode` (v1) after we moved to **opencode2** (v2), and none of them error - they just quietly do the wrong thing:
 
-1. `scoop-allowed.json` listed `opencode`, not `opencode2`. `backup.ps1` filters the scoop export to the allowlist (`$allowed -contains $_.Name`) and only prints `Filtered to N allowed apps`, so with v2 installed and v1 listed, **the agent was being dropped from every backup** with no warning at all.
-2. `restore.ps1` `Install-OpencodePinned` defaulted to `$opencodeSpec = 'opencode'`, matched the scoopfile entry named `opencode`, and its `catch` **fell back silently to `install opencode`** - so a restore installed v1.18.34, which cannot read a v2 config. the fallback is gone: it now throws with the spec that failed (no second method pretending to be the first).
-3. `tool-secrets.manifest.json` had no entry for `{UserProfile}\.config\opencode`, which is where v2 keeps `plugins\`, `skills\`, `cli.json`, `opencode.jsonc`, `package.json`. restore would come back with v1 and none of the v2 settings.
+1. `manifests/scoop-allowed.json` listed `opencode`, not `opencode2`. `windows/backup.ps1` filters the scoop export to the allowlist (`$allowed -contains $_.Name`) and only prints `Filtered to N allowed apps`, so with v2 installed and v1 listed, **the agent was being dropped from every backup** with no warning at all.
+2. `windows/restore.ps1` `Install-OpencodePinned` defaulted to `$opencodeSpec = 'opencode'`, matched the scoopfile entry named `opencode`, and its `catch` **fell back silently to `install opencode`** - so a restore installed v1.18.34, which cannot read a v2 config. the fallback is gone: it now throws with the spec that failed (no second method pretending to be the first).
+3. `manifests/tool-secrets.manifest.json` had no entry for `{UserProfile}\.config\opencode`, which is where v2 keeps `plugins\`, `skills\`, `cli.json`, `opencode.jsonc`, `package.json`. restore would come back with v1 and none of the v2 settings.
 
-also: `restore.ps1` re-applies a local fork patcher (`github.com\anomalyco\opencode\opencode-patcher.ps1`) that rebuilds the **v1** fork for bash pipe hang #44601. running it against a v2 install overwrites v2 with a v1 fork build, so it now checks `scoop\apps\opencode2\current` and skips with a loud warning instead.
+also: `windows/restore.ps1` re-applies a local fork patcher (`github.com\anomalyco\opencode\opencode-patcher.ps1`) that rebuilds the **v1** fork for bash pipe hang #44601. running it against a v2 install overwrites v2 with a v1 fork build, so it now checks `scoop\apps\opencode2\current` and skips with a loud warning instead.
 
 v1 and v2 are mutually exclusive (scoop's own notes: uninstall `opencode` before installing `opencode2`), so the allowlist must name exactly one of them. when the agent major version changes again, these four are the places to touch: allowlist, pinned install spec + scoopfile lookup, secrets manifest path, fork patcher guard.
 
 ### gotcha: Scoop ignores system 7-Zip unless configured
-the bootstrap installs 7-Zip through winget so `boot.ps1` can unpack the restore archives, but Scoop's archive extractor uses its own managed 7zip helper by default and does not use `7z.exe` from `PATH`. installing a `.tgz` package such as `versions/opencode2` before configuring `use_external_7zip` can pass an empty executable path and fail with `Cannot validate argument on parameter 'FilePath'`. `restore.ps1` now verifies the external `7z` command and runs `scoop config use_external_7zip true` before the pinned install.
+the bootstrap installs 7-Zip through winget so `boot.ps1` can unpack the restore archives, but Scoop's archive extractor uses its own managed 7zip helper by default and does not use `7z.exe` from `PATH`. installing a `.tgz` package such as `versions/opencode2` before configuring `use_external_7zip` can pass an empty executable path and fail with `Cannot validate argument on parameter 'FilePath'`. `windows/restore.ps1` now verifies the external `7z` command and runs `scoop config use_external_7zip true` before the pinned install.
 
 ### gotcha: neonctl is currently broken on windows under pnpm
-`neon-account.ps1 run`/`projects-json` still invoke `neonctl` via `& $neon.Source ...`. if neonctl was installed through `pnpm add -g neonctl`, only a `/bin/sh` shell shim is left at `scoop\apps\pnpm\current\bin\neonctl` with no matching `neonctl.cmd`/`neonctl.ps1`, pointing at a `global/.../node_modules/neonctl/dist/cli.js` that may not exist. under pwsh on windows these shims can't run, so the scripts silently fail. sanity-check: if a script reports 0 projects for every account, the neonctl call almost certainly failed.
+`accounts/neon-account.ps1 run`/`projects-json` still invoke `neonctl` via `& $neon.Source ...`. if neonctl was installed through `pnpm add -g neonctl`, only a `/bin/sh` shell shim is left at `scoop\apps\pnpm\current\bin\neonctl` with no matching `neonctl.cmd`/`neonctl.ps1`, pointing at a `global/.../node_modules/neonctl/dist/cli.js` that may not exist. under pwsh on windows these shims can't run, so the scripts silently fail. sanity-check: if a script reports 0 projects for every account, the neonctl call almost certainly failed.
 
-both `neon-hours-table.ps1` and `neon-projects-table.ps1` were migrated to the rest api (above) and no longer require neonctl. `neon-account.ps1 run`/`projects-json` still use neonctl — to migrate when needed, or fix neonctl: `pnpm add -g neonctl` plus verifying a windows-runnable `neonctl.cmd` exists.
+both `neon-hours-table.ps1` and `neon-projects-table.ps1` were migrated to the rest api (above) and no longer require neonctl. `accounts/neon-account.ps1 run`/`projects-json` still use neonctl — to migrate when needed, or fix neonctl: `pnpm add -g neonctl` plus verifying a windows-runnable `neonctl.cmd` exists.
 
 ## vercel: bulk scripts (moved to automata-private 2026-10-08)
 
 **2026-10-08: `vercel-usage-table.ps1` moved to `automata-private\vercel.com\`**
 (mainframe -> automata merge) - edit it THERE; this repo no longer has a copy
-(it imports `vault-secret.psm1` by its mainframe absolute path,
+(it imports `windows/vault-secret.psm1` by its mainframe absolute path,
 uptimerobot-account.ps1 style). global AGENTS rule 22 was repointed in the same
 change. the quota + BLOCKED-workflow sections below still describe it.
 
@@ -561,9 +575,9 @@ to get concrete numeric usage on Hobby (CPU-h, GB-h, invocations) — open the V
 ### how the script queries vercel (no vercel CLI dependency)
 `vercel-usage-table.ps1` calls the REST API directly (no vercel CLI). the vercel CLI can be broken on windows under pnpm — same shim issue as neonctl — only a stale `/bin/sh` shim remains pointing at a non-existent `vc.js`. the script does NOT depend on the CLI.
 
-**fix for the broken CLI (2026-10-06):** `pnpm add -g vercel` reinstalls it in ~20s (62.2.0, shim at `%USERPROFILE%\.pnpm-global\bin\vercel.ps1`, package under `scoop\apps\pnpm\current\global\v11`). verify by artifact + `vercel --version`, not exit code: a stale shim prints `Cannot find module '.../node_modules/vercel/dist/vc.js'` and exits 1. needed whenever `vercel-account.ps1 run ... <cmd>` is used (deploy, `git connect`, `inspect`) — `vercel-usage-table.ps1` never needs the CLI.
+**fix for the broken CLI (2026-10-06):** `pnpm add -g vercel` reinstalls it in ~20s (62.2.0, shim at `%USERPROFILE%\.pnpm-global\bin\vercel.ps1`, package under `scoop\apps\pnpm\current\global\v11`). verify by artifact + `vercel --version`, not exit code: a stale shim prints `Cannot find module '.../node_modules/vercel/dist/vc.js'` and exits 1. needed whenever `accounts/vercel-account.ps1 run ... <cmd>` is used (deploy, `git connect`, `inspect`) — `vercel-usage-table.ps1` never needs the CLI.
 
-**bare posix-only shim in scoop's pnpm bin hangs the CLI (2026-10-15):** `scoop\apps\pnpm\current\bin\vercel` was a 580-byte extensionless `/bin/sh` shim (pnpm 12 puts global bins there) and PATH resolves it BEFORE `%USERPROFILE%\.pnpm-global\bin\vercel.ps1` — `Get-Command vercel` returns the bare file, running it HANGS with zero output, so `vercel-account.ps1 run ... deploy --prod --yes` silently does nothing (no deployment created, empty stdout) while REST subcommands (`api`, `deployments`) keep working through the helper's direct REST path. an EMPTY `run` output is this trap, not auth. fix: `Rename-Item <scoop pnpm bin>\vercel vercel.posix-only-shim.bak` (reversible) so resolution falls through to the real `.ps1`/`.cmd` shims, then `vercel --version` must print before deploying. the same bare-only files existed there for `gws`, `neon`, `neonctl`, `vc` — treat any extensionless file in that bin dir as broken on windows (`Get-ChildItem <dir> | Where-Object { -not $_.Name.Contains('.') }`).
+**bare posix-only shim in scoop's pnpm bin hangs the CLI (2026-10-15):** `scoop\apps\pnpm\current\bin\vercel` was a 580-byte extensionless `/bin/sh` shim (pnpm 12 puts global bins there) and PATH resolves it BEFORE `%USERPROFILE%\.pnpm-global\bin\vercel.ps1` — `Get-Command vercel` returns the bare file, running it HANGS with zero output, so `accounts/vercel-account.ps1 run ... deploy --prod --yes` silently does nothing (no deployment created, empty stdout) while REST subcommands (`api`, `deployments`) keep working through the helper's direct REST path. an EMPTY `run` output is this trap, not auth. fix: `Rename-Item <scoop pnpm bin>\vercel vercel.posix-only-shim.bak` (reversible) so resolution falls through to the real `.ps1`/`.cmd` shims, then `vercel --version` must print before deploying. the same bare-only files existed there for `gws`, `neon`, `neonctl`, `vc` — treat any extensionless file in that bin dir as broken on windows (`Get-ChildItem <dir> | Where-Object { -not $_.Name.Contains('.') }`).
 
 **pnpm global install gotchas (2026-10-06, cost an hour):** the global project (`scoop\apps\pnpm\current\global\v11`) is a single package.json/workspace, so:
 - `pnpm add -g <one-pkg>` **replaces the whole dependency set** — every other global CLI's files disappear while its shims stay in `%USERPROFILE%\.pnpm-global\bin`, leaving dead shims that print `Cannot find module '.../global/v11/<hash>/node_modules/<pkg>/...'`.
@@ -628,7 +642,7 @@ installs write NO install.json at all, so no install.json = symmetric.
   [ahead 1]). both clones got `git config pull.rebase false` - a plain rebase-pull refuses
   the dirty tree ("cannot pull with rebase: You have unstaged changes").
 
-**2026-09-01 vault migration:** tokens are no longer stored in `token.txt` files in the profile dir. the script now imports `vault-secret.psm1` and calls `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'` per profile. profiles without a vault entry (e.g. the `daffodilresourcehub-8188@vercel` stub) are skipped silently.
+**2026-09-01 vault migration:** tokens are no longer stored in `token.txt` files in the profile dir. the script now imports `windows/vault-secret.psm1` and calls `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'` per profile. profiles without a vault entry (e.g. the `daffodilresourcehub-8188@vercel` stub) are skipped silently.
 
 rest api flow:
 1. get the token from the vault: `Read-VaultSecret -Email $email -NamePattern 'vercel.com*' -ValueRegex 'vcp_[A-Za-z0-9]+'`
@@ -667,7 +681,7 @@ status is reported as `<userStatus>/<teamBlocked>` per team, and per-project `re
 > - if a task needs durable profile-side changes (passwords, bookmarks, settings), make them in real Edge directly — never inside the agent-browser throwaway copy.
 > - there is no way to "resume" a previous run's profile; each `run` is a fresh VSS clone. design automation accordingly (login inside the same `run` that does the work, or use `agent-browser-auth save`/`state save` for cross-run session state in `~/.agent-browser/`, not the profile dir).
 
-context: agent-browser is a browser automation service. it has its own per-email profile directory at `%APPDATA%\mainframe\accounts\agent-browser\<email>\` and its own helper `<repo>\agent-browser-account.ps1`. **the email-keyed dir IS Chromium's `--user-data-dir`** (contains `Default/` plus sibling state files like `Local State`, `extensions_crx_cache`, `component_crx_cache`, etc., mirroring real Edge's User Data layout) — no `chrome-profile` subdir.
+context: agent-browser is a browser automation service. it has its own per-email profile directory at `%APPDATA%\mainframe\accounts\agent-browser\<email>\` and its own helper `<repo>\accounts\agent-browser-account.ps1`. **the email-keyed dir IS Chromium's `--user-data-dir`** (contains `Default/` plus sibling state files like `Local State`, `extensions_crx_cache`, `component_crx_cache`, etc., mirroring real Edge's User Data layout) — no `chrome-profile` subdir.
 
 ### prerequisites
 - agent-browser installed: `npm i -g agent-browser && agent-browser install`
@@ -675,7 +689,7 @@ context: agent-browser is a browser automation service. it has its own per-email
 - an elevated shell with VSS enabled for full-profile sync (see below)
 
 ### the helper already does everything — do not set env vars manually
-`agent-browser-account.ps1` injects both `--profile` and `--executable-path` flags per invocation. in particular `run`/`login`/`exec`/`close`:
+`accounts/agent-browser-account.ps1` injects both `--profile` and `--executable-path` flags per invocation. in particular `run`/`login`/`exec`/`close`:
 - inject `--profile %APPDATA%\mainframe\accounts\agent-browser\<email>` (the email-keyed dir directly, NOT a `chrome-profile` subdir)
 - inject `--executable-path` pointing at the installed Edge/Chromium binary (default `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`)
 - `run`/`login` call `agent-browser open` — omit `-Url` to default to `https://example.com`. do NOT pass `about:blank` (vanilla) — that triggers agent-browser's "relaunched browser" bug which corrupts state
@@ -683,16 +697,16 @@ context: agent-browser is a browser automation service. it has its own per-email
 
 so the correct way to launch is:
 ```
-<repo>\agent-browser-account.ps1 run   <email>                                 # defaults to https://example.com
-<repo>\agent-browser-account.ps1 run   <email> -Url https://example.com
-<repo>\agent-browser-account.ps1 exec   <email> snapshot -i
-<repo>\agent-browser-account.ps1 exec   <email> get url
-<repo>\agent-browser-account.ps1 close  <email>
+<repo>\accounts\agent-browser-account.ps1 run   <email>                                 # defaults to https://example.com
+<repo>\accounts\agent-browser-account.ps1 run   <email> -Url https://example.com
+<repo>\accounts\agent-browser-account.ps1 exec   <email> snapshot -i
+<repo>\accounts\agent-browser-account.ps1 exec   <email> get url
+<repo>\accounts\agent-browser-account.ps1 close  <email>
 ```
 `exec` passes any agent-browser subcommand against the persistent profile (snapshot, get, click, fill, ...).
 
 ### do NOT do these (broke things once)
-1. do not `Stop-Process msedge` / `Stop-Process chrome` to "clean up" — it kills the user's regular browser. use `agent-browser-account.ps1 close` or `agent-browser close --all` (that stops only the daemon agent-browser spawned, not the user's personal Edge).
+1. do not `Stop-Process msedge` / `Stop-Process chrome` to "clean up" — it kills the user's regular browser. use `accounts/agent-browser-account.ps1 close` or `agent-browser close --all` (that stops only the daemon agent-browser spawned, not the user's personal Edge).
 2. do not set `AGENT_BROWSER_PROFILE` / `AGENT_BROWSER_EXECUTABLE_PATH` at the User environment-scope expecting it to "always launch with profile". the helper re-derives these per invocation and hand-setting them silently breaks sessions. if a one-off run without the helper is needed, set them in the current shell only (`$env:...`) and clear them afterwards.
 3. do not pass an arbitrary `--profile` directory to raw `agent-browser`. always use the helper.
 
@@ -701,24 +715,24 @@ so the correct way to launch is:
 for 24/7 CDP use against a logged-in Edge profile without losing extensions or corrupting the user's real Edge install, the helper **auto-copies the real Edge User Data dir into the mainframe profile dir before every spawn**. this gives a fresh throwaway copy per session — whatever CDP prunes during the session stays in the copy, never touching real Edge.
 
 how it works:
-- the `Sync-EdgeProfileToMainframe` function (inlined in `agent-browser-account.ps1`, also exists as standalone `edge-cdp-profile-sync.ps1`) runs **before every `run`/`login`/`exec` spawn**.
-- robocopy `/MIR` mirrors the real Edge User Data dir → `%APPDATA%\mainframe\accounts\agent-browser\<email>\`, using an exclude list like `backup.ps1`'s (caches, telemetry, edge component dirs, isolated leveldb blobs, history, db temps). `Local State` (cookie master key), `Default\Extensions`, `Default\Network\Cookies`, `Default\Preferences` (install signatures) all come across — **no files skipped due to locks**.
+- the `Sync-EdgeProfileToMainframe` function (inlined in `accounts/agent-browser-account.ps1`, also exists as standalone `windows/edge-cdp-profile-sync.ps1`) runs **before every `run`/`login`/`exec` spawn**.
+- robocopy `/MIR` mirrors the real Edge User Data dir → `%APPDATA%\mainframe\accounts\agent-browser\<email>\`, using an exclude list like `windows/backup.ps1`'s (caches, telemetry, edge component dirs, isolated leveldb blobs, history, db temps). `Local State` (cookie master key), `Default\Extensions`, `Default\Network\Cookies`, `Default\Preferences` (install signatures) all come across — **no files skipped due to locks**.
 - `mainframe-profile.json` (extensions list) and session state dirs (`mainframe-sessions`, `sessions`) are **preserved across the /MIR** — staged to temp, then restored.
 - **VSS snapshot path (the only path, needs admin)**: a Volume Shadow Copy of the system drive is taken via `Win32_ShadowCopy.Create` (`ClientAccessible` context), then a directory symlink is created with `cmd /c mklink /d <tmp> \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopyN\` so robocopy can read the shadow through a normal Win32 path. this lets robocopy copy **files Edge holds with exclusive write handles** (Cookies, Local State, Preferences, Session Storage) without closing real Edge. shadow is dropped immediately after sync (post-success or post-failure). there is **no fallback** — if VSS shadow creation or `mklink` fails (typically "shell not elevated" or VSS disabled), `Sync-EdgeProfileToMainframe` throws and the spawn aborts. kill-real-Edge was intentionally removed as a fallback because a non-VSS robocopy against the live path silently skips locked files (Cookies, Local State, Preferences, Session Storage) and produces a corrupt profile.
 - copy size is ~370 MB (cache dirs excluded). first sync takes ~30s with VSS; subsequent `/MIR` syncs are delta-fast since robocopy only re-copies changed files.
 
 **prereq: an elevated shell with VSS enabled.** sync (and therefore every `run`/`login`/`exec`) will throw if launched non-elevated or with VSS unavailable — there is no Edge-kill fallback to silently keep going.
 ```
-<repo>\agent-browser-account.ps1 run   <email>                                 # defaults to https://example.com
-<repo>\agent-browser-account.ps1 run   <email> -Url https://example.com
-<repo>\agent-browser-account.ps1 exec  <email> snapshot -i
+<repo>\accounts\agent-browser-account.ps1 run   <email>                                 # defaults to https://example.com
+<repo>\accounts\agent-browser-account.ps1 run   <email> -Url https://example.com
+<repo>\accounts\agent-browser-account.ps1 exec  <email> snapshot -i
 ```
 
 caveat: during any given CDP session, Edge's dev-mode install-signature verification prunes Microsoft-bundled component extensions and a handful of user-installed ones. the **next session's sync replaces the pruned copy with a fresh one from real Edge**, so the pruned set never accumulates and never reaches the user's real Edge profile.
 
 manual sync (one-off, e.g. testing or seeding a new profile):
 ```
-<repo>\edge-cdp-profile-sync.ps1 -Email <email>
+<repo>\windows\edge-cdp-profile-sync.ps1 -Email <email>
 ```
 
 ### stale DevToolsActivePort / SingletonLock
@@ -730,7 +744,7 @@ Remove-Item "$env:APPDATA\mainframe\accounts\agent-browser\<email>\SingletonLock
 then retry. a successful launch will recreate both files.
 
 ### env helper (for ad-hoc, not permanent)
-`agent-browser-account.ps1 env [email]` prints the exact env vars to set for that profile (`AGENT_BROWSER_PROFILE`, `MAINFRAME_AGENT_BROWSER_EMAIL`, `MAINFRAME_AGENT_BROWSER_RESTORE`, `AGENT_BROWSER_RESTORE`). use these only in the current shell when scripting against raw `agent-browser` and skip the helper. do NOT persist them at user/machine env scope.
+`accounts/agent-browser-account.ps1 env [email]` prints the exact env vars to set for that profile (`AGENT_BROWSER_PROFILE`, `MAINFRAME_AGENT_BROWSER_EMAIL`, `MAINFRAME_AGENT_BROWSER_RESTORE`, `AGENT_BROWSER_RESTORE`). use these only in the current shell when scripting against raw `agent-browser` and skip the helper. do NOT persist them at user/machine env scope.
 
 ### spawning from an AI agent's bash/shell tool (detached workflow)
 **known opencode bug:** calling `agent-browser open` (or the helper's `run`/`login`/`exec`) from an AI agent's bash tool polls forever — the browser launches but the tool never returns control. `exec` is especially bad because it re-runs VSS sync (killing any already-running session) AND polls. **never call `run`/`login`/`exec`/`open` directly from the agent bash tool.**
@@ -740,7 +754,7 @@ the working pattern is a **3-step detached workflow**: sync externally → spawn
 #### step 1: sync the profile (standalone, returns cleanly)
 run the standalone sync script directly from the agent bash tool — it does VSS shadow + robocopy + extension repair, then returns. no browser is spawned, no polling:
 ```
-& "<repo>\edge-cdp-profile-sync.ps1" -Email <email>
+& "<repo>\windows\edge-cdp-profile-sync.ps1" -Email <email>
 ```
 this is safe to call from the agent bash tool. it refreshes the profile copy from real Edge. skip if a recent sync already happened (e.g. a previous `run` in the same hour).
 
@@ -810,22 +824,22 @@ this stops only the agent-browser-spawned Edge daemon, not the user's personal E
 - **browser didn't launch**: check if a previous Edge session is still holding the profile dir. run `agent-browser close --all` first, clean stale locks, then retry.
 
 #### agent-browser exec hang + @e11 quoting fix (2026-09-12)
-- **opencode bash hang**: `agent-browser-account.ps1 exec` directly did `& $agentBrowser @fullArgs` in-process. opencode's bash tool waits for pipes to close, so `open`/`snapshot` poll forever (120s timeout). fix: `exec` now detects agent bash (`$env:OPENCODE`/`$env:AGENT`) and routes through `Invoke-AgentBrowserDetachedOutput` (`Start-Process pwsh -WindowStyle Hidden` + temp file poll, 40s). `exec get url` now returns in `0.7s` vs `120s`.
+- **opencode bash hang**: `accounts/agent-browser-account.ps1 exec` directly did `& $agentBrowser @fullArgs` in-process. opencode's bash tool waits for pipes to close, so `open`/`snapshot` poll forever (120s timeout). fix: `exec` now detects agent bash (`$env:OPENCODE`/`$env:AGENT`) and routes through `Invoke-AgentBrowserDetachedOutput` (`Start-Process pwsh -WindowStyle Hidden` + temp file poll, 40s). `exec get url` now returns in `0.7s` vs `120s`.
 - **VSS kill on exec**: `exec` previously always ran `Sync-EdgeProfileToMainframe` (VSS shadow + robocopy) which `/MIR`-killed any live daemon (the `AGENTS.md` 3-step workflow's already-running browser). fix: `exec` now checks `~/.agent-browser/default.pid` + `Get-Process` — if daemon running, skips VSS sync (`daemon running — skipping VSS sync`) and preserves the session.
-- **powershell splat `@e11`**: `click @e11` without quotes is parsed as array splat (`@e11` → variable `e11`), `exec` got `Missing arguments for: click`. fix: `exec` auto-quotes bare `@e\d+` refs (`"'$_'"` in `$cmdArgs` pipeline) so `exec click @e11` and `exec click "@e11"` both work. verified `account-contract.ps1` still `PASS`.
+- **powershell splat `@e11`**: `click @e11` without quotes is parsed as array splat (`@e11` → variable `e11`), `exec` got `Missing arguments for: click`. fix: `exec` auto-quotes bare `@e\d+` refs (`"'$_'"` in `$cmdArgs` pipeline) so `exec click @e11` and `exec click "@e11"` both work. verified `accounts/account-contract.ps1` still `PASS`.
 - **`-Extension`/`--extension` ghosts STORE extensions into never-loading loc=8 (2026-09-13)**: loading a real store-installed extension (e.g. Bitwarden, id `jbkfoedolllekgbhcbcoahefnbanhhlh`) via `-Extension <unpacked path>` on a synced-edge spawn does NOT work as intended: agent-browser never appends `--load-extension=` to the `msedge.exe` command line (verified: absent), yet Edge records the entry as `location=8` (kCommandLine) in the copy's `Secure Preferences`. `InstalledLoader` skips kCommandLine entries when the flag isn't present (see "unpacked extensions — the --load-extension bypass" below) → the extension vanishes from EVERY later session, even after dropping `-Extension`, because the loc=8 ghost persists in the copy's prefs and robocopy `/MIR` re-copies it from real Edge prefs only if real Edge itself rewrites the entry. worse: the helper caches the extension list in `mainframe-profile.json` and re-injects `--extension` on later runs with no `-Extension` flag. symptom: "all extensions are there except the one i asked for". fix (verified): `agent-browser close --all`; kill stray agent-browser msedge + node daemon procs; set `extensions: []` in `mainframe-profile.json`; transplant the real Edge `extensions.settings.<id>` object (valid mac, loc=1) into the copy's `Secure Preferences`; relaunch WITHOUT `-Extension` — store extensions from the synced copy load natively (sig repair in edge-cdp-profile-sync keeps them alive). never pass `-Extension` for anything already installed in real Edge.
-- **post-open double Edge launch diagnosis (2026-09-20)**: if a synced `agent-browser-account.ps1 run` window appears healthy and then closes/reopens about 10–11 seconds later, this is an agent-browser/helper daemon race, not Edge repairing profile corruption. Reproduction with the active email-keyed profile: two distinct top-level `msedge.exe` processes were observed, each launched by a separate `agent-browser-win32-x64.exe`; no matching Edge crash report or Windows Application Error event existed. The helper's `Sync-EdgeProfileToMainframe` calls `agent-browser close --all`, performs VSS/Robocopy, clears daemon sidecars, and immediately starts `open`; this shutdown/startup transition can leave the shared default namespace in a relaunch state. A direct `agent-browser` launch against the same profile, bypassing the helper sync, launched only once. Do not describe this symptom as Edge self-healing. Installed `agent-browser` was upgraded from `0.34.0` to `0.38.1` on this machine; after closing the old version-mismatched daemon and relaunching, one top-level Edge process remained and the session was reachable. If the symptom returns, check the daemon version and run `agent-browser doctor --json` before changing the Edge profile.
+- **post-open double Edge launch diagnosis (2026-09-20)**: if a synced `accounts/agent-browser-account.ps1 run` window appears healthy and then closes/reopens about 10–11 seconds later, this is an agent-browser/helper daemon race, not Edge repairing profile corruption. Reproduction with the active email-keyed profile: two distinct top-level `msedge.exe` processes were observed, each launched by a separate `agent-browser-win32-x64.exe`; no matching Edge crash report or Windows Application Error event existed. The helper's `Sync-EdgeProfileToMainframe` calls `agent-browser close --all`, performs VSS/Robocopy, clears daemon sidecars, and immediately starts `open`; this shutdown/startup transition can leave the shared default namespace in a relaunch state. A direct `agent-browser` launch against the same profile, bypassing the helper sync, launched only once. Do not describe this symptom as Edge self-healing. Installed `agent-browser` was upgraded from `0.34.0` to `0.38.1` on this machine; after closing the old version-mismatched daemon and relaunching, one top-level Edge process remained and the session was reachable. If the symptom returns, check the daemon version and run `agent-browser doctor --json` before changing the Edge profile.
 - **Edge 153 interaction hang during Google paste (2026-09-20)**: pasting text into the Google sign-in email field caused the agent-browser window to disappear because Edge itself hung and Windows terminated it. Event Viewer recorded `Application Hang` event 1002 for `msedge.exe` version `153.0.4234.32` at the reproduction time; there was no agent-browser crash report. Microsoft documents a known Edge 153 issue where some web applications become unresponsive during user interaction, and the Stable release notes identify the fix in `153.0.4234.46` (later `.48` was available). When this symptom occurs, check `msedge.exe`'s exact version and update Edge before debugging agent-browser, extensions, or the synced profile. The helper now explicitly launches the installed fixed `153.0.4234.48` executable for agent-browser only; it fails loudly if that executable is missing. Normal system Edge remains unchanged. If neither `.48` nor Edge 152 is available, install a fixed build before retrying the paste workflow.
-- **executable pin requires a fresh daemon (2026-09-20)**: agent-browser retains browser launch configuration in its shared daemon. Updating `agent-browser-account.ps1` to point at Edge `.48` does not migrate an already-running default daemon; that daemon can continue launching the old root `msedge.exe` (`153.0.4234.32`). Before validating the pin after a helper change, run `agent-browser close --all`, wait for the old daemon to exit, then launch the helper. Verify the top-level Edge command line contains `Application\153.0.4234.48\msedge.exe`; do not infer the version from the helper source alone.
+- **executable pin requires a fresh daemon (2026-09-20)**: agent-browser retains browser launch configuration in its shared daemon. Updating `accounts/agent-browser-account.ps1` to point at Edge `.48` does not migrate an already-running default daemon; that daemon can continue launching the old root `msedge.exe` (`153.0.4234.32`). Before validating the pin after a helper change, run `agent-browser close --all`, wait for the old daemon to exit, then launch the helper. Verify the top-level Edge command line contains `Application\153.0.4234.48\msedge.exe`; do not infer the version from the helper source alone.
 - **daemon config mismatch = 1-time-use spawn**: after killing/re-patching a session, the FIRST `run`/`exec` often dies with "Daemon version mismatch detected, restarting… A daemon for session 'default' started concurrently with different daemon configuration. Retry the command". this is expected — run the same command once more; the second spawn picks up the new config.
 
 ### which account to use
 check active first:
 ```
-<repo>\agent-browser-account.ps1 current
-<repo>\agent-browser-account.ps1 status-all
+<repo>\accounts\agent-browser-account.ps1 current
+<repo>\accounts\agent-browser-account.ps1 status-all
 ```
-switch with `agent-browser-account.ps1 use <email>`. rules from the tool account workflow still apply — every supported agent-browser profile is keyed by account email; if you cannot detect email after login, fail/ask instead of saving a username/label fallback.
+switch with `accounts/agent-browser-account.ps1 use <email>`. rules from the tool account workflow still apply — every supported agent-browser profile is keyed by account email; if you cannot detect email after login, fail/ask instead of saving a username/label fallback.
 
 - no live-edge / CDP-attach mode. the only mode is sync-then-spawn (above). `live-edge`/`live-edge-off`/`liveEdgeProfile` were removed because Edge's `--remote-debugging-port` always trips dev-mode extension signature verification, pruning component extensions even on a junctioned user-data-dir, and once even pruned the real Edge profile. the sync-then-spawn workaround (fresh throwaway copy per session) avoids that entirely. CDP-attach's other appeal was reusing an active Google sign-in to dodge "This browser or app may not be secure".
 - **Google sign-in under CDP requires stealth flags.** Empirically verified: even with the synced real-Edge profile (which carries the live Google cookies via VSS), navigating to `myaccount.google.com` from a freshly synced automation-Edge spawn returns "This browser or app may not be secure. Try using a different browser." — the original assumption that "the copied profile retains the real Edge cookies, so Google sessions still work" is **wrong**. Google fingerprints the CDP-controlled browser via `navigator.webdriver=true` and the Blink `AutomationControlled` feature, then refuses to honor the cookies. **Fix:** `AGENT_BROWSER_ARGS` is set to `--disable-blink-features=AutomationControlled,--disable-features=AutomationControlled` at **User env scope** so every `agent-browser` invocation (raw or via the helper) gets stealth by default. The helper also re-injects these flags on every spawn as a safety net. With those flags, Google sign-in works inside the synced profile. **Do not remove those flags** (neither the User env var nor the helper injection) or Google sign-in breaks. Other sites (GitHub, etc.) work without the stealth flags, but Google is strict and needs them.
@@ -836,10 +850,10 @@ a refresher/notifier can need a logged-in session for a site but should not carr
 
 ### commands
 ```
-<repo>\agent-browser-account.ps1 cookies save   <email> [-Domains <site.com>] [-FromSession]
-<repo>\agent-browser-account.ps1 cookies run    <email> [-Url https://<site>]
-<repo>\agent-browser-account.ps1 cookies verify <email> [-Url ...]   # headless, prints VERDICT
-<repo>\agent-browser-account.ps1 cookies status <email>
+<repo>\accounts\agent-browser-account.ps1 cookies save   <email> [-Domains <site.com>] [-FromSession]
+<repo>\accounts\agent-browser-account.ps1 cookies run    <email> [-Url https://<site>]
+<repo>\accounts\agent-browser-account.ps1 cookies verify <email> [-Url ...]   # headless, prints VERDICT
+<repo>\accounts\agent-browser-account.ps1 cookies status <email>
 ```
 - `save` — exports cookies for the domains from the REAL-EDGE-synced profile via VSS (needs one elevated run), or from the live agent-browser session with `-FromSession` (no sync — capture right after a manual login inside agent-browser). export → `%APPDATA%\mainframe\accounts\agent-browser\cookies\<email>.cookies.json` + `.meta.json` sidecar. profile is keyed by email; `cookies-lite\<email>\` is the throwaway profile dir.
 - `run` — spawns a headed window with cookies injected and the target URL open (meant for manual/refresher use).
@@ -867,7 +881,7 @@ other machine it's installed on) over any internet connection - no port forwardi
 different wifi/networks. installed via scoop (`extras/tailscale`, MSI-extracted); the `Tailscale`
 windows service is `Automatic` and runs `<scoop>\apps\tailscale\current\tailscaled.exe`
 (substitute the scoop root path if different).
-helper: `<repo>\tailscale-account.ps1` (contract PASS).
+helper: `<repo>\accounts\tailscale-account.ps1` (contract PASS).
 **vault-native authkey (2026-09-01)**: the reusable auth key is stored in the
 Bitwarden item `console.tailscale.com` notes under the `Auth keys` header (same item
 that holds the oauth client secret), keyed by profile email. `key-add` writes the
@@ -889,15 +903,15 @@ on disk — that is backup/restore state, not a vault secret.
 
 ### usage
 ```
-<repo>\tailscale-account.ps1 status-all
-<repo>\tailscale-account.ps1 status [email]
-<repo>\tailscale-account.ps1 run -- <tailscale args>
-<repo>\tailscale-account.ps1 ssh <email> <user>@<tailnet-host> [cmd]
-<repo>\tailscale-account.ps1 ip | peers | nodes
-<repo>\tailscale-account.ps1 up | down | login <email> | logout [email]
-<repo>\tailscale-account.ps1 key-add <email> <tskey-...>
-<repo>\tailscale-account.ps1 provision <email> <hostname>
-<repo>\tailscale-account.ps1 backup <email> | restore <email>
+<repo>\accounts\tailscale-account.ps1 status-all
+<repo>\accounts\tailscale-account.ps1 status [email]
+<repo>\accounts\tailscale-account.ps1 run -- <tailscale args>
+<repo>\accounts\tailscale-account.ps1 ssh <email> <user>@<tailnet-host> [cmd]
+<repo>\accounts\tailscale-account.ps1 ip | peers | nodes
+<repo>\accounts\tailscale-account.ps1 up | down | login <email> | logout [email]
+<repo>\accounts\tailscale-account.ps1 key-add <email> <tskey-...>
+<repo>\accounts\tailscale-account.ps1 provision <email> <hostname>
+<repo>\accounts\tailscale-account.ps1 backup <email> | restore <email>
 ```
 `run --` proxies any tailscale cli call; `ssh` resolves the peer to its 100.x IP and uses
 OpenSSH with the key named by `$env:TAILSCALE_SSH_KEY_NAME` (default `id_ed25519`,
@@ -927,11 +941,11 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 ### fleet workflow (N pcs, all in one tailnet, mainframe backup/restore)
 1. **once per tailnet**: generate ONE *reusable* auth key in the admin console
    (Settings > Keys > Auth keys > Generate > Reusable ON, Ephemeral OFF) and store it:
-   `tailscale-account.ps1 key-add <email> tskey-...`
+   `accounts/tailscale-account.ps1 key-add <email> tskey-...`
    → saved vault-native to the Bitwarden item `console.tailscale.com` notes under the
    `Auth keys` header (the same item that holds the oauth client secret). a legacy
    `authkey.txt` copy is also written to the profile dir for backward compat, but the
-   vault is the source of truth. mainframe `backup.ps1` already snapshots
+   vault is the source of truth. mainframe `windows/backup.ps1` already snapshots
    `%APPDATA%\mainframe\accounts\` and the vault travels via bitwarden, so the key is
    safe either way. (auth keys max 90-day expiry — rotation only affects NEW joins,
    existing nodes keep working; regenerate + `key-add` once a year, or store a
@@ -939,10 +953,10 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
    API instead.)
 2. **on any new pc**: `scoop install tailscale` (service auto-registers) → restore the
    mainframe backup (or copy just that profile dir) →
-   `tailscale-account.ps1 provision <email> <hostname>` → joins the tailnet as its OWN
+   `accounts/tailscale-account.ps1 provision <email> <hostname>` → joins the tailnet as its OWN
    node (own 100.x IP, `--unattended --auto-update`), no browser, no per-machine key.
    provision reads the auth key from the vault (falls back to the legacy authkey.txt).
-   check it: `tailscale-account.ps1 nodes` or `status-all`.
+   check it: `accounts/tailscale-account.ps1 nodes` or `status-all`.
 3. **identity migration (same node on another machine)**: `backup <email>` on the source
    machine (snapshots `tailscaled.state` into the profile dir) → copy profile dir →
    `restore <email>` on the target + restart Tailscale service → target adopts that
@@ -981,7 +995,7 @@ StrictHostKeyChecking=accept-new) - tailscale ssh is only used when the ssh key 
 - **helper ssh from an agent shell**: `TAILSCALE_SSH_KEY_NAME` is read from the
   ENVIRONMENT - agent shells don't inherit it, so the helper falls back to `id_ed25519` and
   auth prompts/hangs. always set `$env:TAILSCALE_SSH_KEY_NAME = '<fleet key name>'` in the
-  same command before calling `tailscale-account.ps1 ssh ...`, and wrap the ssh in
+  same command before calling `accounts/tailscale-account.ps1 ssh ...`, and wrap the ssh in
   `Start-Job` + `Wait-Job -Timeout` so the shell tool returns even if ssh stalls.
 - **reusable remote script runner**: `automata-private\tailscale.com\remote-run.ps1` wraps the
   scp + ssh + Start-Job/Wait-Job pattern for running a local script on a remote tailnet
@@ -1018,12 +1032,12 @@ CLI copies plain folders, so there are **0 `.git` dirs** under `~/.agents/skills
 per-skill remote to recover from. The ONLY record of each skill's source + pinned version
 is `~/.agents\.skill-lock.json` (`skillFolderHash` = git tree SHA for github sources).
 
-- `backup.ps1` copies `.agents\skills` with `/XD .git` (defensive) **and
+- `windows/backup.ps1` copies `.agents\skills` with `/XD .git` (defensive) **and
   `/XD node_modules`** (reinstallable deps - reanimate's playwright/ffmpeg tree was
   ~99 MB of the 112.5 MB total; `reanimate\scripts\setup.sh` reinstalls it after a
   restore), **plus `~/.agents\.skill-lock.json`** itself (added 2026-11-02 - without it
   a restored box has folders nothing can update or restore-pin).
-- `restore.ps1` `Restore-AgentInstructionsAndSkills` restores the lock FIRST, then the
+- `windows/restore.ps1` `Restore-AgentInstructionsAndSkills` restores the lock FIRST, then the
   folders; a backup without the lock warns loud (pre-2026-11-02 archives).
 - recovery paths on a restored box: `automata-private\skills\restore-from-lock.ps1`
   (byte-exact re-pin from the recorded source+tree) and `npx skills update -g`
@@ -1048,7 +1062,7 @@ helper: `<repo>\..\automata-private\uptimerobot.com\uptimerobot-account.ps1` (mo
 
 ## firebase: account helper + vault on-demand
 
-helper: `<repo>\firebase-account.ps1` (contract PASS). profiles at
+helper: `<repo>\accounts\firebase-account.ps1` (contract PASS). profiles at
 `%APPDATA%\mainframe\accounts\firebase\<email>\` selected via `XDG_CONFIG_HOME`;
 the real CLI state is `configstore\firebase-tools.json` (the OAuth
 `access_token`/`refresh_token`, `expires_in 3599`, scopes
@@ -1060,7 +1074,7 @@ the real CLI state is `configstore\firebase-tools.json` (the OAuth
 
 - **vault on-demand (2026-09-11, symmetry with vercel/neon)**: the `firebase-tools.json`
   token is stored base64 under a `[firebase-tools.json]` header in the Bitwarden item
-  `firebase.google.com - <email>` via `vault-secret.psm1`. `login`/reauth/import-current
+  `firebase.google.com - <email>` via `windows/vault-secret.psm1`. `login`/reauth/import-current
   auto-write the vault; `use` auto-syncs from the vault when the local file is missing.
   `vault-push`/`vault-pull`/`vault-status` are the manual edges; `vault-status-all`
   reports synced/missing across profiles. helpers read vault only when the local
@@ -1083,7 +1097,7 @@ the real CLI state is `configstore\firebase-tools.json` (the OAuth
   quota, add the other account as Editor if needed (`SOLO_MUST_INVITE_OWNERS` blocks
   inviting a second OWNER on a solo-owner project).
 
-## huggingface: profile token layout (hf-account.ps1)
+## huggingface: profile token layout (accounts/hf-account.ps1)
 
 each `hf` profile dir (`%APPDATA%\mainframe\accounts\hf\<email>\`) can hold several token
 artifacts — know which is which before diagnosing `status-all`:
@@ -1123,7 +1137,7 @@ the `hf` CLI has no secrets/variables command; use the HF REST API with the main
 
 ## cron-job.org: job inventory
 
-helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile docs / account sheet, NOT this repo (repo is public). API notes:
+helper: `<repo>\accounts\cronjob-account.ps1`. job inventory lives in the local profile docs / account sheet, NOT this repo (repo is public). API notes:
 
 - job creation is PUT /jobs (POST 404s); API rate-limits hard (429, wait ~15-20s between creates); GET /jobs/<id> returns `{jobDetails:{...}}` shape; PATCH /jobs/<id> bodies MUST use `{"job":{...}}` (delta only) - `{"jobDetails":{...}}` gets HTTP 400; headers in `extendedData.headers` are a DICTIONARY {key:value}, NOT an array (array form gets HTTP 500); `lastStatus` codes: 1=OK, 2=DNS fail, 3=connect fail, 4=HTTP error (incl. 3xx when `redirectSuccess` false), 5=timeout.
 - do NOT use `"each"` strings for schedule values; use numeric `-1` arrays like the helper's `create`.
@@ -1135,14 +1149,14 @@ helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile d
 ### vercel: multi-account deploy BLOCKED workaround (TEAM_ACCESS_REQUIRED)
 
 - Hobby/team deploys without a GitHub login connection: avoid paid team-member upgrades and reconnecting GitHub per account.
-- detect: deploy shows `readyState: BLOCKED` with `seatBlock.blockCode: TEAM_ACCESS_REQUIRED` (Git author lacks team access). the CLI hides it (an upload blocked this way just sits at `Building…`/`status UNKNOWN`, no build logs) - read the truth from REST: `vercel-account.ps1 api <owner-email> GET '/v6/deployments?projectId=<prj_...>&limit=8&meta=1'` → `readyState: BLOCKED`, `errorMessage: "commit author doesn't have permission…"`, `seatBlock.blockCode`, `attribution.commitMeta` names the offending author.
+- detect: deploy shows `readyState: BLOCKED` with `seatBlock.blockCode: TEAM_ACCESS_REQUIRED` (Git author lacks team access). the CLI hides it (an upload blocked this way just sits at `Building…`/`status UNKNOWN`, no build logs) - read the truth from REST: `accounts/vercel-account.ps1 api <owner-email> GET '/v6/deployments?projectId=<prj_...>&limit=8&meta=1'` → `readyState: BLOCKED`, `errorMessage: "commit author doesn't have permission…"`, `seatBlock.blockCode`, `attribution.commitMeta` names the offending author.
 - surface ALL blocked projects across accounts at once: `<repo>\..\automata-private\vercel.com\vercel-usage-table.ps1` - its BLOCKED-reason section shows the blockCode + commit author per project.
 - fix: create a local deployment-alignment commit authored with the target Vercel account email before deploying: `git -c user.email="<target-vercel-email>" -c user.name="<name>" commit --allow-empty -m "deployment alignment"` (empty commit only when there is no real scoped change to commit).
 - then redeploy and verify the live URL/domain.
-- verified 2026-09-05 (vubon-virtuals/vubon-ecommerce on fahads-projects-c67183fe): the alignment commit alone does NOT clear the block - git-push-triggered deploys stayed BLOCKED even with identical author email/login as a previous READY deploy (Vercel resolves the push to the GitHub identity, which has no seat). what works: after the alignment commit, deploy via CLI from the local linked clone as the owning account (`vercel-account.ps1 run <owner-email> deploy --prod --yes`) - the deploy is attributed to the owner and aliases the custom domain automatically.
+- verified 2026-09-05 (vubon-virtuals/vubon-ecommerce on fahads-projects-c67183fe): the alignment commit alone does NOT clear the block - git-push-triggered deploys stayed BLOCKED even with identical author email/login as a previous READY deploy (Vercel resolves the push to the GitHub identity, which has no seat). what works: after the alignment commit, deploy via CLI from the local linked clone as the owning account (`accounts/vercel-account.ps1 run <owner-email> deploy --prod --yes`) - the deploy is attributed to the owner and aliases the custom domain automatically.
 - never pay for team-member seat upgrades or reconnect GitHub per account to work around this.
 - helper arg quirk (2026-10-16): never insert a literal `--` before the vercel subcommand when invoking through `powershell -File` - the separator is not stripped, lands in `@VercelArgs` verbatim, and vercel parses it as a positional path → `Error: Can't deploy more than one path.` with no deployment created. correct shape: `run <email> deploy --prod --yes --force`.
-- long deploys: launch detached (`Start-Process powershell -ArgumentList '…','-File','…\vercel-account.ps1','run','<email>','deploy','--prod','--yes','--force' -RedirectStandardOutput C:\tmp\deploy.log -PassThru`) and poll log + REST - they can outlive the 15-min shell timeout, and stdout buffering means the log may still read `Building…` while REST already shows READY/BLOCKED.
+- long deploys: launch detached (`Start-Process powershell -ArgumentList '…','-File','…\accounts\vercel-account.ps1','run','<email>','deploy','--prod','--yes','--force' -RedirectStandardOutput C:\tmp\deploy.log -PassThru`) and poll log + REST - they can outlive the 15-min shell timeout, and stdout buffering means the log may still read `Building…` while REST already shows READY/BLOCKED.
 
 ### vercel: alias/deployment URL hits "Log in to Vercel" wall (SSO protection)
 
@@ -1160,13 +1174,13 @@ helper: `<repo>\cronjob-account.ps1`. job inventory lives in the local profile d
 
 ## supabase: account helper
 
-helper: `<repo>\supabase-account.ps1` (contract PASS). profiles at `%APPDATA%\mainframe\accounts\supabase\<email>\` (token.txt = Personal Access Token `sbp_...`). Management API base `https://api.supabase.com` (v1), Bearer auth. token fingerprint + status via `status`/`status-all`; backup.ps1 already snapshots the accounts dir so supabase profiles travel with every mainframe backup/restore.
+helper: `<repo>\accounts\supabase-account.ps1` (contract PASS). profiles at `%APPDATA%\mainframe\accounts\supabase\<email>\` (token.txt = Personal Access Token `sbp_...`). Management API base `https://api.supabase.com` (v1), Bearer auth. token fingerprint + status via `status`/`status-all`; windows/backup.ps1 already snapshots the accounts dir so supabase profiles travel with every mainframe backup/restore.
 
 ### adding an account (vault-first flow)
 1. create the token in the dashboard: supabase.com/dashboard/account/tokens -> Generate new token -> "Expires in" dropdown -> **"Never"** (a short-lived token dies and the profile breaks; rotate manually when needed).
 2. user saves the token into a password vault, then the agent syncs and reads it back from the vault item, then writes `token.txt` into the profile dir.
 3. write `profile.json` (tool/service/profile/apiEndpoint/apiVersion/keyPath/updatedAt) + `current.json` for active state — the helper's `login` does this interactively too.
-4. verify with `.\supabase-account.ps1 run <email> GET v1/projects` (and `organizations`).
+4. verify with `.\accounts\supabase-account.ps1 run <email> GET v1/projects` (and `organizations`).
 
 ### bulk scripts (moved to automata-private 2026-10-08)
 
@@ -1190,7 +1204,7 @@ profile `token.txt` directly. the details below still describe the behavior.
 
 ## terabox: web-session cookie helper
 
-helper: `<repo>\terabox-account.ps1` (contract PASS). profiles at
+helper: `<repo>\accounts\terabox-account.ps1` (contract PASS). profiles at
 `%APPDATA%\mainframe\accounts\terabox\<email>\` holding `cookie.txt` (raw
 `*.terabox.com` browser Cookie-header value, must contain `ndus=`) — that's
 session state (like wrangler oauth state / the configstore pattern), the account
@@ -1261,7 +1275,7 @@ in notes) + `terabox.com[2]`).
 
 ## minimax code: device-code multi-account, keyed by a stated email (helper added 2026-10-31)
 
-`minimax-account.ps1`. MiniMax Code (the desktop app) + its `mcode-tools` CLI
+`accounts/minimax-account.ps1`. MiniMax Code (the desktop app) + its `mcode-tools` CLI
 share ONE credential per data dir, in plaintext:
 `%USERPROFILE%\.minimax\auth\<buildEnv>\<region>\<clientId>` holds `auth.json`
 (records keyed by a hash) and `auth-state.json` (the generation counter + status).
@@ -1271,7 +1285,7 @@ AND a record exists AND `record.generation === state.generation`.
 
 contract verbs as usual (`login harvest use refresh run list current status
 status-all path env forget logout`, `-Json` everywhere), validated by
-`account-contract.ps1` (PASS), plus `status-all -Json` for `automata-private\monitor`.
+`accounts/account-contract.ps1` (PASS), plus `status-all -Json` for `automata-private\monitor`.
 
 - **this is the one helper whose profiles live in `%APPDATA%\mainframe\accounts\<tool>`
   instead of the vault, on purpose.** MiniMax ROTATES the refresh token on every
@@ -1369,7 +1383,7 @@ status-all path env forget logout`, `-Json` everywhere), validated by
 
 ## adcode: one Firebase identity per data dir, restart-is-the-switch (helper added 2026-10-31)
 
-`adcode-account.ps1`. ADCode (the Electron IDE, v2.4.0) keeps ONE Firebase
+`accounts/adcode-account.ps1`. ADCode (the Electron IDE, v2.4.0) keeps ONE Firebase
 identity per data dir at
 `%APPDATA%\@adcode\desktop\ads\ads\identity.json` = `{uid, refreshToken}`, and it
 reads that file ONCE per launch -- the idToken is minted in memory and the file
@@ -1380,7 +1394,7 @@ switch.
 
 contract verbs as usual (`login harvest use refresh open run list current status
 status-all path env forget logout`, `-Json` everywhere), validated by
-`account-contract.ps1` (PASS).
+`accounts/account-contract.ps1` (PASS).
 
 - **the account is SIX files, not one.** each profile mirrors the live data dir's
   account-scoped set: `ads\ads\identity.json`, `ads\ads\receipts.json`,
@@ -1426,7 +1440,7 @@ status-all path env forget logout`, `-Json` everywhere), validated by
   a one-element array on statement output, so `$row['providers'] = if (...) { @(...) } else { @() }`
   stored `"google.com"` instead of `["google.com"]` -- and the api (rightly) refused
   the whole report: *"the helper reported profiles[].providers as "google.com";
-  adcode-account.ps1 changed its payload shape; this api expects an array of
+  accounts/adcode-account.ps1 changed its payload shape; this api expects an array of
   strings"* (hit on the first real bank, 2026-10-31). assign `@()` first and fill
   it with a direct `@(... | Where-Object { $_ })` statement instead. same trap was
   latent in `Get-StatusReport` (`liveProviders`) and both harvest payloads; all four
@@ -1448,13 +1462,13 @@ status-all path env forget logout`, `-Json` everywhere), validated by
 
 **the problem**: Edge 151+ validates store-extension install signatures against the machine ID (`install_signer.cc` `HashWithMachineId` via RLZ). a profile restored on a DIFFERENT pc fails that check, and Edge silently removes every `location=1` store extension from `Secure Preferences` on first launch (measured 53 enabled -> 24, same on every attempt). extension FILES on disk survive (`Default\Extensions` still has 29 dirs) but the settings entries are wiped, so the extensions are gone. file-level fixes that do NOT work (all verified on the desktop): stripping `install_signature`/`microsoft_install_signature` from `Preferences`, stripping per-extension `installation_signature` from `Secure Preferences`, wiping `extensions.settings` entirely, setting `location=4`, deleting `Local State`, deleting `_metadata/verified_contents.json`, `icacls /reset`. the stored signature can never verify on another machine because the RLZ machine id differs.
 
-**cut B (2026-10-04): the store package files themselves are no longer shipped.** `backup.ps1` robocopies the Edge profile with `/XD Extensions` (both the VSS and fallback paths), so `Default\Extensions` (202 MB on disk → ~40 MB in the zip) stays out of the backup. the packages come back over the network: enabled ones via the forcelist, disabled ones via the registry loader (both below), and same-machine restores are simply re-fetched by Edge. this does NOT touch extension user data — `Local Extension Settings` (uBlock rules/whitelists), `Extension State`/`Extension Rules`/`Extension Scripts`, extension IndexedDB, and `Secure Preferences` (enabled/disabled state) are all still copied — nor unpacked dev-mode extensions, which travel separately from their source folders into `edge-profile\unpacked-extensions\` (they have no store copy and cannot redownload, so they are never excluded). like the pip restore, extension reinstall now requires network on first boot.
+**cut B (2026-10-04): the store package files themselves are no longer shipped.** `windows/backup.ps1` robocopies the Edge profile with `/XD Extensions` (both the VSS and fallback paths), so `Default\Extensions` (202 MB on disk → ~40 MB in the zip) stays out of the backup. the packages come back over the network: enabled ones via the forcelist, disabled ones via the registry loader (both below), and same-machine restores are simply re-fetched by Edge. this does NOT touch extension user data — `Local Extension Settings` (uBlock rules/whitelists), `Extension State`/`Extension Rules`/`Extension Scripts`, extension IndexedDB, and `Secure Preferences` (enabled/disabled state) are all still copied — nor unpacked dev-mode extensions, which travel separately from their source folders into `edge-profile\unpacked-extensions\` (they have no store copy and cannot redownload, so they are never excluded). like the pip restore, extension reinstall now requires network on first boot.
 
 **the fix**: TWO mechanisms depending on enable/disable state:
 
 ### ENABLED store extensions — ExtensionInstallForcelist (same as before)
 
-policy reinstall from the Edge store. backup.ps1 extracts the `location=1` extension list (id, name, update_url, version, disable_reason) into `edge-profile\extensions-list.json`. restore.ps1 `Restore-EdgeExtensions` writes each enabled id to `HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist` with the Edge store URL. Edge force-installs them on the target pc.
+policy reinstall from the Edge store. windows/backup.ps1 extracts the `location=1` extension list (id, name, update_url, version, disable_reason) into `edge-profile\extensions-list.json`. windows/restore.ps1 `Restore-EdgeExtensions` writes each enabled id to `HKLM:\SOFTWARE\Policies\Microsoft\Edge\ExtensionInstallForcelist` with the Edge store URL. Edge force-installs them on the target pc.
 
 **CAVEAT**: the Edge store URL ONLY works for extensions the Edge Add-ons store hosts. Chrome-Web-Store-only extensions return `error-unknownApplication` from the Edge store and silently never install (verified with `Invoke-WebRequest` against the Edge store update URL — CWS-only extensions get `status="error-unknownApplication"` in the Omaha gupdate response). The older claim that "all 23 store extensions returned via the Edge URL" is WRONG. **CWS-only extensions (both enabled and disabled) are NOT installable via the Edge store URL.** The workaround is the registry external loader (see below).
 
@@ -1487,8 +1501,8 @@ Edge 151+ prunes unpacked developer-mode extensions (loc=4) from a cross-machine
 **the bypass (verified on the desktop)**: launch Edge once with `--load-extension=<path1>,<path2>,...`. Edge registers each as **loc=8 (command-line loaded)**. NOTE: loc=8 does NOT survive plain relaunches — `InstalledLoader` skips `kCommandLine` entries (`installed_loader.cc`), so the extensions only exist while the flag is passed. the older note claiming it "persists" was wrong; treat this as best-effort for dev-mode folders that must exist on the target, and expect to pass `--load-extension` each session.
 
 **how backup/restore handle it**:
-- backup.ps1: reads loc=4 AND loc=8 entries from the backed-up `Secure Preferences`, unions them with the machine-local breadcrumb (below), copies each source folder into `edge-profile\unpacked-extensions\<id>-<foldername>\`, and writes `edge-profile\unpacked-extensions.json` (id, name, original path, relative_path).
-- restore.ps1 `Restore-EdgeExtensions`: copies each folder back to its original path, then launches Edge once with `--load-extension=` for all restored paths (backup list UNION breadcrumb).
+- windows/backup.ps1: reads loc=4 AND loc=8 entries from the backed-up `Secure Preferences`, unions them with the machine-local breadcrumb (below), copies each source folder into `edge-profile\unpacked-extensions\<id>-<foldername>\`, and writes `edge-profile\unpacked-extensions.json` (id, name, original path, relative_path).
+- windows/restore.ps1 `Restore-EdgeExtensions`: copies each folder back to its original path, then launches Edge once with `--load-extension=` for all restored paths (backup list UNION breadcrumb).
 - extension IDs for loc=4 come from the manifest `key` when present; without a `key`, the ID is path-derived (case-sensitive), so the target user dir case must match the source (e.g. `Admin` vs `admin`) to keep the SAME id - otherwise the extension works but under a different id.
 
 ### unpacked extensions 2nd-run drop — the breadcrumb (fixed 2026-09-04)
@@ -1534,7 +1548,7 @@ S4U scheduled task for elevation - see note below):
 - verdict: all stages green, fix verified end-to-end
 
 test-harness gotchas (the test failed once on these, not the product):
-1. backup.ps1 contract: `-OutputDir X` produces `X\mainframe-backup.zip` (zipped
+1. windows/backup.ps1 contract: `-OutputDir X` produces `X\mainframe-backup.zip` (zipped
    staging), NOT an extracted tree - extract it before reading
    `edge-profile\unpacked-extensions.json` from it.
 2. schtasks quirk: a task action with a scoop SHIM path (pwsh shim) silently never
@@ -1555,7 +1569,7 @@ the breadcrumb fix (above) only made restore+backup REMEMBER the unpacked list; 
 extensions were still volatile loc=8 (or skeletal prefs entries Edge never imported),
 so on a plain 2nd launch the user saw NO local extensions. that was the actual bug.
 
-**the real fix in restore.ps1** (after the --load-extension registration): rewrite
+**the real fix in windows/restore.ps1** (after the --load-extension registration): rewrite
 `Secure Preferences` converting the 6 entries loc=8 -> loc=4 (true "Load unpacked",
 persistent by design) with VALID protection MACs so Edge accepts the edit:
 
@@ -1575,7 +1589,7 @@ persistent by design) with VALID protection MACs so Edge accepts the edit:
   (DPAPI/os-crypt v20 AES-GCM) is AUTHORITATIVE when present - the patched entry
   must have its encrypted_hash DELETED or the fix silently won't apply
 - super_mac must be recomputed after any macs change
-- embedded python (stdlib only) in restore.ps1 does the patch; failures fall back
+- embedded python (stdlib only) in windows/restore.ps1 does the patch; failures fall back
   LOUD (warning, extensions stay volatile loc=8) - no silent degradation
 
 verified end-to-end on desktop (edge-2cycle-desktop-test-v2, S4U task):
@@ -1591,7 +1605,7 @@ survival across 3 plain launches. always assert user-visible behavior.
 
 ### backup publish vault lookup gotcha (fixed 2026-09-27)
 
-`publish-backup.ps1` must read the active GitHub profile from
+`windows/publish-backup.ps1` must read the active GitHub profile from
 `%APPDATA%\mainframe\accounts\github\current.json` and pass that email to the
 vault helper. It must search `github.com*`, not only `github.com - *`: both the
 handle-suffixed item and the legacy exact item named `github.com` are valid. The
@@ -1618,7 +1632,7 @@ diagnostic to reuse: release count == `$Keep` exactly AND the newest tag stops m
 while the log keeps saying DONE = prune is eating the new releases.
 
 ### Python tooling retained; automatic frozen snapshot retired
-- `backup.ps1` still excludes installed `site-packages` from Python persistence
+- `windows/backup.ps1` still excludes installed `site-packages` from Python persistence
   and retains `Scripts` and Python/pip tooling for explicit future installs.
 - Backup no longer runs `pip list --format=freeze` or creates `pip-freeze.txt`.
   Windows Full no longer requires or installs that automatic frozen snapshot.
@@ -1643,10 +1657,10 @@ while the log keeps saying DONE = prune is eating the new releases.
   zip entries, not by a single core reading.
 
 chain: Task Scheduler `MainframeDailyBackup` (S4U + Highest, 09:00 Asia/Dhaka,
-DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
-`backup.ps1 -ExcludeSecrets -Publish` -> `publish-backup.ps1`.
+DisallowStartIfOnBatteries) -> `mainframe\windows\daily-backup-publish.ps1` ->
+`windows/backup.ps1 -ExcludeSecrets -Publish` -> `windows/publish-backup.ps1`.
 
-- **where it goes**: `publish-backup.ps1` uploads TWO zips to a **private GitHub release**
+- **where it goes**: `windows/publish-backup.ps1` uploads TWO zips to a **private GitHub release**
   on `FahadBinHussain/mainframe-production`, tag
   `yyyy-MM-dd-HHmm-<hostname>` (hostname-tagged so laptop + desktop can both publish
   into the same repo): `mainframe-quick.zip` (everything quick mode needs, with the
@@ -1664,14 +1678,14 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   when the secrets step touches the vault near the END of the run — the 2026-10-29 task died at
   09:05 with `vault is locked or approval was not completed` after a 120s mobile-approval timeout,
   throwing away 1.9 GB of just-built zips (release missing, marker stuck at the previous day).
-  `daily-backup-publish.ps1` now imports `vault-secret.psm1` and calls
+  `windows/daily-backup-publish.ps1` now imports `windows/vault-secret.psm1` and calls
   `Ensure-VaultSession -TimeoutSeconds 600` right after the marker check, so the 1-tap push goes
   out while nothing has been zipped yet and a missed approval fails fast with
   `vault locked - 1-tap mobile approval not completed within 600s; backup not started`.
   a valid session returns in ~4s with no prompt. a stale-but-present key is NOT a skip reason.
 - **a missed approval is recoverable, keep the marker honest**: the daily marker is only written
   after a successful publish, so a manual rerun (`unlock.ps1` or another 1-tap approval, then
-  `pwsh -File daily-backup-publish.ps1`) picks the day back up. do NOT "fix" a failed run by
+  `pwsh -File windows/daily-backup-publish.ps1`) picks the day back up. do NOT "fix" a failed run by
   deleting WhatsApp state, skipping the secrets step, or writing the marker by hand.
 - **what's zipped**: scoop persist dirs (VSS + robocopy, skips `Cache`/`logs`) + core config + edge profile + skills. `persist\python312\Lib\site-packages` is **NOT** shipped (see below) — everything else in `python312` (incl. `Scripts`, which carries `pip.exe`) is. Edge `Default\Extensions` store packages are **NOT** shipped either (cut B, 2026-10-04) — Edge re-downloads them via the forcelist/registry loader (see edge section); unpacked dev-mode extensions ARE still copied via `edge-profile\unpacked-extensions\`. it does NOT snapshot free disk space, `Temp`, `~\.cache`,
   or `C:\tmp` — cleaning those does not change what a backup captures.
@@ -1681,14 +1695,14 @@ DisallowStartIfOnBatteries) -> `mainframe\daily-backup-publish.ps1` ->
   not a plan cap, reported only as `HTTP 422 ... size must be less than 2147483648` AFTER the
   release row already existed, so the tag had to be cleaned up). the overwhelming contributor among
   non-excluded dirs was `scoop\persist\gradle\.gradle\caches` (3.55 GB live, pure build cache), so
-  `gradle` joined `backup.ps1`'s persist `$excludeDirs` — measured effect: persist dropped to
-  205–215 MB. `publish-backup.ps1` now asserts every asset's size before `gh release create` and
+  `gradle` joined `windows/backup.ps1`'s persist `$excludeDirs` — measured effect: persist dropped to
+  205–215 MB. `windows/publish-backup.ps1` now asserts every asset's size before `gh release create` and
   throws naming the asset, its MB and the exact limit, so an oversized zip fails BEFORE any release
   exists. when persist grows again, read the biggest `persist\*` dirs first and exclude a rebuildable
   cache — never trim user data to fit.
 - **vault is never backed up** (decided 2026-09-12). the bitwarden vault lives server-side; we do not ship it:
-  - `backup.ps1` persist `$excludeDirs` includes `bitwarden-cli` → the encrypted `bw-data\data.json` cache is not captured on any run (daily or full).
-  - `tool-secrets.manifest.json` `mainframe tool auth profiles and tokens` item has `excludeDirs: ["bitwarden"]` → the full-run `secrets\` archive skips `accounts\bitwarden\` (`session.key` + profile).
+  - `windows/backup.ps1` persist `$excludeDirs` includes `bitwarden-cli` → the encrypted `bw-data\data.json` cache is not captured on any run (daily or full).
+  - `manifests/tool-secrets.manifest.json` `mainframe tool auth profiles and tokens` item has `excludeDirs: ["bitwarden"]` → the full-run `secrets\` archive skips `accounts\bitwarden\` (`session.key` + profile).
   - a restore therefore has no vault session; run `automata-private\bitwarden.com\unlock.ps1` to re-login (rebuilds `data.json` from the server) before anything needs a token.
   - other `accounts\<tool>\` profile dirs still travel — since 2026-08-22 they hold only `profile.json`/`current.json` metadata + CLI state, not raw secrets (those are vault-native).
 
@@ -1707,8 +1721,8 @@ every release now carries TWO assets, and boot dies loudly when one is missing:
 
 | asset | contents | built by |
 |---|---|---|
-| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `quick-persist\ditto` (Ditto settings + starred-only `Ditto.db` so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `backup.ps1`, blob appended by `publish-backup.ps1` |
-| `mainframe-persist.zip` | scoop persist dirs (incl. the same starred-only `Ditto.db` under `persist\ditto`) | `backup.ps1` |
+| `mainframe-quick.zip` | edge profile, config, skills, restore scripts, `scoopfile.json`, `quick-persist\ditto` (Ditto settings + starred-only `Ditto.db` so a quick restore installs/links Ditto like a full one — added 2026-10-13) + the encrypted `mainframe-secrets.zip` entry | `windows/backup.ps1`, blob appended by `windows/publish-backup.ps1` |
+| `mainframe-persist.zip` | scoop persist dirs (incl. the same starred-only `Ditto.db` under `persist\ditto`) | `windows/backup.ps1` |
 
 the encrypted blob rides INSIDE quick on purpose: quick mode = 1 download, full mode = 2,
 and neither mode can end up on a box with no `.ssh`/opencode/account profiles. an earlier
@@ -1718,9 +1732,9 @@ same-day shape shipped it as a third asset — `mainframe-quick.zip` + `mainfram
 **ditto parity in quick mode (2026-10-13)**: ditto was full-mode-only — its settings
 (`persist\ditto`, `Ditto.db` excluded), the allowlist-loop install and the fork rebuild all sat
 past quick's `return`, so a quick restore ended with no clipboard manager. quick now ends with
-the same Ditto: `backup.ps1` copies `persist\ditto` into quick staging as `quick-persist\ditto`
+the same Ditto: `windows/backup.ps1` copies `persist\ditto` into quick staging as `quick-persist\ditto`
 (settings plus the starred-only `Ditto.db`, see the next block — the full 2 GB+ clip DB still
-stays out of BOTH zips), and `restore.ps1`'s quick route runs `Install-DittoQuick` (restore
+stays out of BOTH zips), and `windows/restore.ps1`'s quick route runs `Install-DittoQuick` (restore
 settings -> ensure the `extras` bucket -> pinned install from scoopfile, loud warning when the
 backup carries no `quick-persist\ditto`) followed by the shared `Rebuild-DittoFork`, the same
 patcher the full route uses — so a missing `automata-private` warns identically in both. full
@@ -1736,7 +1750,7 @@ Ditto.db that ships is the stripped one placed by the starred-db block below.)
 **starred-only Ditto.db in both modes (2026-10-13)**: both zips now carry a stripped clip DB
 so a restore lands the user's STARRED clips while full history stays local-only. starred =
 `Main.lDontAutoDelete > 0` — the exact flag the fork's starred-clips filter PRs #1098/#1107
-read (there is NO `bFavorite` column; verified against the live db). `strip-ditto-favorites.py`
+read (there is NO `bFavorite` column; verified against the live db). `windows/strip-ditto-favorites.py`
 (repo root, python stdlib sqlite3) builds it at BACKUP time into BOTH `persist\ditto` and
 `quick-persist\ditto` staging, so the restore target needs no python. kept: starred clips +
 ancestor groups (recursive `lParentID` walk) + their `Data` blobs + `Types` rows;
@@ -1758,15 +1772,15 @@ implicit transaction (`isolation_level=None`).
 `Install-FlameshotQuick` (pinned from scoopfile, `extras/flameshot` at bucket head as the loud
 second method, skip when installed) + `Restore-FlameshotSettings`. the scoop manifest has NO
 `persist` entry (unlike ditto), so `%APPDATA%\Flameshot\flameshot.ini` was captured by NOTHING
-in the chain — backup.ps1 now ships it as `quick-persist\flameshot\flameshot.ini` (the quick
+in the chain — windows/backup.ps1 now ships it as `quick-persist\flameshot\flameshot.ini` (the quick
 zip always downloads, in both modes; the full route calls `Restore-FlameshotSettings` right
 after the persist restore since its install comes from the allowlist loop —
-`scoop-allowed.json` already lists flameshot). same fresh-box-only rule as the starred db: an
+`manifests/scoop-allowed.json` already lists flameshot). same fresh-box-only rule as the starred db: an
 existing `%APPDATA%\Flameshot\flameshot.ini` is never overwritten, warned loud.
 
-chain: `backup.ps1 -Publish` runs `backup-secrets.ps1` FIRST (so the 09:00 task and a manual
+chain: `windows/backup.ps1 -Publish` runs `windows/backup-secrets.ps1` FIRST (so the 09:00 task and a manual
 publish both build `tool-secrets.zip`), zips core staging into `mainframe-quick.zip`, then
-`publish-backup.ps1` encrypts the archive, appends it into quick as `mainframe-secrets.zip`
+`windows/publish-backup.ps1` encrypts the archive, appends it into quick as `mainframe-secrets.zip`
 (`7z a` adds one entry without recompressing the other ~220 MB), asserts by **listing the
 entries** that the blob landed exactly once, and uploads quick + persist. `-ExcludeSecrets`
 keeps its meaning: it stops PLAINTEXT secrets being embedded in quick/persist — the
@@ -1775,18 +1789,18 @@ encrypted copy is what ships either way.
 - **password lives in the vault only**: Bitwarden item `mainframe-production`, notes header
   `[secrets archive password]` + one `[A-Za-z0-9]{40}` line. both sides run the byte-identical
   lookup — `bw list items --search 'mainframe-production'` then
-  `(?m)^\[secrets archive password\]\s*\r?\n\s*(\S+)` — in `publish-backup.ps1` and `boot.ps1`;
+  `(?m)^\[secrets archive password\]\s*\r?\n\s*(\S+)` — in `windows/publish-backup.ps1` and `boot.ps1`;
   keep them in sync or boot cannot decrypt. item name = the repo it protects (bare identifier,
   no suffix, same naming rule as the domain-named items).
 - **encryption**: `7z a -tzip -mem=AES256 -p<pw>` run from inside the mainframe dir so the
   stored entry name is exactly `mainframe-secrets.zip` at quick's root; boot extracts quick,
   asserts `$extract\mainframe-secrets.zip` exists, runs
-  `7z x <blob> -o<extract> -p<pw>` and `restore.ps1` finds `$BackupRoot\tool-secrets.zip`
-  where it always looked (no restore.ps1 path change needed). plaintext never touches github:
+  `7z x <blob> -o<extract> -p<pw>` and `windows/restore.ps1` finds `$BackupRoot\tool-secrets.zip`
+  where it always looked (no windows/restore.ps1 path change needed). plaintext never touches github:
   private repo AND encrypted bytes.
 - a release published before 2026-10-07 carries `mainframe-core.zip` and (that day only) a
   separate `*-secrets.zip`; boot refuses either layout with the fix
-  (`.\backup.ps1 -Publish` on the source machine) rather than silently producing a partial box.
+  (`.\windows\backup.ps1 -Publish` on the source machine) rather than silently producing a partial box.
 
 #### gotchas fixed while wiring this up (read before touching this chain)
 
@@ -1807,14 +1821,14 @@ encrypted copy is what ships either way.
    code also gated on `%APPDATA%\mainframe\accounts\github` existing — on a FRESH pc that dir
    only arrives with the secrets archive it was needed to download, so step 3 could never pass
    on the exact machine boot exists for.
-4. **`restore.ps1` checked `$LASTEXITCODE` after calling `restore-secrets.ps1`** — that script
+4. **`windows/restore.ps1` checked `$LASTEXITCODE` after calling `windows/restore-secrets.ps1`** — that script
    runs no native commands, so the variable still held robocopy's code from the Edge restore
    (1 = "files copied OK") and a successful restore reported failure. removed: restore-secrets
-   throws on real failures and `$ErrorActionPreference='Stop'` propagates. `restore.ps1` now ends
+   throws on real failures and `$ErrorActionPreference='Stop'` propagates. `windows/restore.ps1` now ends
    with `exit 0` so boot's own `$LASTEXITCODE -ne 0` check is honest for the same reason.
 5. **the standalone-zip branch ignored `-ItemNames`/`-SkipNames`**, so quick mode's
    "Restoring opencode config" step restored EVERYTHING and the following step redid all of it.
-   `restore-secrets.ps1` now takes the same two filters as the embedded branch and restore passes
+   `windows/restore-secrets.ps1` now takes the same two filters as the embedded branch and restore passes
    them; a filter matching nothing prints `No secret items match this filter ...` instead of
    silently doing nothing.
 6. **restore's clone step pointed at placeholders and the outdated public repo (2026-10-07).**
@@ -1844,14 +1858,14 @@ encrypted copy is what ships either way.
 **visible run** (added 2026-09-12). the job is S4U = session 0 = no desktop, so on its own it
 runs silent. it now hands visibility to an on-demand interactive task:
 
-- `backup-notify.ps1` draws a borderless topmost banner bottom-right + plays a system sound,
+- `windows/backup-notify.ps1` draws a borderless topmost banner bottom-right + plays a system sound,
   auto-dismiss: blue `start`, green `done`, gray `skip`, red `MAINFRAME BACKUP FAILED` (stays ~45s).
 - scheduled task `MainframeBackupNotify` (LogonType **Interactive**, no trigger, Parallel) runs
-  `pwsh -File backup-notify.ps1` with **no args** — it reads one line `state|message` from
+  `pwsh -File windows/backup-notify.ps1` with **no args** — it reads one line `state|message` from
   `C:\tmp\backup-notify.txt`, which the backup writes right before `Start-ScheduledTask`.
   state goes via a file because `Start-ScheduledTask` can't pass arguments to the target.
-- `daily-backup-publish.ps1` calls `Notify start|done|skip|fail` at those points.
-- manual test: `.\backup-notify.ps1 -State done -Message "tag 2026-...-DESKTOP"`.
+- `windows/daily-backup-publish.ps1` calls `Notify start|done|skip|fail` at those points.
+- manual test: `.\windows\backup-notify.ps1 -State done -Message "tag 2026-...-DESKTOP"`.
 - **`-Prefix` (added 2026-10-06)** retitles the banner for a non-backup caller;
   the default `'Mainframe backup'` keeps every title byte-identical to before
   (`done` → `<Prefix> done`, `fail` → `<PREFIX> FAILED`). Other jobs pair it
@@ -1867,14 +1881,14 @@ runs silent. it now hands visibility to an on-demand interactive task:
 
 ### metered-connection skip (added 2026-10-18)
 
-`daily-backup-publish.ps1` now checks the upload link BEFORE any backup work: if the
+`windows/daily-backup-publish.ps1` now checks the upload link BEFORE any backup work: if the
 active internet connection is metered (or there is no internet at all), the whole run
 is skipped - no point burning metered data on a backup that could not be uploaded
 anyway. skip = log line + gray `skip` banner (now shows the reason, e.g. "metered
 connection - backup skipped") + `exit 0` (task shows success, no retry); the daily
 marker is NOT set, so the next run still happens once the link is usable again.
 
-- the check is `network-cost-check.ps1` (repo root): prints one JSON object
+- the check is `windows/network-cost-check.ps1` (repo root): prints one JSON object
   (`connected`, `interface`, `costType`, `roaming`, `overDataLimit`,
   `approachingDataLimit`, `skip`, `reasons[]`) and exits 0 when the check completed.
   `skip=true` for: cost type Fixed/Variable, roaming, over data limit, approaching
@@ -1896,7 +1910,7 @@ marker is NOT set, so the next run still happens once the link is usable again.
   profile and only NLM/WinRT reports it. measured 2026-10-18: `DefaultMediaCost\WiFi=1`
   while the active connection was metered - a registry-only check would have said
   "not metered".
-- `backup-notify.ps1` `skip` state now renders its message when one is passed
+- `windows/backup-notify.ps1` `skip` state now renders its message when one is passed
   (`already ran today - skipped` stays the default for the marker-skip call, which
   passes none - banner text for that path is byte-identical to before).
 - testing: `-Simulate unrestricted|metered|offline` runs synthetic values through the
@@ -1904,11 +1918,11 @@ marker is NOT set, so the next run still happens once the link is usable again.
   active profile (`netsh wlan set profileparameter name=<ssid> cost=unrestricted`,
   then `cost=fixed` to restore) and re-runs the helper (verified live 2026-10-18:
   Fixed -> skip, Unrestricted -> proceed, revert -> skip again).
-- only the daily chain is gated; manual `backup.ps1 -Publish` runs are not.
+- only the daily chain is gated; manual `windows/backup.ps1 -Publish` runs are not.
 
 ### artifact autoclean (added 2026-10-18)
 
-`daily-backup-publish.ps1` now sweeps its own artifacts from a `finally` block:
+`windows/daily-backup-publish.ps1` now sweeps its own artifacts from a `finally` block:
 EVERY exit path runs it (published / metered skip / already-ran-today skip / fatal),
 so a box that was once at 2.3 GB free never accumulates backup debris.
 `Remove-BackupArtifacts`:
@@ -1924,15 +1938,15 @@ so a box that was once at 2.3 GB free never accumulates backup debris.
   `mainframe-secrets.zip`, `robocopy-log-*.txt`. age-guarded to older-than-2h so a live
   manual run's files are never touched. this covers the gap where a run dies before its
   own self-cleanup (the oct 13 crash left 4.1 GB `mainframe-backup-*` + 4.1 GB
-  `mainframe-zip-stage-*`; backup-secrets.ps1's own staging is finally-guarded but a
+  `mainframe-zip-stage-*`; windows/backup-secrets.ps1's own staging is finally-guarded but a
   hard kill can still strand it).
 - logs `cleanup: removed N artifact(s), freed X MB` on every run (0/0 included - a
   missing line means the cleanup step itself died, reported as `cleanup WARNING: ...`).
   cleanup catches everything and never changes the run's exit code.
-- a manual `backup.ps1` run is not cleaned by its own invocation (cleanup lives only in
+- a manual `windows/backup.ps1` run is not cleaned by its own invocation (cleanup lives only in
   the daily chain), but its zips land at the same repo-root paths and the next daily run
   sweeps them - use `-OutputDir <dir>` when you want to keep one. same window applies to
-  a manual `backup.ps1 -Publish`'s `tool-secrets.zip`: the plaintext archive sits there
+  a manual `windows/backup.ps1 -Publish`'s `tool-secrets.zip`: the plaintext archive sits there
   until the next daily sweep.
 
 measured 2026-10-18 (first live sweep, on a metered skip): removed 7 artifacts, freed
@@ -1958,13 +1972,13 @@ than `Add-Content`, which writes platform CRLF.
 - `bootstrap.ps1` is Windows-only; `bootstrap.sh` is Linux-only Bash. Each prints `mainframe: selected <platform> -> <child>` before child download/execution, supports a route-only preview (`-DryRun` / `--dry-run`), and rejects wrong-platform invocation without fallback. Linux needs no PowerShell.
 - Windows delegates to existing `boot.ps1` unchanged, so PowerShell 7 remains a Windows prerequisite (not Windows PowerShell 5.1). Do not remove that requirement merely to make the launchers look symmetric. Linux delegates to `boot.sh`: explicit `--setup-tools` installs git/curl/ca-certificates/python3 and clones into `~/Downloads/mainframe`; `--restore` routes to offline recovery and `--packages` to the dry-by-default package planner. Omitting the mode fails without changes. An existing setup destination is rejected before package changes.
 - Linux recovery preserves Windows archives and offers candidate exports, NOT an operational Windows machine-state restore. Never imply that Windows account helpers, browser profiles, tasks, or services have been ported. Unsupported distributions fail in the child, not in route preview. See `docs/linux-restore-coverage.md` and root `plan.md` for exact boundaries.
-- `linux_real.py --restore-global-agents` is the only explicit global-instructions restore path: it restores the exact root `AGENTS.md` from `mainframe-quick.zip` to `$HOME/AGENTS.md`, byte-verifies it, and backs up an existing target. Without `--yes`, it activates only that file; nested instruction files and `.agents/skills` remain blocked. Offline staging uses `linux_restore.py --include-global-agents` and never writes live HOME.
-- **the linux live flow syncs the private repo too (2026-10-31)**: `linux_real.py` clones or fast-forward-pulls `automata-private` into `~/Downloads/automata-private` - the same Downloads root `boot.sh` uses for the public checkout - before the restore leg. it is the linux counterpart of the windows `Sync-AutomataPrivateRepo`, and the credential source is NAMED, never inherited: gh's own helper when `gh` is installed (the same `-c credential.helper= -c credential.helper=!gh auth git-credential` pair the windows restore uses, with `GH_TOKEN` set from the vault token the release download already fetched), otherwise a private python credential helper that reads the token from `MF_GH_TOKEN` in the child's environment - never from argv, never from a git config file, never from disk. `credential.helper=` comes first so no ambient helper can answer as another account, and `GIT_TERMINAL_PROMPT=0` makes a headless restore fail fast instead of waiting for a username nobody is there to type. a failed sync ABORTS the restore leg (the same fix the windows side made: a restore must not report success while shipping a machine without the private checkout), and `--skip-private-repo` is the explicit opt-out that says so out loud. offline recovery (`restore.sh` / `linux_restore.py`) still clones nothing. measured 2026-10-31 against real git and gh 2.102: `git credential fill` with the private helper answers `username=x-access-token` + `password=<token>` straight from `MF_GH_TOKEN`, and `gh auth git-credential` with `GH_TOKEN` answers the same. note how git calls a `!`-style helper: it runs the command through the shell and appends the operation (`get`/`store`/`erase`) as the only argument - only `get` answers, so nothing is persisted. covered by `tests/test_linux_private_repo.py`. **live on the muse linux container (2026-10-31)**: host `htch-runtime`, root, `HOME=/home/hatch`, python 3.12.3, git 2.43.0, gh present - so the gh branch was the one that ran, and it said so on screen (`the GH_TOKEN github profile (gh auth git-credential)`). the clone was really attempted: the bogus token produced `automata-private sync failed (git exit 128) at /home/hatch/Downloads/automata-private ... remote: Invalid username or token. Password authentication is not supported ... fatal: Authentication failed` - fast, with git's own text in the message, and NO interactive prompt hang. gotcha found there: that container's `~/Downloads/mainframe` checkout was stale (still on an october commit), so a "the module has no attribute PRIVATE_REPO_URL" failure there means the checkout is old, not that the code is wrong - clone fresh or pull before trusting a live result. **live with a REAL token (2026-10-31)**: the bw session key in `%APPDATA%\mainframe\accounts\bitwarden\session.key` was still valid, so the token came straight out of the vault (1331 items, matched the `ghp_` pattern) and the private repo was cloned FOR REAL: `authenticating with the GH_TOKEN github profile (gh auth git-credential)` -> `Cloning https://github.com/FahadBinHussain/automata-private.git` -> `action: cloned`, 3300 files, `.git` present, head `01119e4`, origin `https://github.com/FahadBinHussain/automata-private.git`. the token was never printed, and the clone went to a scratch HOME so the user's real `~/Downloads/automata-private` was verified untouched afterwards. windows restore and linux live flow now share one proven mechanism: vault token -> named credential source -> real checkout.
+- `linux/linux_real.py --restore-global-agents` is the only explicit global-instructions restore path: it restores the exact root `AGENTS.md` from `mainframe-quick.zip` to `$HOME/AGENTS.md`, byte-verifies it, and backs up an existing target. Without `--yes`, it activates only that file; nested instruction files and `.agents/skills` remain blocked. Offline staging uses `linux/linux_restore.py --include-global-agents` and never writes live HOME.
+- **the linux live flow syncs the private repo too (2026-10-31)**: `linux/linux_real.py` clones or fast-forward-pulls `automata-private` into `~/Downloads/automata-private` - the same Downloads root `boot.sh` uses for the public checkout - before the restore leg. it is the linux counterpart of the windows `Sync-AutomataPrivateRepo`, and the credential source is NAMED, never inherited: gh's own helper when `gh` is installed (the same `-c credential.helper= -c credential.helper=!gh auth git-credential` pair the windows restore uses, with `GH_TOKEN` set from the vault token the release download already fetched), otherwise a private python credential helper that reads the token from `MF_GH_TOKEN` in the child's environment - never from argv, never from a git config file, never from disk. `credential.helper=` comes first so no ambient helper can answer as another account, and `GIT_TERMINAL_PROMPT=0` makes a headless restore fail fast instead of waiting for a username nobody is there to type. a failed sync ABORTS the restore leg (the same fix the windows side made: a restore must not report success while shipping a machine without the private checkout), and `--skip-private-repo` is the explicit opt-out that says so out loud. offline recovery (`restore.sh` / `linux/linux_restore.py`) still clones nothing. measured 2026-10-31 against real git and gh 2.102: `git credential fill` with the private helper answers `username=x-access-token` + `password=<token>` straight from `MF_GH_TOKEN`, and `gh auth git-credential` with `GH_TOKEN` answers the same. note how git calls a `!`-style helper: it runs the command through the shell and appends the operation (`get`/`store`/`erase`) as the only argument - only `get` answers, so nothing is persisted. covered by `tests/test_linux_private_repo.py`. **live on the muse linux container (2026-10-31)**: host `htch-runtime`, root, `HOME=/home/hatch`, python 3.12.3, git 2.43.0, gh present - so the gh branch was the one that ran, and it said so on screen (`the GH_TOKEN github profile (gh auth git-credential)`). the clone was really attempted: the bogus token produced `automata-private sync failed (git exit 128) at /home/hatch/Downloads/automata-private ... remote: Invalid username or token. Password authentication is not supported ... fatal: Authentication failed` - fast, with git's own text in the message, and NO interactive prompt hang. gotcha found there: that container's `~/Downloads/mainframe` checkout was stale (still on an october commit), so a "the module has no attribute PRIVATE_REPO_URL" failure there means the checkout is old, not that the code is wrong - clone fresh or pull before trusting a live result. **live with a REAL token (2026-10-31)**: the bw session key in `%APPDATA%\mainframe\accounts\bitwarden\session.key` was still valid, so the token came straight out of the vault (1331 items, matched the `ghp_` pattern) and the private repo was cloned FOR REAL: `authenticating with the GH_TOKEN github profile (gh auth git-credential)` -> `Cloning https://github.com/FahadBinHussain/automata-private.git` -> `action: cloned`, 3300 files, `.git` present, head `01119e4`, origin `https://github.com/FahadBinHussain/automata-private.git`. the token was never printed, and the clone went to a scratch HOME so the user's real `~/Downloads/automata-private` was verified untouched afterwards. windows restore and linux live flow now share one proven mechanism: vault token -> named credential source -> real checkout.
 
 - **the BOM and the missing timeout (2026-10-31, both found on the muse container)**: `mainframe.config.json` is written by powershell on windows (`Set-Content` / `Out-File -Encoding utf8`), which emits a UTF-8 BOM. `load_config` read it with plain `utf-8`, the exception was swallowed, and the config silently came back EMPTY - no ntfy topic, no phone approval, no vault, with the run still looking healthy. powershell's own reader strips the BOM, so this only ever broke the linux side; `utf-8-sig` reads both. and `run()` had NO timeout, so a hung `apt-get update` (unreachable mirror, or another apt holding the lock) blocked the whole run forever - the container sat on the prereqs leg for minutes and never reached the vault leg. the apt calls are bounded now (120s update, 300s install) and a timeout raises a loud error naming the command instead of hanging.
 
 - **the phone approval cannot complete on the muse container (2026-10-31)**: the flow DOES get there - `VERIFICATION CODE: [ 60 ]`, `Caller: terminal @ htch-runtime`, and the approval url is written to `<work-root>/vault-tab.url` (a page served from fahadbinhussain.github.io, so the phone side is reachable) - but the container's egress goes through an https proxy (`patch-egress-proxy:3128`) and **ntfy.sh is NOT on its allowlist**: DNS resolves (198.18.36.50) and CONNECT gets `403 Forbidden`, so the push fails (`ntfy dispatch to <topic> failed: <urlopen error>`) AND the relay read cannot work either - the phone posts the sealed password to ntfy.sh, and the container is the side that has to read it. so on that container the phone approval needs ntfy.sh allowlisted first. where ntfy.sh IS reachable (this windows box) the vault leg needs no phone prompt at all while a bw session key is still valid.
-- `--convert-portable` requires recovery and is independent of `--apply-portable`. Validated conversions are the six-enum root Git config subset and the exact `persist/mpv/portable_config/mpv.conf` five-boolean subset in `linux_migrations.py`; mpv profiles, paths/devices, scripts, unknown fields, other files, and runtime/version compatibility remain unverified. Extend adapters only with understood source/target semantics and deterministic fixtures. Unknown/sensitive fields stay explicitly blocked without echoing values or private subsection names. Preserve original bytes and report conversion separately from installation/activation. No real restore/bootstrap or production payload inspection in development tests; no global instruction edits.
+- `--convert-portable` requires recovery and is independent of `--apply-portable`. Validated conversions are the six-enum root Git config subset and the exact `persist/mpv/portable_config/mpv.conf` five-boolean subset in `linux/linux_migrations.py`; mpv profiles, paths/devices, scripts, unknown fields, other files, and runtime/version compatibility remain unverified. Extend adapters only with understood source/target semantics and deterministic fixtures. Unknown/sensitive fields stay explicitly blocked without echoing values or private subsection names. Preserve original bytes and report conversion separately from installation/activation. No real restore/bootstrap or production payload inspection in development tests; no global instruction edits.
 - Local execution requires a sibling child and refuses network fallback. Remote scriptblock / Bash `-c` execution downloads only its platform child and cleans temporary files. Fetching the launcher itself is outside preview's no-download guarantee; preserve fetch failure with `&&` in the Bash command instead of piping unchecked downloads into a shell. The old short link remains Windows-only.
 - Validate with `pwsh -NoProfile -File tests/bootstrap.Tests.ps1`, `bash tests/bootstrap.Tests.sh`, and `bash -n` separately on `bootstrap.sh`, `boot.sh`, and `tests/bootstrap.Tests.sh`. Tests use inert HTTP/dispatch fixtures; mocked Windows tests on Linux are not live Windows validation. Never execute real bootstraps on a working machine just to test dispatch.
 - Also run `bash tests/bootstrap-forward.Tests.sh`, `bash tests/boot.Tests.sh`, `python3 -m unittest discover -s tests -p 'test_linux_*.py'`, and syntax-check `restore.sh`. These fixtures must not install packages, clone production repos, or alter the live home.
@@ -2038,7 +2052,7 @@ request — see "the topic is the only credential" (2026-11-15). the flow
 is otherwise unchanged.)
 
 - Headless restores on remote Linux boxes/containers without interactive tty cannot prompt via `getpass`.
-- `linux_real.py` uses mobile approval push: configured via `ntfyTopic` in `mainframe.config.json`, `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`. since 2026-10-31 the topic is **required** -- there is no public default.
+- `linux/linux_real.py` uses mobile approval push: configured via `ntfyTopic` in `mainframe.config.json`, `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`. since 2026-10-31 the topic is **required** -- there is no public default.
 - Remote runner generates an ephemeral RSA-2048 keypair (`vault-tab.key`) and single-use session topic (`mf-vault-<token>`).
 - Runner dispatches an urgent push notification via `ntfy.sh` with actionable click link to `https://fahadbinhussain.github.io/mainframe/docs/vault-tab.html#k=<pubkey>&sid=<session_topic>`.
 - Client-side zero-knowledge encryption & 1-tap biometric approval: public key and session ID stay in the URL fragment (`#`), never sent to GitHub Pages servers.
@@ -2049,27 +2063,27 @@ is otherwise unchanged.)
 - If no ntfy topic is configured or push fails, logs visible warning and keeps the manual tab URL + local Downloads polling active. Zero silent degradation per fail-loud contract.
 - **bitwarden cli non-interactive contract (2026-10-27)**: `bw login <email>` and `bw unlock` require `--passwordenv <VAR_NAME>` to read credentials from the environment. Without `--passwordenv`, `bw` attempts interactive tty input and fails immediately when headless with `You are not logged in.`.
 - **bitwarden config server requires logout (2026-10-27)**: `bw config server <url>` fails with `Logout required` if bw is already authenticated. Always check `bw status` first; only reconfigure server when `serverUrl` differs, logging out first if authenticated.
-- **select repo owner github token from vault for private release download (2026-10-27)**: when multiple GitHub accounts exist in Bitwarden, taking the first token alphabetically matches an unrelated account (`algojectt` etc.) which gets 404 from GitHub on private backup repos like `FahadBinHussain/mainframe-production/releases/latest`. `linux_real.py` must match `repo_owner` first, matching `boot.ps1`. In addition, `github_json` must pass `User-Agent: mainframe-real/1.0`, and asset downloads for private releases must use `asset.get('url')` with `Accept: application/octet-stream` rather than `browser_download_url`.
+- **select repo owner github token from vault for private release download (2026-10-27)**: when multiple GitHub accounts exist in Bitwarden, taking the first token alphabetically matches an unrelated account (`algojectt` etc.) which gets 404 from GitHub on private backup repos like `FahadBinHussain/mainframe-production/releases/latest`. `linux/linux_real.py` must match `repo_owner` first, matching `boot.ps1`. In addition, `github_json` must pass `User-Agent: mainframe-real/1.0`, and asset downloads for private releases must use `asset.get('url')` with `Accept: application/octet-stream` rather than `browser_download_url`.
 
 ## Universal 1-tap mobile vault approval for all restores (2026-10-27)
 
-- **Platform-agnostic standard**: 1-tap biometric approval on the user's phone is the universal standard for ALL restore flows — Windows (`boot.ps1`), Linux (`linux_real.py`), and future platforms.
+- **Platform-agnostic standard**: 1-tap biometric approval on the user's phone is the universal standard for ALL restore flows — Windows (`boot.ps1`), Linux (`linux/linux_real.py`), and future platforms.
 - **Single-unlock lifecycle**: A single 1-tap biometric approval provides the Bitwarden master password, unsealing `bw-email.enc.json` (resolving account email without typing), authenticating `bw login` via `--passwordenv`, and minting the session key via `bw unlock --raw --passwordenv`. The user never has to unlock multiple times.
 - **Google-prompt full-screen approval via ADB**: When an Android device is attached via USB or Wi-Fi (`adb devices`), the runner automatically wakes the display (`adb shell input keyevent KEYCODE_WAKEUP`) and immediately launches the approval prompt full-screen (`adb shell "am start -a android.intent.action.VIEW -d '<url>'"`). This eliminates having to swipe down or interact with the notification shade.
 - **Stale hash fragment / tab reuse gotcha**: Android Chrome reuses existing activity tabs on intent delivery. Because the session public key and relay ID live in the URL fragment (`#k=...&sid=...`), `docs/vault-tab.html` listens to `hashchange` and triggers `location.reload()`, ensuring fresh sessions instantly update instead of showing "Missing public key".
-- **PowerShell shared module (`vault-approval.psm1`)**: Provides .NET native RSA-2048 keypair generation (`ExportSubjectPublicKeyInfo`), RSA-OAEP SHA-256 decryption, ntfy push dispatch, ADB auto-popup, and relay long-polling with zero external dependencies.
-- **`ExportSubjectPublicKeyInfo` does not exist on windows powershell 5.1 (2026-11-01)**: `RSA.ExportSubjectPublicKeyInfo()` is .NET Core only. windows powershell 5.1 (.NET framework) has no such method and no `RSAExtensions` type either, and `RSA.Create()` there returns an `RSACng` - so the call dies with *"does not contain a method named 'ExportSubjectPublicKeyInfo'"*. that breaks the whole 1-tap unlock for every helper invoked through `powershell -File` (`vercel-account.ps1`, the `*-account.ps1` family, ...), because the unlock flow runs inside windows powershell - the failure looks like a broken vault, not a broken runtime. `vault-approval.psm1` now builds the SubjectPublicKeyInfo DER by hand when the runtime has no native method (`ConvertTo-SubjectPublicKeyInfoManual`), and the hand rolled bytes are byte for byte identical to the native ones - `tests/vault-approval-spki.Tests.ps1` checks that under BOTH runtimes. if you add crypto to this module, check it under `powershell` (5.1) as well as `pwsh` (7).
+- **PowerShell shared module (`windows/vault-approval.psm1`)**: Provides .NET native RSA-2048 keypair generation (`ExportSubjectPublicKeyInfo`), RSA-OAEP SHA-256 decryption, ntfy push dispatch, ADB auto-popup, and relay long-polling with zero external dependencies.
+- **`ExportSubjectPublicKeyInfo` does not exist on windows powershell 5.1 (2026-11-01)**: `RSA.ExportSubjectPublicKeyInfo()` is .NET Core only. windows powershell 5.1 (.NET framework) has no such method and no `RSAExtensions` type either, and `RSA.Create()` there returns an `RSACng` - so the call dies with *"does not contain a method named 'ExportSubjectPublicKeyInfo'"*. that breaks the whole 1-tap unlock for every helper invoked through `powershell -File` (`accounts/vercel-account.ps1`, the `*-account.ps1` family, ...), because the unlock flow runs inside windows powershell - the failure looks like a broken vault, not a broken runtime. `windows/vault-approval.psm1` now builds the SubjectPublicKeyInfo DER by hand when the runtime has no native method (`ConvertTo-SubjectPublicKeyInfoManual`), and the hand rolled bytes are byte for byte identical to the native ones - `tests/vault-approval-spki.Tests.ps1` checks that under BOTH runtimes. if you add crypto to this module, check it under `powershell` (5.1) as well as `pwsh` (7).
 - **Fail-loud manual fallback (Rule 8)**: If 1-tap mobile approval times out or fails, runners display a visible warning naming the failure and fallback mechanism loudly before prompting for manual password entry.
-- **1-hour session TTL & on-demand 1-tap re-approval (2026-10-27)**: Bitwarden CLI has no default auto-lock TTL for CLI sessions, which previously allowed `session.key` to remain valid on disk indefinitely. `vault-secret.psm1` now enforces a 60-minute TTL (configurable via `MAINFRAME_VAULT_TTL_MINUTES` or `vaultTtlMinutes` in `mainframe.config.json`). When `session.key` is older than 60 minutes, `Get-VaultSession` expires the session (`Expire-VaultSession`: `bw logout` + purge - see "session expiry is real now" below). `Ensure-VaultSession` triggers 1-tap mobile approval on demand (`Get-VaultMasterPassword`), auto-launching the prompt on the attached phone or sending ntfy push, obtaining a fresh 1-hour session token seamlessly without typing passwords. `vault-lock.ps1` locks the vault immediately on demand.
-- **12-hour session unlock via mobile checkmark (2026-11-03)**: Added a "Keep vault unlocked for 12 hours" checkbox (`#ttl-12h`) with animated motion clock icon (Rule 10) in `docs/vault-tab.html` on the phone approval card, available for both 1-tap Fingerprint approval and manual password entry. When checkmarked, the phone wraps the master password in a structured JSON payload (`{"pw": password, "ttl": 720}`) before RSA-OAEP encryption. `Decrypt-VaultApprovalCiphertext` in `vault-approval.psm1` transparently unpacks the payload, returning the raw master password to `bw unlock` while setting `$env:MAINFRAME_VAULT_APPROVED_TTL` and `$script:LastApprovedTtlMinutes`. `Set-VaultSessionKey` in `vault-secret.psm1` records the custom TTL in a companion `session.ttl` file alongside `session.key`. `Get-VaultSessionTtlMinutes` honours `session.ttl` when checking age, keeping the vault unlocked for 720 minutes (12 hours) across all agents before expiring. `Lock-VaultSession` purges both `session.key` and `session.ttl` on demand.
-- **session expiry is real now, not policy (2026-11-14)**: the TTL used to only purge `session.key` and run `bw lock`, which left the CLI logged in and the local vault cache on disk - the old session key kept decrypting it, so the muse container ran 7 days on one approval. `Get-VaultSession` now calls `Expire-VaultSession` on a lapsed TTL: `bw logout` revokes the CLI's tokens server-side and wipes its local data, then the session key and TTL are purged, so the next vault use is a full login through the phone approval (`Invoke-VaultLogin` unseals the email and logs in; `Ensure-VaultSession` and `vault-flow.ps1` both use it). `Lock-VaultSession` stays a plain lock (manual lock only); `-LockIfStale` with a stale session expires instead of locking. one limit is inherent: a key or token copied BEFORE the expiry stays a valid decryption key for a copied vault cache - expiry kills the live session, not a copy made earlier. `tests/vault-session-expire.Tests.ps1` pins the behaviour down with a fake bw.
+- **1-hour session TTL & on-demand 1-tap re-approval (2026-10-27)**: Bitwarden CLI has no default auto-lock TTL for CLI sessions, which previously allowed `session.key` to remain valid on disk indefinitely. `windows/vault-secret.psm1` now enforces a 60-minute TTL (configurable via `MAINFRAME_VAULT_TTL_MINUTES` or `vaultTtlMinutes` in `mainframe.config.json`). When `session.key` is older than 60 minutes, `Get-VaultSession` expires the session (`Expire-VaultSession`: `bw logout` + purge - see "session expiry is real now" below). `Ensure-VaultSession` triggers 1-tap mobile approval on demand (`Get-VaultMasterPassword`), auto-launching the prompt on the attached phone or sending ntfy push, obtaining a fresh 1-hour session token seamlessly without typing passwords. `windows/vault-lock.ps1` locks the vault immediately on demand.
+- **12-hour session unlock via mobile checkmark (2026-11-03)**: Added a "Keep vault unlocked for 12 hours" checkbox (`#ttl-12h`) with animated motion clock icon (Rule 10) in `docs/vault-tab.html` on the phone approval card, available for both 1-tap Fingerprint approval and manual password entry. When checkmarked, the phone wraps the master password in a structured JSON payload (`{"pw": password, "ttl": 720}`) before RSA-OAEP encryption. `Decrypt-VaultApprovalCiphertext` in `windows/vault-approval.psm1` transparently unpacks the payload, returning the raw master password to `bw unlock` while setting `$env:MAINFRAME_VAULT_APPROVED_TTL` and `$script:LastApprovedTtlMinutes`. `Set-VaultSessionKey` in `windows/vault-secret.psm1` records the custom TTL in a companion `session.ttl` file alongside `session.key`. `Get-VaultSessionTtlMinutes` honours `session.ttl` when checking age, keeping the vault unlocked for 720 minutes (12 hours) across all agents before expiring. `Lock-VaultSession` purges both `session.key` and `session.ttl` on demand.
+- **session expiry is real now, not policy (2026-11-14)**: the TTL used to only purge `session.key` and run `bw lock`, which left the CLI logged in and the local vault cache on disk - the old session key kept decrypting it, so the muse container ran 7 days on one approval. `Get-VaultSession` now calls `Expire-VaultSession` on a lapsed TTL: `bw logout` revokes the CLI's tokens server-side and wipes its local data, then the session key and TTL are purged, so the next vault use is a full login through the phone approval (`Invoke-VaultLogin` unseals the email and logs in; `Ensure-VaultSession` and `windows/vault-flow.ps1` both use it). `Lock-VaultSession` stays a plain lock (manual lock only); `-LockIfStale` with a stale session expires instead of locking. one limit is inherent: a key or token copied BEFORE the expiry stays a valid decryption key for a copied vault cache - expiry kills the live session, not a copy made earlier. `tests/vault-session-expire.Tests.ps1` pins the behaviour down with a fake bw.
 - **Number matching & host provenance (2026-10-27)**: To protect against MFA fatigue, prompt bombing, and distinguishing legitimate agent requests from unauthorized triggers during the day, approval requests generate a cryptographic 2-digit verification code (`code`), requesting hostname (`host`), and context (`ctx`). The runner terminal outputs `VERIFICATION CODE: [ XX ]`, and `docs/vault-tab.html` renders a prominent glowing verification card showing that code, hostname, and action. Users only approve if the code on their phone screen matches the number printed on their terminal monitor.
 - **Agent, harness & model provenance (2026-10-27)**: Approval requests include full caller identity (`agent` and `model`) across terminal banners, ntfy push notifications, and the mobile approval card. Runners resolve identity via explicit `-Agent`/`-Model` args, environment overrides (`MAINFRAME_AGENT_NAME`, `MAINFRAME_MODEL_NAME`, `AGENT_NAME`, `MODEL_NAME`), or automatic ground-truth detection: for Antigravity, runners inspect the active thread's conversation transcript on disk (`<appDataDir>/brain/<convoId>/.system_generated/logs/transcript.jsonl`) for system-injected `Model Selection` settings changes (tail and head), extracting the exact active model (e.g. `Gemini 3.8 Flash (High)`) without hallucination or hardcoding; for OpenCode/Claude/Codex/Aider, runners inspect harness env vars or process ancestry, falling back to `terminal` for interactive human shells. `docs/vault-tab.html` renders animated tags (Rule 10) for host (`💻`), agent (`🤖`), model (`🧠`), and action context (`⚡`), and updates the header badge and description to clearly identify who is requesting vault access.
-- **Antigravity mid-thread model switch detection across full transcript (2026-11-09)**: `vault-approval.psm1` previously split transcript inspection between `-Tail 100` and `-TotalCount 50`. In conversations longer than ~150 lines, any mid-thread model switch between lines 51 and (Total - 100) fell into a dead zone where `-Tail 100` found nothing and fell back to `-TotalCount 50`, falsely reporting the initial thread model (e.g. `Gemini 3.8 Flash (Medium)` instead of `Gemini 3.8 Flash (High)`). Furthermore, raw string matching on `transcript.jsonl` risked matching tool outputs echoing transcript text. `Get-CallerIdentity` now filters strictly for `"type":"USER_INPUT"` steps across the full conversation history and takes the latest match.
-- **cross-agent 1-hour session reuse & stampede mitigation (2026-10-28)**: vault unlock is shared across all agents on the box via the profile root's `accounts/bitwarden/session.key` (windows: `%APPDATA%\mainframe\...`, linux: `$XDG_CONFIG_HOME/mainframe\...` - see `mainframe-paths.psm1`). 1-tap mobile approval unlocks the vault once for 60 minutes for ALL agents (Antigravity, OpenCode, Claude Code, terminal). Previously, transient Node/Bitwarden CLI failures (concurrent execution locking `data.json`, stderr output breaking JSON parse) caused `Test-VaultSession` and external scripts (`get-session.ps1`, `unlock.ps1`) to mistakenly conclude the vault was locked or delete `session.key`, triggering duplicate approval prompts on phone within the same hour. `Test-VaultSession` now passes `--session` explicitly and retries once before declaring locked. `Wait-VaultApprovalCiphertext` in `vault-approval.psm1` polls disk for fresh `session.key` writes while waiting for approval, instantly unblocking concurrent agent runs without asking for duplicate approvals. that only helps a request that is ALREADY asking, though - the prompt itself is single-flight since 2026-11-02, see "one phone prompt at a time" below.
-- **the linux side now has the same 1-hour session (2026-11-01)**: `linux_real.py` used to unlock the vault on EVERY run and lock it again in a `finally`, so a container asked the phone for a tap every single time. it now caches the raw bw session key at `<work_root>/vault/session.key` (mode 600) exactly like windows does at `%APPDATA%\mainframe\accounts\bitwarden\session.key`: a run inside the TTL reuses it and asks for NOTHING, an expired one is locked and purged so the phone is asked again, and `--lock-vault` (the linux twin of `vault-lock.ps1`) purges it on demand. the TTL comes from the same `vaultTtlMinutes` config key with the same precedence as windows (env > config > 60). the cli stays unlocked while a fresh session is cached - that is what keeps the cached key usable, and it is the windows behaviour too. symmtry is the point: one tap per hour on every machine, not one per run.
-- **parity proven on the muse container (2026-11-01)**: two consecutive `linux_real.py` runs in the container, the second one inside the TTL: `verification codes pushed: 0`, `times it asked the phone: 0`, `reused the cached session: 1`, `rate limit hits: 0`, `failures: []`. the windows side proves the same from the other end - the cached session key alone reads the vault (`bw list items --session <cached>` -> 1334 items) with no unlock and no phone approval, and `bw status` says `locked` on both machines while the cached key still works. the session key does not need the cli to be unlocked, only to be *authenticated* (`unauthenticated` is the one state that forces a new approval).
-- **one profile root for both platforms (2026-11-02)**: `mainframe-paths.psm1` is the ONLY place that knows where the profile lives - `%APPDATA%\mainframe` on windows, `$XDG_CONFIG_HOME\mainframe` (or `~/.config/mainframe`) on linux. every account helper, both vault modules and the session key path go through it, so the same helper code finds the same profiles, the same cached session and the same tool state on either platform. the windows layout is unchanged (existing profiles stay put) and `$env:MAINFRAME_PROFILE_ROOT` overrides it. `tests/mainframe-paths.Tests.ps1` pins the rule down under BOTH runtimes, including the linux branch (it clears `$env:OS` to take it). **never hardcode `$env:APPDATA` in a new script** - use `Get-MainframeAccountsDir` / `Get-MainframeAccountDir` / `Get-MainframeSessionKeyPath`, or the helper will silently look in the wrong place on linux.
+- **Antigravity mid-thread model switch detection across full transcript (2026-11-09)**: `windows/vault-approval.psm1` previously split transcript inspection between `-Tail 100` and `-TotalCount 50`. In conversations longer than ~150 lines, any mid-thread model switch between lines 51 and (Total - 100) fell into a dead zone where `-Tail 100` found nothing and fell back to `-TotalCount 50`, falsely reporting the initial thread model (e.g. `Gemini 3.8 Flash (Medium)` instead of `Gemini 3.8 Flash (High)`). Furthermore, raw string matching on `transcript.jsonl` risked matching tool outputs echoing transcript text. `Get-CallerIdentity` now filters strictly for `"type":"USER_INPUT"` steps across the full conversation history and takes the latest match.
+- **cross-agent 1-hour session reuse & stampede mitigation (2026-10-28)**: vault unlock is shared across all agents on the box via the profile root's `accounts/bitwarden/session.key` (windows: `%APPDATA%\mainframe\...`, linux: `$XDG_CONFIG_HOME/mainframe\...` - see `windows/mainframe-paths.psm1`). 1-tap mobile approval unlocks the vault once for 60 minutes for ALL agents (Antigravity, OpenCode, Claude Code, terminal). Previously, transient Node/Bitwarden CLI failures (concurrent execution locking `data.json`, stderr output breaking JSON parse) caused `Test-VaultSession` and external scripts (`get-session.ps1`, `unlock.ps1`) to mistakenly conclude the vault was locked or delete `session.key`, triggering duplicate approval prompts on phone within the same hour. `Test-VaultSession` now passes `--session` explicitly and retries once before declaring locked. `Wait-VaultApprovalCiphertext` in `windows/vault-approval.psm1` polls disk for fresh `session.key` writes while waiting for approval, instantly unblocking concurrent agent runs without asking for duplicate approvals. that only helps a request that is ALREADY asking, though - the prompt itself is single-flight since 2026-11-02, see "one phone prompt at a time" below.
+- **the linux side now has the same 1-hour session (2026-11-01)**: `linux/linux_real.py` used to unlock the vault on EVERY run and lock it again in a `finally`, so a container asked the phone for a tap every single time. it now caches the raw bw session key at `<work_root>/vault/session.key` (mode 600) exactly like windows does at `%APPDATA%\mainframe\accounts\bitwarden\session.key`: a run inside the TTL reuses it and asks for NOTHING, an expired one is locked and purged so the phone is asked again, and `--lock-vault` (the linux twin of `windows/vault-lock.ps1`) purges it on demand. the TTL comes from the same `vaultTtlMinutes` config key with the same precedence as windows (env > config > 60). the cli stays unlocked while a fresh session is cached - that is what keeps the cached key usable, and it is the windows behaviour too. symmtry is the point: one tap per hour on every machine, not one per run.
+- **parity proven on the muse container (2026-11-01)**: two consecutive `linux/linux_real.py` runs in the container, the second one inside the TTL: `verification codes pushed: 0`, `times it asked the phone: 0`, `reused the cached session: 1`, `rate limit hits: 0`, `failures: []`. the windows side proves the same from the other end - the cached session key alone reads the vault (`bw list items --session <cached>` -> 1334 items) with no unlock and no phone approval, and `bw status` says `locked` on both machines while the cached key still works. the session key does not need the cli to be unlocked, only to be *authenticated* (`unauthenticated` is the one state that forces a new approval).
+- **one profile root for both platforms (2026-11-02)**: `windows/mainframe-paths.psm1` is the ONLY place that knows where the profile lives - `%APPDATA%\mainframe` on windows, `$XDG_CONFIG_HOME\mainframe` (or `~/.config/mainframe`) on linux. every account helper, both vault modules and the session key path go through it, so the same helper code finds the same profiles, the same cached session and the same tool state on either platform. the windows layout is unchanged (existing profiles stay put) and `$env:MAINFRAME_PROFILE_ROOT` overrides it. `tests/mainframe-paths.Tests.ps1` pins the rule down under BOTH runtimes, including the linux branch (it clears `$env:OS` to take it). **never hardcode `$env:APPDATA` in a new script** - use `Get-MainframeAccountsDir` / `Get-MainframeAccountDir` / `Get-MainframeSessionKeyPath`, or the helper will silently look in the wrong place on linux.
 - **the wacli test suite runs on windows again (2026-11-02)**: `main` was red - 4 failures and 27 errors on windows - because of three things that are easy to trip over again:
   - **a content pin must be over the canonical (LF) form.** the runtime-series manifest pins sha256 over the committed bytes, but a windows checkout has CRLF in the working tree, so `hashlib.sha256(path.read_bytes())` could NEVER match there. `patches/wacli/verify_runtime.py` now hashes the CRLF-normalised bytes - the pin stays on the content, not on the checkout.
   - **`Path.is_absolute()` is not portable.** on windows `/absolute.patch` is ROOT-RELATIVE, so it slipped past the absolute-path check of the patch member and resolved inside the patch directory. the member check now rejects a leading `/` or `\` and a windows drive as well.
@@ -2085,8 +2099,8 @@ runner's deadline, so an old request reads "Stale request" and refuses to send.
 
 - **the link carries the deadline.** both runners append `&exp=<unix seconds>`
   to the fragment, derived from their own wait window: `TAB_WAIT_SECONDS` (600)
-  in `linux_real.py`, `-TimeoutSeconds` (300 default, 600 from
-  `Ensure-VaultSession`) in `vault-approval.psm1` via
+  in `linux/linux_real.py`, `-TimeoutSeconds` (300 default, 600 from
+  `Ensure-VaultSession`) in `windows/vault-approval.psm1` via
   `Get-VaultApprovalUrl -ExpiresInSeconds`. do not hardcode a separate number --
   if the wait grows, `exp` grows with it.
 - **the runner also publishes a marker when it gives up.** `Send-VaultRequestExpired`
@@ -2117,7 +2131,7 @@ runner's deadline, so an old request reads "Stale request" and refuses to send.
 request (host, agent, code, pubkey, sid), push fake approval cards to the phone,
 and post garbage that killed a live approval.
 
-- **no default topic.** `Get-VaultNtfyTopic` (exported by `vault-approval.psm1`)
+- **no default topic.** `Get-VaultNtfyTopic` (exported by `windows/vault-approval.psm1`)
   resolves `-Topic` -> `MAINFRAME_NTFY_TOPIC` -> `ntfyTopic` in
   `mainframe.config.json` (script dir, cwd, `~/.config/mainframe/`), and throws
   with the searched paths when nothing is set. never reintroduce a literal topic
@@ -2171,7 +2185,7 @@ a new machine joins. what is left:
   `mainframe.approval-signing.key` (renaming it would break existing
   machines for zero behavior gain); it signs nothing.
 - **the ntfy credential is deleted too.** `Get-VaultNtfyToken` and
-  `Get-VaultNtfyCredential` are gone from `vault-approval.psm1`; the
+  `Get-VaultNtfyCredential` are gone from `windows/vault-approval.psm1`; the
   `-Token`/`-Auth`/`-NoToken` params are gone; the relay's `authorize()`
   is gone. `ntfyAuth`/`ntfyToken` in `mainframe.config.json` are unread —
   remove them if seen. the worker secrets `MF_RELAY_AUTH`, `MF_MAIN_TOPIC`
@@ -2260,8 +2274,8 @@ a new machine joins. what is left:
   has to speak the ntfy http api, so a relay of your own in front of ntfy.sh
   works and the phone keeps the same ntfy app and the same topic. `pagesBase`
   is any host that serves `docs/vault-tab.html`, so the tap link does not have
-  to be a raw `github.io` path. windows (`vault-approval.psm1`) and linux
-  (`linux_real.py`) read the same config file on purpose: one file, both
+  to be a raw `github.io` path. windows (`windows/vault-approval.psm1`) and linux
+  (`linux/linux_real.py`) read the same config file on purpose: one file, both
   machines, identical approval url. when the relay is not ntfy.sh the runner
   adds `srv=<relay>` to the link fragment and `docs/vault-tab.html` posts the
   ciphertext back through that relay -- without it the page would post to
@@ -2422,7 +2436,7 @@ than noise: every pending request polled the relay every 2 s, and tripping
 ntfy's rate limit also eats the *push*, so the request that mattered went
 silent (the poll then backs off to 30 s and the phone never hears anything).
 
-`vault-approval.psm1` now serialises the whole thing through one file next to
+`windows/vault-approval.psm1` now serialises the whole thing through one file next to
 the cached session:
 
     <profile root>/accounts/bitwarden/approval.lock
@@ -2435,7 +2449,7 @@ the cached session:
   naming the request it is behind (`code [42] by opencode @ LAPTOP-MAIN`).
 - a session key written while a request waits means another agent already
   unlocked: `Get-VaultMasterPassword` returns `__SESSION_ALREADY_UNLOCKED__`
-  and NOTHING is pushed. `Ensure-VaultSession` and `vault-flow.ps1` treat that
+  and NOTHING is pushed. `Ensure-VaultSession` and `windows/vault-flow.ps1` treat that
   as success, so a queue drains with one tap.
 - the turn carries its own deadline (`startedAt`/`expiresAt` = its wait window
   plus 15 s) so a crashed holder cannot wedge the queue: once it lapses (plus a
@@ -2472,14 +2486,14 @@ a secret. normally nothing needs doing: the deadline handles it.
 
 ## one vault flow, one implementation
 
-the python copy of the vault flow is GONE. `linux_real.py` no longer has
+the python copy of the vault flow is GONE. `linux/linux_real.py` no longer has
 `obtain_master_password`, `unseal_email`, `generate_tab_key`,
 `wait_for_tab_password`, `read_cached_session`, `session_key_path`,
 `extract_vault_secrets`, `dispatch_ntfy_unlock` or `detect_caller_identity`.
-everything lives in `vault-secret.psm1` + `vault-approval.psm1`, and both
-machines drive it through `vault-flow.ps1`:
+everything lives in `windows/vault-secret.psm1` + `windows/vault-approval.psm1`, and both
+machines drive it through `windows/vault-flow.ps1`:
 
-    pwsh -NoProfile -File vault-flow.ps1 -Json [-Checkout DIR] [-BwPath PATH]
+    pwsh -NoProfile -File windows/vault-flow.ps1 -Json [-Checkout DIR] [-BwPath PATH]
          [-NtfyTopic T] [-Server URL] [-PagesBase URL] [-OutputPath FILE]
          [-Lock | -LockIfStale]
 
@@ -2496,7 +2510,7 @@ machines drive it through `vault-flow.ps1`:
   same `mainframe.config.json` windows reads. the linux runner passes only
   what the operator typed on the command line.
 
-linux needs a `pwsh` before the vault leg can run. `pwsh_linux.py` installs
+linux needs a `pwsh` before the vault leg can run. `linux/pwsh_linux.py` installs
 the official linux tarball: bounded download, pinned to two independently
 published digests (the release asset's `digest` AND the release notes), no
 links and no traversal in the archive, an isolated staging tree, and an atomic
@@ -2509,13 +2523,13 @@ install and a failure to start is a loud error, never a silent skip.
 
 - **`Write-Warning` lands on STDOUT in pwsh 7 when the output is redirected.**
   that corrupts a machine-readable stdout. the vault modules therefore warn
-  through `Write-MainframeWarning` (in `mainframe-paths.psm1`), which writes to
+  through `Write-MainframeWarning` (in `windows/mainframe-paths.psm1`), which writes to
   stderr. never use `Write-Warning` in a module that a cli reads stdout from.
 - **`Write-Host` is the information stream, not the success stream.** a cli
   that prints its result document must use `Write-Output`, or a caller that
   captures stdout gets nothing.
 - **a literal `'.config\mainframe'` never matches on linux.** the profile root
-  has to be resolved through `mainframe-paths.psm1` (`Get-MainframeProfileRoot`,
+  has to be resolved through `windows/mainframe-paths.psm1` (`Get-MainframeProfileRoot`,
   `Get-MainframeConfigValue`). the same goes for `Join-Path $HOME "Downloads\$file"`
   - on linux that looks for a file NAMED `Downloads\file` inside `$HOME`. use
   two joins.
@@ -2523,7 +2537,7 @@ install and a failure to start is a loud error, never a silent skip.
   copies the modules into a temporary directory keeps the checkout's own
   `mainframe.config.json` from shadowing the test's profile root.
 - **`ConvertFrom-Json` on a JSON array returns ONE object in Windows
-  PowerShell 5.1** and many in pwsh 7. `mainframe-json.psm1`
+  PowerShell 5.1** and many in pwsh 7. `windows/mainframe-json.psm1`
   (`ConvertFrom-JsonArray`) is the one place that difference is handled.
 - **the linux config file lookup also checks the working directory**, so a test
   that runs a driver script must run it in a folder without a
@@ -2533,7 +2547,7 @@ install and a failure to start is a loud error, never a silent skip.
   leak down process trees to long-running services (like the automata monitor).
   When a web dashboard spawns a helper to request vault approval, relying on inherited
   environment variables misidentifies the browser request as coming from the agent that
-  spawned the server. `Get-CallerIdentity` in `vault-approval.psm1` checks prompt context
+  spawned the server. `Get-CallerIdentity` in `windows/vault-approval.psm1` checks prompt context
   and process ancestry (e.g. `node.exe` running `monitor`/`server.ts`) first, guaranteeing
   that browser/dashboard triggers are tagged as `browser` with `Model = $null` and an
   appropriate browser icon (`🌐`) rather than an AI agent.
@@ -2569,7 +2583,7 @@ ssh keys, no account profiles and no skill tree. both halves are mapped now.
 
 ### the blob is WinZip AE-2, and python cannot open it
 
-`publish-backup.ps1` wraps the manifest's own archive with
+`windows/publish-backup.ps1` wraps the manifest's own archive with
 `7z a -tzip -mem=AES256`, and appends it to quick as the entry
 `mainframe-secrets.zip`. those entries are `compress_type 99`, which
 **`zipfile` refuses to hand over** - `zf.open(info).read()` raises, and there is
@@ -2608,7 +2622,7 @@ central one's differ).
 loose inside quick, so a file restored from the encrypted blob and the same file
 restored from the quick tree land in exactly ONE place. the single translation
 is `AppData/Roaming/mainframe/accounts` -> the profile root, which is the rule
-`mainframe-paths.psm1` already encodes (`$XDG_CONFIG_HOME/mainframe` on linux).
+`windows/mainframe-paths.psm1` already encodes (`$XDG_CONFIG_HOME/mainframe` on linux).
 
 - an `XDG_CONFIG_HOME` pointing OUTSIDE `$HOME` is **refused**, not ignored:
   activation copies staging INTO the live home, so the profiles would otherwise

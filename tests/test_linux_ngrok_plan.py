@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-import ngrok_linux as ngrok
+from linux import ngrok_linux as ngrok
 
 
 VERSION = "3.4.5"
