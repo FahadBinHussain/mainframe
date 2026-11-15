@@ -473,7 +473,13 @@ Set-VaultBootstrapLink -Link $newLink -Bw $bw -SessionArgs $sessionArgs
 # bootstraps from the link holds a complete config (and can re-push the
 # bundle itself after a rotation, without a vault read). the local
 # config write below stores these exact bytes.
-$config.bootstrapToken = $newToken
+# Add-Member, not direct assignment: a config created before the
+# bootstrapToken field existed has no such property, and assigning
+# a new property to a ConvertFrom-Json object throws (measured
+# 2026-11-15 — the first real link creation died here, after the
+# vault item was already created). -Force replaces the value when
+# the property already exists (rotation).
+$config | Add-Member -NotePropertyName 'bootstrapToken' -NotePropertyValue $newToken -Force
 $bundleJson = $config | ConvertTo-Json -Depth 10
 try {
     Invoke-BootstrapPut -RelayBase $relayBase -Token $newToken -BundleJson $bundleJson

@@ -86,7 +86,12 @@ function Reset-CaseState {
     Set-Content -LiteralPath (Join-Path $bwState 'items.json') -Value '[]' -NoNewline
 }
 function Set-TestConfig {
-    param([string]$Topic = $script:fakeOldTopic, [string]$Server = $script:relayServer, [string]$Token = $null)
+    # $Token is deliberately UNTYPED: a [string]$Token = $null default
+    # coerces $null to '' and the fixture would always carry an (empty)
+    # bootstrapToken property, so no test ever exercised a config with
+    # NO such property at all (the real first-run shape - see the same
+    # note in tests/new-bootstrap-link.Tests.ps1).
+    param([string]$Topic = $script:fakeOldTopic, [string]$Server = $script:relayServer, $Token = $null)
     $obj = [ordered]@{ bitwardenEmail = 'test@example.invalid'; ntfyTopic = $Topic; ntfyServer = $Server; pagesBase = 'https://example.invalid'; vaultTtlMinutes = 60 }
     if ($null -ne $Token) { $obj.bootstrapToken = $Token }
     ($obj | ConvertTo-Json) | Set-Content -LiteralPath $configPath -NoNewline

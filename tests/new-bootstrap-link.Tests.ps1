@@ -80,7 +80,14 @@ function Reset-CaseState {
     Set-Content -LiteralPath (Join-Path $bwState 'items.json') -Value '[]' -NoNewline
 }
 function Set-TestConfig {
-    param([string]$Topic = $script:fakeTopic, [string]$Server = $script:relayServer, [string]$Token = $null)
+    # $Token is deliberately UNTYPED: a [string]$Token = $null default
+    # coerces $null to '' and the fixture would always carry an (empty)
+    # bootstrapToken property - which masked the real failure where a
+    # pre-bootstrap config has NO such property at all (assigning a new
+    # property to a ConvertFrom-Json object throws; the script must use
+    # Add-Member). with $Token untyped, omitting -Token writes a config
+    # with no bootstrapToken property, like a real first-run config.
+    param([string]$Topic = $script:fakeTopic, [string]$Server = $script:relayServer, $Token = $null)
     $obj = [ordered]@{ bitwardenEmail = 'test@example.invalid'; ntfyTopic = $Topic; ntfyServer = $Server; pagesBase = 'https://example.invalid'; vaultTtlMinutes = 60 }
     if ($null -ne $Token) { $obj.bootstrapToken = $Token }
     ($obj | ConvertTo-Json) | Set-Content -LiteralPath $configPath -NoNewline
