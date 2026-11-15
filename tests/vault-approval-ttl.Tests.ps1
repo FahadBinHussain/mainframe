@@ -1,5 +1,14 @@
 # Standalone test for 12-hour extended vault session approval and TTL tracking.
 # Compatible with Windows PowerShell 5.1 and pwsh 7.
+#
+# ISOLATED: every session write goes to a temp profile root and every `bw`
+# call goes to a fake bw in a temp bin dir (same pattern as
+# vault-session-expire.Tests.ps1). this test used to run against the REAL
+# profile - on 2026-11-15 it overwrote the live 12-hour session.key with a
+# fake test key and then deleted it, killing the vault session every agent
+# on the box was using. never run these assertions against the real profile
+# again: the tripwire below fails the test if the session path ever escapes
+# the temp root.
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
@@ -19,9 +28,45 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
     $script:checks++
 }
 
+# --- isolation: temp profile root + fake bw ---
+$rootLeaf = "vault-ttl-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8)
+$root = Join-Path ([IO.Path]::GetTempPath()) $rootLeaf
+$bin = Join-Path $root 'bin'
+$profile = Join-Path $root 'profile'
+New-Item -ItemType Directory -Force -Path $bin, (Join-Path (Join-Path $profile 'accounts') 'bitwarden') | Out-Null
+
+if ($env:OS -eq 'Windows_NT') {
+    $bw = Join-Path $bin 'bw.cmd'
+    @(
+        '@echo off'
+        'if "%1"=="lock" ('
+        '  echo Your vault is locked.'
+        ') else ('
+        '  echo fake bw: unknown command %1 1>&2'
+        '  exit /b 1'
+        ')'
+    ) | Set-Content -LiteralPath $bw -Encoding ASCII
+} else {
+    $bw = Join-Path $bin 'bw'
+    @(
+        '#!/bin/sh'
+        'case "$1" in'
+        '  lock) echo "Your vault is locked.";;'
+        '  *) echo "fake bw: unknown command $1" >&2; exit 1;;'
+        'esac'
+    ) | Set-Content -LiteralPath $bw -Encoding ASCII
+    & chmod 755 $bw
+}
+
+$savedPath = $env:PATH
+$savedProfile = $env:MAINFRAME_PROFILE_ROOT
+
 # 1. Standard plaintext master password (1-hour default)
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 try {
+    $env:PATH = "$bin$([IO.Path]::PathSeparator)$savedPath"
+    $env:MAINFRAME_PROFILE_ROOT = $profile
+
     $plainPw = 'StandardPassword123!'
     $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($plainPw)
     $cipherBytes = $rsa.Encrypt($plainBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256)
@@ -45,6 +90,7 @@ try {
     # 3. Set-VaultSessionKey persists .ttl file next to session.key
     $testSessionKey = 'test-session-key-abcdef1234567890'
     $sessionPath = Set-VaultSessionKey -SessionKey $testSessionKey
+    Assert-True ($sessionPath -like "*$rootLeaf*") 'session.key must live in the temp profile, never the real one'
     Assert-True (Test-Path -LiteralPath $sessionPath) 'session.key exists'
 
     $ttlPath = [System.IO.Path]::ChangeExtension($sessionPath, '.ttl')
@@ -64,6 +110,9 @@ try {
 } finally {
     $rsa.Dispose()
     Remove-Item Env:MAINFRAME_VAULT_APPROVED_TTL -ErrorAction SilentlyContinue
+    $env:PATH = $savedPath
+    if ($null -eq $savedProfile) { Remove-Item Env:MAINFRAME_PROFILE_ROOT -ErrorAction SilentlyContinue } else { $env:MAINFRAME_PROFILE_ROOT = $savedProfile }
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "vault-approval-ttl checks: $script:checks passed" -ForegroundColor Green

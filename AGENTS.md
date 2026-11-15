@@ -61,7 +61,7 @@ conventions used below:
 
 the root used to hold 86 files flat. now it holds entry points only; everything else lives in its subsystem dir:
 
-- root: `boot.ps1`, `boot.sh`, `bootstrap.ps1`, `bootstrap.sh`, `boot-remote.sh`, `restore.sh`, `backup.cmd`, `restore.cmd`, `wipe.cmd`, docs, `mainframe.config.example.json`, `bw-email.enc.json`
+- root: `boot.ps1`, `boot.sh`, `bootstrap.ps1`, `bootstrap.sh`, `boot-remote.sh`, `restore.sh`, `backup.cmd`, `restore.cmd`, `wipe.cmd`, `run-tests.py`, docs, `mainframe.config.example.json`, `bw-email.enc.json`
 - `accounts/` — the 17 `*-account.ps1` helpers + `account-contract.ps1`
 - `windows/` — backup/restore/vault powershell (`backup.ps1`, `restore.ps1`, `vault-*.ps1`, `vault-*.psm1`, `mainframe-*.psm1`) + `strip-ditto-favorites.py`
 - `linux/` — the linux restore engine as a python package (`linux_real.py`, `linux_restore.py`, `linux_packages.py`, `linux_secrets.py`, `linux_migrations.py` + the 16 per-app plans). run it as `python3 -m linux.linux_real` from the repo root — `boot.sh` / `restore.sh` set `PYTHONPATH` for you, so the entry points work from anywhere
@@ -69,7 +69,13 @@ the root used to hold 86 files flat. now it holds entry points only; everything 
 - `manifests/` — the allowlists (`scoop-allowed.json`, `winget-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`) + `tool-secrets.manifest.json`
 - `tests/`, `docs/`, `patches/wacli/`, `wacli-vss-client/`, `workers/`, `bucket/` — unchanged
 
-path rules that follow from the layout: a script inside `accounts/` or `windows/` reaches the repo root with `(Split-Path $PSScriptRoot -Parent)`, never `$PSScriptRoot` alone. `restore.ps1`, `restore-secrets.ps1` and `wipe.ps1` are the exception — they are copied INTO the backup, so their `$PSScriptRoot` means the backup dir at runtime and their sibling references stay as-is. `linux_packages.build_plan(repo)` takes the checkout root and reads the allowlists from `repo/manifests/`; test fixtures write theirs to `<tmpdir>/manifests/`.
+path rules that follow from the layout: a script inside `accounts/` or `windows/` reaches the repo root with `(Split-Path $PSScriptRoot -Parent)`, never `$PSScriptRoot` alone. `restore.ps1`, `restore-secrets.ps1` and `wipe.ps1` are the exception — they are copied INTO the backup, so their `$PSScriptRoot` means the backup dir at runtime and their sibling references stay as-is. `linux_packages.build_plan(repo)` takes the checkout root and reads the allowlists from `repo/manifests/`; test fixtures write theirs to `<tmpdir>/manifests/`. `Get-MainframeCheckoutRoot` finds the checkout by probing for `windows/vault-secret.psm1` (or the old root-level one on a pre-restructure clone) — the probe went blind in the restructure when the modules moved, and the key test caught it (2026-11-15).
+
+## running the tests
+
+`python3 run-tests.py` runs every suite and prints one verdict (exit 0 only when all pass): the python unittest suite (733 tests), all 10 `tests/*.Tests.ps1` files under pwsh, all 4 `tests/*.Tests.sh` files under bash, and `accounts/account-contract.ps1`. the 20 pre-existing python failures are pinned in `tests/known-failures.txt` — the run fails if the failure set changes in either direction; re-record with `python3 run-tests.py --update-baseline` and review the diff before committing. two ps1 tests are windows-only (`mainframe-paths`, `vault-approval-lock`) and skip loudly on linux; `linux-real.Tests.sh` is expected to fail without git credentials in the temp HOME.
+
+a test that touches session or profile state MUST run isolated: a temp profile root via `$env:MAINFRAME_PROFILE_ROOT` plus a fake `bw` on PATH (the pattern in `vault-session-expire.Tests.ps1`, `vault-flow.Tests.ps1` and `vault-approval-ttl.Tests.ps1`). the unisolated ttl test deleted the live 12-hour vault session on 2026-11-15. the runner also points `MAINFRAME_PROFILE_ROOT` at a fresh temp dir for every ps1 run as a backstop.
 
 ## account helper contract
 
@@ -1981,7 +1987,7 @@ than `Add-Content`, which writes platform CRLF.
 - `--convert-portable` requires recovery and is independent of `--apply-portable`. Validated conversions are the six-enum root Git config subset and the exact `persist/mpv/portable_config/mpv.conf` five-boolean subset in `linux/linux_migrations.py`; mpv profiles, paths/devices, scripts, unknown fields, other files, and runtime/version compatibility remain unverified. Extend adapters only with understood source/target semantics and deterministic fixtures. Unknown/sensitive fields stay explicitly blocked without echoing values or private subsection names. Preserve original bytes and report conversion separately from installation/activation. No real restore/bootstrap or production payload inspection in development tests; no global instruction edits.
 - Local execution requires a sibling child and refuses network fallback. Remote scriptblock / Bash `-c` execution downloads only its platform child and cleans temporary files. Fetching the launcher itself is outside preview's no-download guarantee; preserve fetch failure with `&&` in the Bash command instead of piping unchecked downloads into a shell. The old short link remains Windows-only.
 - Validate with `pwsh -NoProfile -File tests/bootstrap.Tests.ps1`, `bash tests/bootstrap.Tests.sh`, and `bash -n` separately on `bootstrap.sh`, `boot.sh`, and `tests/bootstrap.Tests.sh`. Tests use inert HTTP/dispatch fixtures; mocked Windows tests on Linux are not live Windows validation. Never execute real bootstraps on a working machine just to test dispatch.
-- Also run `bash tests/bootstrap-forward.Tests.sh`, `bash tests/boot.Tests.sh`, `python3 -m unittest discover -s tests -p 'test_linux_*.py'`, and syntax-check `restore.sh`. These fixtures must not install packages, clone production repos, or alter the live home.
+- Also run `python3 run-tests.py` (every suite, one verdict) and syntax-check `restore.sh`. These fixtures must not install packages, clone production repos, or alter the live home.
 - Before publishing, inspect the complete diff for secrets, real account identifiers, machine-specific data, and disallowed adult content. Keep project notes generic and preserve existing LF formatting.
 
 ## Android Command-Line Tools cross-platform restoration

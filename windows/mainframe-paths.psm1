@@ -76,7 +76,10 @@ function Get-MainframeCheckoutRoot {
     $candidates += (Join-Path $HOME '.local/share/mainframe')
     foreach ($candidate in $candidates) {
         if (-not $candidate) { continue }
-        if (Test-Path -LiteralPath (Join-Path $candidate 'vault-secret.psm1')) { return $candidate }
+        # the modules moved to windows/ in the 2026-11-15 restructure; an
+        # older checkout still has them at the root. either layout counts.
+        if ((Test-Path -LiteralPath (Join-Path $candidate 'windows/vault-secret.psm1')) -or
+            (Test-Path -LiteralPath (Join-Path $candidate 'vault-secret.psm1'))) { return $candidate }
     }
     return $null
 }
