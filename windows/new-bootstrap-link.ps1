@@ -308,11 +308,12 @@ function Set-VaultBootstrapLink {
         Write-Host "vault bootstrap-link item updated: $script:VaultBootstrapLinkItemName"
         return
     }
-    # the item is built explicitly: the rust bw CLI's `get template
-    # item.securenote` returns just {"type":0} — no name/notes fields
-    # to fill in, and the wrong type for a SecureNote (2) — so the
-    # template is worse than useless here (measured 2026-11-15: the
-    # first real link creation died setting .name on it).
+    # the item is built explicitly: the bw CLI's (2026.10.0) `get
+    # template item.securenote` returns just {"type":0} — no
+    # name/notes fields to fill in, and the wrong type for a
+    # SecureNote (2) — so the template is worse than useless here
+    # (measured 2026-11-15: the first real link creation died
+    # setting .name on it).
     $newItem = [pscustomobject]@{
         type = 2
         name = $script:VaultBootstrapLinkItemName
