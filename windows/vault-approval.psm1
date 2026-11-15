@@ -1353,7 +1353,12 @@ function Get-VaultMasterPassword {
             # the caller runs `bw unlock` next; keep the turn a little longer so
             # no queued waiter beats it to a second prompt.
             $approved = $true
-            Write-Host "password decrypted successfully via 1-tap biometric approval" -ForegroundColor Green
+            # the runner only ever sees ciphertext: it cannot know whether the
+            # phone side tapped fingerprint or typed the password, so the log
+            # must not claim a method. (2026-11-15: this line used to say
+            # "via 1-tap biometric approval" unconditionally, and two approvals
+            # were misreported as fingerprint when the user had typed.)
+            Write-Host "password decrypted successfully" -ForegroundColor Green
             try {
                 $accountsDir = Join-Path (Get-MainframeAccountsDir) 'bitwarden'
                 if (-not (Test-Path -LiteralPath $accountsDir)) {
