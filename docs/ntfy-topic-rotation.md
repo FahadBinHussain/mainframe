@@ -151,6 +151,15 @@ converges at its next live flow.
 - updates the checkout-root `mainframe.config.json` too, IF it carries
   an `ntfyTopic`. if it exists without one, the script warns and leaves
   it alone.
+- then pushes the updated profile config as the bootstrap bundle: PUT
+  to the relay under the permanent link's token (local config
+  `bootstrapToken` first, else the token in the vault bootstrap-link
+  item), so the link serves the new topic. a failed push fails the run
+  LOUDLY at the end (exit 1) with the exact recovery
+  (`windows/new-bootstrap-link.ps1 -PushOnly`) — the rotation itself
+  is never rolled back. if no link was ever created, the failure says
+  so and the recovery is creating one (`windows/new-bootstrap-link.ps1`
+  plain, once).
 - writes atomically (temp file + move), keeps mode 0600 on non-windows.
 - refuses loudly and writes nothing if the profile config is missing or
   unparseable, or if it carries no `ntfyTopic` at all.
@@ -198,7 +207,7 @@ is why step 4 waits for every machine.
 
 - the OLD topic stays usable. there is no relay-side deny list and no
   revocation: anyone who already knows the old topic can still read its
-  (12 h) history and push cards to it — but the phone is no longer
+  (1 h) history and push cards to it — but the phone is no longer
   subscribed to it, so those cards go nowhere. rotation limits future
   exposure; it does not revoke the old topic.
 - the topic must be typed into the phone by hand. there is no

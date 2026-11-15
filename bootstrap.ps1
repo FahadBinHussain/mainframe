@@ -1,7 +1,7 @@
 #Requires -Version 7
 # Native Windows launcher; boot.ps1 owns all machine changes.
-# -BootstrapLink <url> downloads the config bundle once from the relay
-# (single-use link from windows/new-bootstrap-link.ps1) and places it as
+# -BootstrapLink <url> downloads the config bundle from the relay
+# (permanent link from windows/new-bootstrap-link.ps1) and places it as
 # mainframe.config.json before the bootstrap runs. -ConfigOnly places the
 # config and stops (no bootstrap dispatched).
 [CmdletBinding()]
@@ -69,11 +69,11 @@ function Get-MainframeBootstrapProfileRoot {
     return Join-Path $env:APPDATA 'mainframe'
 }
 
-# One-link bootstrap: download the config bundle once from the relay and
-# place it as mainframe.config.json (atomic). The link is single-use: a
-# successful download consumes it, so a failure AFTER the download means
-# a new link must be generated. MAINFRAME_BOOTSTRAP_TEST_BUNDLE (a local
-# file path) replaces the download - test hook only, never used in production.
+# One-link bootstrap: download the config bundle from the relay and
+# place it as mainframe.config.json (atomic). The link is permanent:
+# GET is repeatable, so a failed download can simply be re-run.
+# MAINFRAME_BOOTSTRAP_TEST_BUNDLE (a local file path) replaces the
+# download - test hook only, never used in production.
 function Install-MainframeBootstrapConfig {
     param([string]$BootstrapLink)
     if ($BootstrapLink -notmatch '^https://[^/]+/bootstrap/[A-Za-z0-9_-]{22}$') {
@@ -100,7 +100,7 @@ function Install-MainframeBootstrapConfig {
             try {
                 Invoke-WebRequest -Uri $BootstrapLink -OutFile $tempFile -ErrorAction Stop
             } catch {
-                throw "the bootstrap link download failed - the link may already be used or expired (single-use, 1h). generate a new link and re-run. ($($_.Exception.Message))"
+                throw "the bootstrap link download failed - check the link and your network, then re-run (the link is permanent, a failed download loses nothing). ($($_.Exception.Message))"
             }
         }
         if (-not $IsWindows -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
@@ -113,10 +113,10 @@ function Install-MainframeBootstrapConfig {
         try {
             $config = $raw | ConvertFrom-Json -ErrorAction Stop
         } catch {
-            throw "the downloaded bundle is not valid JSON. the link was consumed by the download, so generate a new link and re-run. ($($_.Exception.Message))"
+            throw "the downloaded bundle is not valid JSON. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run. ($($_.Exception.Message))"
         }
         if (-not $config.ntfyTopic -or ($config.ntfyTopic -notmatch '^[a-z0-9]{32}$')) {
-            throw 'the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. the link was consumed by the download, so generate a new link and re-run.'
+            throw 'the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run.'
         }
         Move-Item -LiteralPath $tempFile -Destination $configPath -Force
         return $configPath
@@ -137,7 +137,7 @@ function Invoke-MainframeBootstrap {
     if ($DryRun) {
         Write-Host 'Dry run: no downloads, bootstrap execution, or machine changes.'
         if ($BootstrapLink) {
-            Write-Host 'Dry run: would download the bootstrap bundle from the relay (the link is NOT consumed by a dry run).'
+            Write-Host 'Dry run: would download the bootstrap bundle from the relay (no download happens on a dry run).'
         }
         return
     }

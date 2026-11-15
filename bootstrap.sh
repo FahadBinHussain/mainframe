@@ -18,18 +18,18 @@ Usage: bootstrap.sh [--dry-run] [--bootstrap-link <url>] [--config-only] [--help
 Select and run the Linux boot.sh bootstrap. --dry-run only reports the route.
 Use -- --restore ... or -- --packages ... from a reviewed checkout.
 Use -- --setup-tools for prerequisite setup only (not a restore).
---bootstrap-link <url> downloads the config bundle once from the relay
-(single-use link from new-bootstrap-link.ps1) and places it as
+--bootstrap-link <url> downloads the config bundle from the relay
+(permanent link from new-bootstrap-link.ps1) and places it as
 mainframe.config.json (0600) before the bootstrap runs. --config-only
 places the config and stops (no bootstrap dispatched).
 EOF
 }
 
-# One-link bootstrap: download the config bundle once from the relay and
-# place it as mainframe.config.json (0600, atomic). The link is single-use:
-# a successful download consumes it, so a failure AFTER the download means
-# a new link must be generated. MAINFRAME_BOOTSTRAP_TEST_BUNDLE (a local
-# file path) replaces the download - test hook only, never used in production.
+# One-link bootstrap: download the config bundle from the relay and
+# place it as mainframe.config.json (0600, atomic). The link is
+# permanent: GET is repeatable, so a failed download can simply be
+# re-run. MAINFRAME_BOOTSTRAP_TEST_BUNDLE (a local file path) replaces
+# the download - test hook only, never used in production.
 mainframe_bootstrap_config() {
     local link=$1
     if [[ ! "$link" =~ ^https://[^/]+/bootstrap/[A-Za-z0-9_-]{22}$ ]]; then
@@ -52,7 +52,7 @@ mainframe_bootstrap_config() {
     else
         if ! curl --fail --show-error --silent --location "$link" --output "$temp_file"; then
             rm -f -- "$temp_file"
-            printf 'mainframe: the bootstrap link download failed - the link may already be used or expired (single-use, 1h). generate a new link and re-run.\n' >&2
+            printf 'mainframe: the bootstrap link download failed - check the link and your network, then re-run (the link is permanent, a failed download loses nothing).\n' >&2
             return 1
         fi
     fi
@@ -60,13 +60,13 @@ mainframe_bootstrap_config() {
     # truncated download (or an error page) before it becomes the config.
     if ! grep -q '"ntfyTopic"[[:space:]]*:[[:space:]]*"[a-z0-9]\{32\}"' "$temp_file"; then
         rm -f -- "$temp_file"
-        printf 'mainframe: the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. the link was consumed by the download, so generate a new link and re-run.\n' >&2
+        printf 'mainframe: the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run.\n' >&2
         return 1
     fi
     if command -v python3 >/dev/null 2>&1; then
         if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$temp_file" 2>/dev/null; then
             rm -f -- "$temp_file"
-            printf 'mainframe: the downloaded bundle is not valid JSON. the link was consumed by the download, so generate a new link and re-run.\n' >&2
+            printf 'mainframe: the downloaded bundle is not valid JSON. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run.\n' >&2
             return 1
         fi
     fi
@@ -181,7 +181,7 @@ mainframe_run() {
     if ((dry_run)); then
         printf 'Dry run: no downloads, bootstrap execution, or machine changes.\n'
         if [[ -n "$bootstrap_link" ]]; then
-            printf 'Dry run: would download the bootstrap bundle from the relay (the link is NOT consumed by a dry run).\n'
+            printf 'Dry run: would download the bootstrap bundle from the relay (no download happens on a dry run).\n'
         fi
         return 0
     fi

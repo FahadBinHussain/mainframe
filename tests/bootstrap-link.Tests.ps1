@@ -84,7 +84,7 @@ try {
     # 2. the real download path (mocked Invoke-WebRequest, no hook).
     Reset-LinkState
     Invoke-MainframeBootstrap -BootstrapLink $script:testLink -ConfigOnly | Out-Null
-    Assert-True ($script:downloads.Count -eq 1) 'the bundle downloads exactly once'
+    Assert-True ($script:downloads.Count -eq 1) 'the bundle downloads on this run'
     Assert-True (Test-Path -LiteralPath $placed -PathType Leaf) 'download-path config lands'
     Assert-True ((Get-Content -LiteralPath $placed -Raw) -eq $script:fakeConfig) 'download-path config is intact'
 
@@ -102,11 +102,11 @@ try {
     Assert-True ($script:downloads.Count -eq 0) 'malformed link does not download'
     Assert-True (-not (Test-Path -LiteralPath $placed)) 'malformed link places nothing'
 
-    # 5. a dry run never consumes the link.
+    # 5. a dry run downloads nothing.
     Reset-LinkState
     $env:MAINFRAME_BOOTSTRAP_TEST_BUNDLE = $bundleFile
     $out = Invoke-MainframeBootstrap -DryRun -BootstrapLink $script:testLink 6>&1 | Out-String
-    Assert-True ($out -match 'NOT consumed') 'dry run says the link is not consumed'
+    Assert-True ($out -match 'no download happens on a dry run') 'dry run says no download happens'
     Assert-True ($script:downloads.Count -eq 0) 'dry run does not download'
     Assert-True (-not (Test-Path -LiteralPath $placed)) 'dry run places nothing'
     Assert-True ($script:dispatches.Count -eq 0) 'dry run does not dispatch'

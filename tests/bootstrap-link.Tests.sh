@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-link bootstrap: the config bundle downloads once and lands as
+# One-link bootstrap: the config bundle downloads and lands as
 # mainframe.config.json (0600). No network, no real bootstrap: curl and
 # the dispatch are inert doubles, and the bundle is an obvious fake.
 set -u
@@ -88,7 +88,7 @@ assert_true "$(assert_no_file "$TEST_ROOT/dispatch.path")" 'config-only does not
 reset_state
 mainframe_run --bootstrap-link "$LINK" --config-only >"$out_file" 2>&1; status=$?
 assert_true "$((status == 0))" 'curl-path config-only succeeds'
-assert_true "$((downloads == 1))" 'the bundle downloads exactly once'
+assert_true "$((downloads == 1))" 'the bundle downloads on this run'
 assert_true "$(assert_file "$PLACED")" 'curl-path config lands'
 
 # 3. full flow: config lands, then the bootstrap dispatches to boot.sh.
@@ -110,13 +110,13 @@ assert_true "$(assert_contains "$out" 'not a bootstrap link')" 'malformed link n
 assert_true "$((downloads == 0))" 'malformed link does not download'
 assert_true "$(assert_no_file "$PLACED")" 'malformed link places nothing'
 
-# 5. a dry run never consumes the link: no download, no config, no dispatch.
+# 5. a dry run downloads nothing: no download, no config, no dispatch.
 reset_state
 export MAINFRAME_BOOTSTRAP_TEST_BUNDLE="$FAKE_CONFIG"
 mainframe_run --dry-run --bootstrap-link "$LINK" >"$out_file" 2>&1; status=$?
 out=$(cat "$out_file")
 assert_true "$((status == 0))" 'dry run succeeds'
-assert_true "$(assert_contains "$out" 'NOT consumed')" 'dry run says the link is not consumed'
+assert_true "$(assert_contains "$out" 'no download happens on a dry run')" 'dry run says no download happens'
 assert_true "$((downloads == 0))" 'dry run does not download'
 assert_true "$(assert_no_file "$PLACED")" 'dry run places nothing'
 assert_true "$(assert_no_file "$TEST_ROOT/dispatch.path")" 'dry run does not dispatch'

@@ -16,6 +16,13 @@
          %APPDATA%\mainframe\mainframe.config.json on windows), and the
          checkout-root mainframe.config.json too IF it carries a
          ntfyTopic.
+      3. the bootstrap bundle: the updated profile config is PUT to the
+         relay under the permanent bootstrap link's token (local config
+         bootstrapToken first, else the token in the vault bootstrap-link
+         item), so a new machine bootstrapping from the link gets the NEW
+         topic. a failed push FAILS LOUDLY at the end (exit 1) with the
+         exact recovery (windows/new-bootstrap-link.ps1 -PushOnly) - the
+         rotation itself is NOT rolled back.
 
     the vault is the canonical topic now: every other machine converges
     to it on its next vault flow with a live session
@@ -59,6 +66,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $script:VaultNtfyTopicVaultItemName = 'github.com/FahadBinHussain/mainframe / mainframe.ntfy-topic'
+$script:VaultBootstrapLinkItemName = 'github.com/FahadBinHussain/mainframe / mainframe.bootstrap-link'
 $script:BwLastError = ''
 
 function New-NtfyTopic {
@@ -276,6 +284,157 @@ function Set-VaultNtfyTopic {
     Write-Host "vault topic item created: $script:VaultNtfyTopicVaultItemName"
 }
 
+function Test-BootstrapTokenFormat {
+    param([string]$Value)
+    # -cmatch, not -match: the token alphabet is case-sensitive, and a
+    # case-insensitive check would accept values the relay rejects.
+    return ($Value -cmatch '^[A-Za-z0-9_-]{22}$')
+}
+
+function Get-BootstrapTokenFromLink {
+    # the token is the last path segment of a bootstrap link, or $null
+    # when the value is not a bootstrap link at all.
+    param([string]$Link)
+    if (-not $Link) { return $null }
+    if ($Link.Trim() -cmatch '^https://[^/]+/bootstrap/([A-Za-z0-9_-]{22})$') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Get-BootstrapRelayBase {
+    # the relay base is the ntfyServer with the trailing /ntfy mount
+    # stripped - the bootstrap endpoint lives next to it. same guards as
+    # new-bootstrap-link.ps1: the server must end in /ntfy and the base
+    # must be https, or the config goes nowhere.
+    param([string]$NtfyServer)
+    if ([string]::IsNullOrWhiteSpace($NtfyServer)) {
+        throw 'no ntfyServer in the local config - the bootstrap endpoint lives on the worker relay, not on ntfy.sh.'
+    }
+    $server = $NtfyServer.TrimEnd('/')
+    if (-not $server.EndsWith('/ntfy')) {
+        throw "ntfyServer '$server' does not end in /ntfy - the bootstrap endpoint lives next to the relay's /ntfy mount. refusing to send the config anywhere else (sending it to plain ntfy.sh would publish it to a public topic)."
+    }
+    $base = $server.Substring(0, $server.Length - 5)
+    if (-not $base.StartsWith('https://')) {
+        throw "relay base '$base' is not https - refusing to send the config over plain http."
+    }
+    return $base
+}
+
+function Get-RestErrorDetail {
+    # one readable line out of a failed Invoke-RestMethod: the http
+    # status when the runtime kept it, plus the relay's own error field
+    # when the body carried one. 429 names the wait - the relay answers
+    # Retry-After: 60.
+    param($ErrorRecord)
+    $detail = $ErrorRecord.Exception.Message
+    $status = $null
+    try {
+        if ($ErrorRecord.Exception.Response -and $ErrorRecord.Exception.Response.StatusCode) {
+            $status = [int]$ErrorRecord.Exception.Response.StatusCode
+        }
+    } catch {}
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+        try {
+            $detail = ($ErrorRecord.ErrorDetails.Message | ConvertFrom-Json).error
+        } catch {
+            $detail = $ErrorRecord.ErrorDetails.Message
+        }
+    }
+    if ($status -eq 429) {
+        return "HTTP 429 (rate-limited - wait 60 seconds and re-run): $detail"
+    }
+    if ($status) {
+        return "HTTP ${status}: $detail"
+    }
+    return $detail
+}
+
+function Get-VaultBootstrapLink {
+    # the link stored in the vault bootstrap-link item, or $null when the
+    # item does not exist yet. throws loudly when the session is dead or
+    # bw fails - the caller reports that as its own failure, not as "no
+    # link". the session was already proven live by the topic write, so
+    # a failure here means the vault broke mid-run.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Bw,
+        [string[]]$SessionArgs = @()
+    )
+    $statusOut = Invoke-Bw -Bw $Bw -Arguments (@('status') + $SessionArgs)
+    $status = $null
+    if ($statusOut) {
+        try { $status = $statusOut | ConvertFrom-Json } catch { $status = $null }
+    }
+    if (-not $status -or $status.status -ne 'unlocked') {
+        throw 'no live bw session - the vault went away mid-run (the rotation already happened, vault + local are new). unlock the vault and re-push the bundle.'
+    }
+    $listOut = Invoke-Bw -Bw $Bw -Arguments (@('list', 'items', '--search', $script:VaultBootstrapLinkItemName) + $SessionArgs)
+    if ($null -eq $listOut) {
+        throw "bw list items failed - cannot find the vault bootstrap-link item. ($script:BwLastError)"
+    }
+    $items = ConvertFrom-BwJsonArray -Json $listOut
+    # --search is a substring match: only the exact item name is the link.
+    $item = @($items | Where-Object { [string]$_.name -eq $script:VaultBootstrapLinkItemName }) | Select-Object -First 1
+    if (-not $item) { return $null }
+    return ([string]$item.notes).Trim()
+}
+
+function Invoke-BootstrapBundlePush {
+    # push the UPDATED profile config to the relay under the permanent
+    # bootstrap link's token, so the link serves the new topic. never
+    # throws: every failure comes back as a result object, because the
+    # rotation already happened and the caller reports the failure at
+    # the end (with the exact recovery) instead of rolling anything back.
+    # the bundle is the profile config file re-read raw after the write -
+    # the in-memory object is never trusted to be what landed on disk.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileConfig,
+        [Parameter(Mandatory = $true)]
+        [string]$Bw,
+        [string[]]$SessionArgs = @()
+    )
+    $fail = {
+        param([string]$Message, [string]$Recovery)
+        return [pscustomobject]@{ Success = $false; Message = $Message; Recovery = $Recovery }
+    }
+    try {
+        $bundle = Get-Content -LiteralPath $ProfileConfig -Raw -ErrorAction Stop
+        $cfg = $bundle | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return (& $fail "could not re-read the updated profile config ($($_.Exception.Message))" 're-push with: pwsh windows/new-bootstrap-link.ps1 -PushOnly')
+    }
+    try {
+        $relayBase = Get-BootstrapRelayBase -NtfyServer $cfg.ntfyServer
+    } catch {
+        return (& $fail "the relay base cannot be derived: $($_.Exception.Message)" 'fix ntfyServer in the local config (it must be the worker relay url ending in /ntfy), then re-push with: pwsh windows/new-bootstrap-link.ps1 -PushOnly')
+    }
+    $token = $null
+    if ($cfg.bootstrapToken -and (Test-BootstrapTokenFormat -Value $cfg.bootstrapToken)) {
+        $token = $cfg.bootstrapToken
+    } else {
+        try {
+            $vaultLink = Get-VaultBootstrapLink -Bw $Bw -SessionArgs $SessionArgs
+        } catch {
+            return (& $fail "the vault bootstrap-link item could not be read: $($_.Exception.Message)" 'unlock the vault, then re-push with: pwsh windows/new-bootstrap-link.ps1 -PushOnly')
+        }
+        if ($vaultLink) {
+            $token = Get-BootstrapTokenFromLink -Link $vaultLink
+        }
+        if (-not $token) {
+            return (& $fail 'no bootstrap link was ever created - the local config has no bootstrapToken and the vault holds no bootstrap link' 'create the link once with: pwsh windows/new-bootstrap-link.ps1 (the rotation itself already happened - vault + local are new, the bundle is stale until the link exists)')
+        }
+    }
+    try {
+        $null = Invoke-RestMethod -Uri "$relayBase/bootstrap/$token" -Method Put -Body $bundle -ContentType 'application/json' -TimeoutSec 15 -ErrorAction Stop
+    } catch {
+        return (& $fail "the relay refused the bundle: $(Get-RestErrorDetail -ErrorRecord $_)" 're-push with: pwsh windows/new-bootstrap-link.ps1 -PushOnly')
+    }
+    return [pscustomobject]@{ Success = $true; Message = 'pushed'; Recovery = '' }
+}
+
 # --- argument validation ----------------------------------------------------
 if ($ShowTopic -and $ShowCurrent) {
     throw 'pick one: -ShowTopic rotates AND shows the new value, -ShowCurrent only shows the value already in the config. never both.'
@@ -394,6 +553,14 @@ if ($checkoutJson) {
     }
 }
 
+# --- push the bundle: the permanent link must serve the NEW topic --------
+# the rotation is done (vault + local are new). the push never throws: a
+# failure comes back as a result, is reported in the next steps below,
+# and fails the run LOUDLY at the very end with the exact recovery. the
+# rotation is never rolled back because the push failed.
+$pushResult = Invoke-BootstrapBundlePush -ProfileConfig $profileConfig -Bw $bw -SessionArgs $sessionArgs
+$newFingerprint = $newTopic.Substring(0, 4)
+
 # --- next steps (the topic itself is never printed here by default) ---------
 Write-Host ''
 if ($ShowTopic) {
@@ -422,3 +589,19 @@ if ($ShowTopic) {
     Write-Host '  5. verify: trigger one approval and confirm the phone shows it.'
 }
 Write-Host 'honest limit: the OLD topic stays usable - there is no relay-side deny list. rotation limits future exposure, it does not revoke the old topic.'
+Write-Host ''
+if ($pushResult.Success) {
+    Write-Host "bootstrap bundle: pushed - the permanent link now serves the new topic (fingerprint $newFingerprint). a new machine bootstrapping from the link gets the new topic."
+} else {
+    Write-Host "bootstrap bundle: NOT pushed - $($pushResult.Message)"
+    Write-Host 'the rotation itself already happened (vault + local are new) and is NOT rolled back - only the bundle is stale.'
+}
+if (-not $pushResult.Success) {
+    Write-Host ''
+    Write-Host 'BOOTSTRAP BUNDLE PUSH FAILED - the permanent link still serves the OLD topic. a new machine bootstrapping from it now would land on the old topic.'
+    Write-Host "recovery: $($pushResult.Recovery)"
+    # throw, not exit 1: an exit inside a script invoked with & from
+    # another script behaves like a return (measured 2026-11-15) and
+    # would NOT fail the run. a throw fails the run everywhere.
+    throw "bootstrap bundle push failed: $($pushResult.Message) recovery: $($pushResult.Recovery)"
+}

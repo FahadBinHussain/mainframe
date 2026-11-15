@@ -148,37 +148,61 @@ starts):
 ### the one-link bootstrap
 
 a new machine needs no file copied to it, ever — no config copy, no
-key copy. the whole bootstrap is one link + one run:
+key copy. the whole bootstrap is one link + one run. the link is
+PERMANENT: one link, created once, serves the current config (GET is
+repeatable, it never expires, a failed download is just re-run).
 
 - generate, on any existing machine, from the repo root:
   `pwsh windows/new-bootstrap-link.ps1` (on the muse VMs pwsh is not
-  on PATH — use the full path). it reads the local
-  `mainframe.config.json` and posts it to the relay, which stores it
-  under an unguessable 128-bit token for 1 h. prints ONE link, never
-  the config or the topic. no vault session needed (the config is a
-  local file). the bundle is the config ONLY (topic + server +
-  pagesBase + email) — no signing key. `-DryRun` validates without
-  creating a link.
+  on PATH — use the full path). it generates a 128-bit token locally,
+  writes the link into the vault item
+  `github.com/FahadBinHussain/mainframe / mainframe.bootstrap-link`
+  FIRST (a live bw session is required — a dead session fails loudly
+  and nothing is changed), PUTs the local `mainframe.config.json`
+  under the token, deletes the old token's bundle when the local
+  config had one, and writes the new token into the local profile
+  config. prints ONE link, never the config or the topic. a plain run
+  is create-or-rotate: re-running it retires the previous link. the
+  bundle is the config ONLY (topic + server + pagesBase + email +
+  token) — no signing key. `-DryRun` validates without creating
+  anything. `-PushOnly` re-pushes the current config under the
+  existing token (local config first, else the vault item's link) —
+  the recovery path when a rotation's bundle push failed.
 - run, on the new machine — linux:
   `bash bootstrap.sh --bootstrap-link <url>`; windows:
   `pwsh -ExecutionPolicy Bypass -File bootstrap.ps1 -BootstrapLink
   <url>` (pwsh 7; download the launcher from the repo first). the
-  launcher downloads the bundle once (single-use — the second download
-  404s), places the config (0600, atomic), clones mainframe and runs
-  the restore, which ends in the fingerprint approval. done.
-- relay: `POST /bootstrap` creates (rate-limited 60/min per IP, 8 KB
-  cap — the M4 limits; a config is ~600 B), `GET /bootstrap/<token>`
-  downloads once. no creation auth: a link only holds what its creator
-  put in it, and the user only uses links he generated. the token is
-  the credential — treat the link like the config itself. relay code
-  in `automata-private/cloudflare.com/mainframe-vault-relay/`, tests
-  in `test/bootstrap.test.mjs`.
-- a dry run never consumes the link (`--dry-run` / `-DryRun`).
+  launcher downloads the bundle, places the config (0600, atomic),
+  clones mainframe and runs the restore, which ends in the
+  fingerprint approval. done.
+- relay: `PUT /bootstrap/<token>` creates-or-replaces (rate-limited,
+  429 + Retry-After: 60; 8 KB cap — a config is ~600 B),
+  `GET /bootstrap/<token>` serves the bundle, repeatable, never
+  deletes; `DELETE /bootstrap/<token>` deletes (204 either way).
+  `POST /bootstrap` is gone (404). no creation auth: a link only
+  holds what its creator put in it, and the user only uses links he
+  generated. the token is the credential — treat the link like the
+  config itself. relay code in
+  `automata-private/cloudflare.com/mainframe-vault-relay/`, tests in
+  `test/bootstrap.test.mjs`.
+- a dry run downloads nothing (`--dry-run` / `-DryRun`).
   `--config-only` / `-ConfigOnly` places the config and stops (no
   bootstrap dispatched).
+- rotation re-pushes the bundle: `windows/rotate-ntfy-topic.ps1` PUTs
+  the updated config under the same token after rotating, so the link
+  always serves the current topic. a failed push fails the run LOUDLY
+  at the end (exit 1) with the `-PushOnly` recovery — the rotation
+  itself is never rolled back. a bundle carries the token when the
+  pushing machine has one in its config (the plain run always does);
+  a machine that never created the link pushes a token-less bundle —
+  a machine bootstrapped from it pushes via the vault-link fallback,
+  so nothing breaks.
 - tests: `tests/bootstrap-link.Tests.sh` +
   `tests/bootstrap-link.Tests.ps1` (temp HOME/profile root: config
-  lands 0600, values intact, no dispatch in config-only mode).
+  lands 0600, values intact, no dispatch in config-only mode),
+  `tests/new-bootstrap-link.Tests.ps1` +
+  `tests/rotate-ntfy-topic.Tests.ps1` (mock bw + mocked
+  Invoke-RestMethod, no network, no real vault).
 
 bootstrap-once rule: a machine still on pre-self-maintaining code needs
 ONE manual pull (or reset, if its history diverged) to get it — after
@@ -2595,19 +2619,38 @@ whole ecosystem, not one per machine).
   allows approval. enforcement flips only after every machine holds the
   key (A, B, laptop, desktop-main confirmed) — a separate step, never
   flip it casually.
-- **the key travels with the topic, always.** a device without the topic
-  cannot send an approval at all (the runner fails loudly), so there is
-  no new device that approves unsigned: pack restores get key+topic
-  together and their first approval is already signed. the unsigned case
-  only happens on existing machines during the transition, and only when
-  their vault session is dead at that moment.
+- **adding a machine under enforcement: the toggle dance.** with
+  enforcement on, the page refuses unsigned links — and a
+  link-bootstrapped machine's first approval is unsigned (no key
+  yet), so it cannot join while enforcement is on. procedure, done
+  by the assistant on the user's word only: flip `ENFORCE_SIGNING`
+  to `false` in `docs/vault-tab.html`, commit + push + redeploy the
+  relay (the page is served from the worker; github pages rebuilds
+  from mainframe main/docs too), bootstrap the machine, let its
+  first approval through (unsigned, allowed), the unlock self-heals
+  the key, then flip `ENFORCE_SIGNING` back to `true` and redeploy.
+  verify the served page carries the flipped value both times (the
+  worker caches the page for 5 min). never leave enforcement off:
+  the off-window is the only time a forged unsigned link can reach
+  the approve UI.
+- **the key travels with the topic, always — except on a link
+  bootstrap.** a device without the topic cannot send an approval at
+  all (the runner fails loudly). pack restores get key+topic together
+  and their first approval is already signed. a LINK-bootstrapped
+  machine gets config only (no key — the user's pick, 2026-11-15:
+  a leaked link must not forge signed links), so its first approval
+  is unsigned; the key self-heals from the vault right after that
+  first unlock. the unsigned case otherwise only happens on existing
+  machines during the transition, and only when their vault session
+  is dead at that moment.
 - **the runner self-heals.** whenever the vault session is live and the
   local key file is missing, the runner fetches the key from the vault
   and saves it 0600 — at flow start, at request time, and after an
   unlock. the fetch happens AFTER the unlock, never before, so there is
   no circularity. the only deadlock under future enforcement is
   session-dead + key-file-lost at the same time (two simultaneous
-  failures); recovery is re-delivering key+topic via the pack.
+  failures); recovery is re-delivering key+topic via the pack, or
+  the toggle dance above on a physical machine.
 - **rotating the topic** (the one user step: the phone subscription
   changes too) is documented in `docs/ntfy-topic-rotation.md`, scripted
   in `windows/rotate-ntfy-topic.ps1`. the topic is never printed any
