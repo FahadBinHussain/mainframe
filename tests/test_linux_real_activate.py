@@ -17,7 +17,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
-import linux_real as lr  # noqa: E402
+from linux import linux_real as lr  # noqa: E402
 
 
 class ActivateFileDirTests(unittest.TestCase):
