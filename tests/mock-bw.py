@@ -88,10 +88,6 @@ def main(argv):
                     return 0
             print("fake bw: item not found: %s" % args[2], file=sys.stderr)
             return 1
-        if len(args) >= 3 and args[1] == "template" and args[2] == "item.securenote":
-            print(json.dumps({"object": "item", "id": None, "type": 2, "name": "",
-                              "notes": "", "favorite": False, "secureNote": {"type": 0}}))
-            return 0
         print("fake bw: unknown get: %s" % " ".join(args), file=sys.stderr)
         return 1
     if cmd == "encode":

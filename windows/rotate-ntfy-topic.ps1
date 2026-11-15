@@ -262,23 +262,19 @@ function Set-VaultNtfyTopic {
         Write-Host "vault topic item updated: $script:VaultNtfyTopicVaultItemName"
         return
     }
-    # get template takes the session too: a session-less call makes the
-    # rust bw CLI prompt for the master password instead of printing the
-    # template (measured 2026-11-15 — the first real link creation died
-    # here, and the rotate script had the same latent call). encode
-    # stays bare: it works without a session.
-    $templateOut = Invoke-Bw -Bw $Bw -Arguments (@('get', 'template', 'item.securenote') + $SessionArgs)
-    if (-not $templateOut) {
-        throw "bw get template item.securenote failed - cannot create the vault topic item, refusing to rotate. ($script:BwLastError) nothing was changed."
+    # the item is built explicitly: the rust bw CLI's `get template
+    # item.securenote` returns just {"type":0} — no name/notes fields
+    # to fill in, and the wrong type for a SecureNote (2) — so the
+    # template is worse than useless here (measured 2026-11-15: the
+    # first real link creation died setting .name on it, and the
+    # rotate script had the same latent call).
+    $newItem = [pscustomobject]@{
+        type = 2
+        name = $script:VaultNtfyTopicVaultItemName
+        notes = $Topic
+        secureNote = [pscustomobject]@{ type = 0 }
     }
-    try {
-        $template = $templateOut | ConvertFrom-Json
-    } catch {
-        throw "bw get template returned unparseable json - refusing to rotate. nothing was changed."
-    }
-    $template.name = $script:VaultNtfyTopicVaultItemName
-    $template.notes = $Topic
-    $encoded = Invoke-Bw -Bw $Bw -Arguments @('encode') -Stdin ($template | ConvertTo-Json -Depth 10 -Compress)
+    $encoded = Invoke-Bw -Bw $Bw -Arguments @('encode') -Stdin ($newItem | ConvertTo-Json -Depth 10 -Compress)
     if (-not $encoded) {
         throw "bw encode failed for the new vault topic item - refusing to rotate. ($script:BwLastError) nothing was changed."
     }
