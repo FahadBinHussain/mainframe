@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import ctypes
+import grp
 import json
 import os
 import platform
+import pwd
 import re
 import shutil
 import stat
@@ -163,10 +165,57 @@ def _validate_release(release: Mapping[str, Any]) -> dict[str, str]:
     return dict(release)
 
 
+_NOBODY_UIDS = frozenset({65534, 65535})
+
+
+def _is_login_user(pw) -> bool:
+    """A real login user: uid >= 1000, except the nobody uids."""
+    return pw.pw_uid >= 1000 and pw.pw_uid not in _NOBODY_UIDS
+
+
+def _group_has_other_member(gid: int) -> bool:
+    """True if a login user other than root or this user belongs to the group.
+
+    Only login users count: system accounts (uid < 1000, and the nobody uids)
+    are the machine's own services, not other users on a shared box — and a
+    directory one of them plants is caught by the ownership check during
+    traversal anyway. gr_mem omits users whose primary group this is, so
+    passwd is scanned too. Any lookup failure fails closed.
+    """
+    try:
+        euid = os.geteuid()
+        names = set(grp.getgrgid(gid).gr_mem)
+        by_name = {pw.pw_name: pw for pw in pwd.getpwall()}
+        for pw in by_name.values():
+            if pw.pw_gid == gid:
+                names.add(pw.pw_name)
+        for name in names:
+            if name == "root":
+                continue
+            pw = by_name.get(name)
+            if pw is None:
+                return True  # unknown member: fail closed
+            if pw.pw_uid == euid:
+                continue
+            if _is_login_user(pw):
+                return True
+        return False
+    except Exception:
+        return True
+
+
 def _check_ancestor(st: os.stat_result) -> None:
-    """Reject ancestors that are not directories owned by root or this user."""
-    if (not stat.S_ISDIR(st.st_mode) or st.st_uid not in {0, os.geteuid()} or
-            (st.st_mode & 0o022 and not (st.st_mode & stat.S_ISVTX))):
+    """Reject ancestors that are not directories owned by root or this user,
+    or that another user could write to."""
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid not in {0, os.geteuid()}:
+        raise ValueError("Unsafe Bitwarden CLI root ancestor")
+    mode = st.st_mode
+    sticky = bool(mode & stat.S_ISVTX)
+    if mode & 0o002 and not sticky:
+        # world-writable without the sticky bit: anyone could plant files.
+        raise ValueError("Unsafe Bitwarden CLI root ancestor")
+    if mode & 0o020 and not sticky and _group_has_other_member(st.st_gid):
+        # group-writable and a user other than root or this user is in the group.
         raise ValueError("Unsafe Bitwarden CLI root ancestor")
 
 

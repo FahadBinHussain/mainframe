@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -134,6 +135,65 @@ class BitwardenTests(unittest.TestCase):
             with patch.object(lp.bitwarden_tools, "resolve_release", return_value=fixture), patch.object(lp, "execute") as execute:
                 self.assertIn(lp.main(["--repo", str(root), "--distro", "ubuntu", "--arch", "x86_64"]), (0, 3))
                 execute.assert_not_called()
+
+
+class CheckAncestorTests(unittest.TestCase):
+    """_check_ancestor: only a login user other than root/this user blocks an install."""
+
+    GID = 65000
+
+    def _stat(self, mode, uid=0, gid=GID):
+        return os.stat_result((mode, 0, 0, 1, uid, gid, 0, 0, 0, 0))
+
+    def _other_login_uid(self, base=1001):
+        uid = base
+        while uid == os.geteuid():
+            uid += 1
+        return uid
+
+    def _membership(self, gr_mem, passwd):
+        group = SimpleNamespace(gr_mem=list(gr_mem))
+        entries = [SimpleNamespace(pw_name=n, pw_uid=u, pw_gid=g) for n, u, g in passwd]
+        return (patch.object(bw.grp, "getgrgid", return_value=group),
+                patch.object(bw.pwd, "getpwall", return_value=entries))
+
+    def test_group_writable_with_only_system_members_passes(self):
+        # the muse vm case: /home/hatch is 2770, group nogroup, whose only
+        # members are system accounts (nobody, sync, _apt, dhcpcd).
+        gr, pw = self._membership([], [("nobody", 65534, 65534), ("sync", 4, 65534)])
+        with gr, pw:
+            bw._check_ancestor(self._stat(0o42770, gid=65534))
+
+    def test_group_writable_with_a_login_member_fails(self):
+        uid = self._other_login_uid(1001)
+        gr, pw = self._membership(["alice"], [("alice", uid, self.GID)])
+        with gr, pw:
+            with self.assertRaisesRegex(ValueError, "Unsafe Bitwarden CLI root ancestor"):
+                bw._check_ancestor(self._stat(0o42770))
+
+    def test_group_writable_with_a_login_primary_member_fails(self):
+        # gr_mem omits primary-group members; the passwd scan must catch them.
+        uid = self._other_login_uid(1002)
+        gr, pw = self._membership([], [("bob", uid, self.GID)])
+        with gr, pw:
+            with self.assertRaisesRegex(ValueError, "Unsafe Bitwarden CLI root ancestor"):
+                bw._check_ancestor(self._stat(0o42770))
+
+    def test_world_writable_without_sticky_fails(self):
+        with self.assertRaisesRegex(ValueError, "Unsafe Bitwarden CLI root ancestor"):
+            bw._check_ancestor(self._stat(0o40777))
+
+    def test_world_writable_with_sticky_passes(self):
+        bw._check_ancestor(self._stat(0o41777))
+
+    def test_wrong_owner_fails(self):
+        other = 12345 if os.geteuid() != 12345 else 12346
+        with self.assertRaisesRegex(ValueError, "Unsafe Bitwarden CLI root ancestor"):
+            bw._check_ancestor(self._stat(0o40755, uid=other))
+
+    def test_not_a_directory_fails(self):
+        with self.assertRaisesRegex(ValueError, "Unsafe Bitwarden CLI root ancestor"):
+            bw._check_ancestor(self._stat(0o100644))
 
 
 if __name__ == "__main__": unittest.main()
