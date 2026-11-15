@@ -1,7 +1,11 @@
 #Requires -Version 7
 # Native Windows launcher; boot.ps1 owns all machine changes.
+# -BootstrapLink <url> downloads the config bundle once from the relay
+# (single-use link from windows/new-bootstrap-link.ps1) and places it as
+# mainframe.config.json before the bootstrap runs. -ConfigOnly places the
+# config and stops (no bootstrap dispatched).
 [CmdletBinding()]
-param([switch]$DryRun)
+param([switch]$DryRun, [string]$BootstrapLink, [switch]$ConfigOnly)
 
 function Get-MainframePlatform {
     if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) { return 'Windows' }
@@ -55,8 +59,75 @@ function Invoke-MainframeNativeBootstrap {
     }
 }
 
+function Get-MainframeBootstrapProfileRoot {
+    # standalone: this launcher runs on a fresh machine where the repo is
+    # not cloned yet, so it cannot import mainframe-paths.psm1. the
+    # profile root is %APPDATA%\mainframe on windows; MAINFRAME_PROFILE_ROOT
+    # overrides it (tests + the test runner's isolation).
+    if ($env:MAINFRAME_PROFILE_ROOT) { return $env:MAINFRAME_PROFILE_ROOT }
+    if (-not $env:APPDATA) { throw 'APPDATA is not set - cannot locate the mainframe profile root.' }
+    return Join-Path $env:APPDATA 'mainframe'
+}
+
+# One-link bootstrap: download the config bundle once from the relay and
+# place it as mainframe.config.json (atomic). The link is single-use: a
+# successful download consumes it, so a failure AFTER the download means
+# a new link must be generated. MAINFRAME_BOOTSTRAP_TEST_BUNDLE (a local
+# file path) replaces the download - test hook only, never used in production.
+function Install-MainframeBootstrapConfig {
+    param([string]$BootstrapLink)
+    if ($BootstrapLink -notmatch '^https://[^/]+/bootstrap/[A-Za-z0-9_-]{22}$') {
+        throw "not a bootstrap link: $BootstrapLink (expected https://<relay>/bootstrap/<22-char token>)"
+    }
+    $profileRoot = Get-MainframeBootstrapProfileRoot
+    New-Item -ItemType Directory -Force -Path $profileRoot | Out-Null
+    $configPath = Join-Path $profileRoot 'mainframe.config.json'
+    $tempFile = Join-Path $profileRoot ('.mainframe.config.json.tmp.' + [guid]::NewGuid().ToString('N'))
+    try {
+        # the temp file starts empty; the download fills it. the chmod
+        # runs AFTER the download, not before: Copy-Item and
+        # Invoke-WebRequest recreate the file on overwrite and reset its
+        # mode to 644 (measured 2026-11-15), so a pre-download chmod
+        # would not survive. on windows there is nothing to tighten -
+        # the file lives under APPDATA, which is user-private.
+        New-Item -ItemType File -Path $tempFile -Force | Out-Null
+        if ($env:MAINFRAME_BOOTSTRAP_TEST_BUNDLE) {
+            if (-not (Test-Path -LiteralPath $env:MAINFRAME_BOOTSTRAP_TEST_BUNDLE -PathType Leaf)) {
+                throw "test bundle not readable: $env:MAINFRAME_BOOTSTRAP_TEST_BUNDLE"
+            }
+            Copy-Item -LiteralPath $env:MAINFRAME_BOOTSTRAP_TEST_BUNDLE -Destination $tempFile -Force
+        } else {
+            try {
+                Invoke-WebRequest -Uri $BootstrapLink -OutFile $tempFile -ErrorAction Stop
+            } catch {
+                throw "the bootstrap link download failed - the link may already be used or expired (single-use, 1h). generate a new link and re-run. ($($_.Exception.Message))"
+            }
+        }
+        if (-not $IsWindows -and (Get-Command chmod -ErrorAction SilentlyContinue)) {
+            & chmod 0600 $tempFile
+        }
+        # the relay validated the bundle at creation; this catches a
+        # corrupt or truncated download (or an error page) before it
+        # becomes the config.
+        $raw = Get-Content -LiteralPath $tempFile -Raw -ErrorAction Stop
+        try {
+            $config = $raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            throw "the downloaded bundle is not valid JSON. the link was consumed by the download, so generate a new link and re-run. ($($_.Exception.Message))"
+        }
+        if (-not $config.ntfyTopic -or ($config.ntfyTopic -notmatch '^[a-z0-9]{32}$')) {
+            throw 'the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. the link was consumed by the download, so generate a new link and re-run.'
+        }
+        Move-Item -LiteralPath $tempFile -Destination $configPath -Force
+        return $configPath
+    } catch {
+        if (Test-Path -LiteralPath $tempFile) { Remove-Item -LiteralPath $tempFile -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+}
+
 function Invoke-MainframeBootstrap {
-    param([switch]$DryRun)
+    param([switch]$DryRun, [string]$BootstrapLink, [switch]$ConfigOnly)
     $platform = Get-MainframePlatform
     if ($platform -ne 'Windows') {
         throw "Unsupported operating system for bootstrap.ps1: $platform. On Linux, use Bash with bootstrap.sh."
@@ -65,7 +136,21 @@ function Invoke-MainframeBootstrap {
     Write-Host "mainframe: selected $platform -> $scriptName"
     if ($DryRun) {
         Write-Host 'Dry run: no downloads, bootstrap execution, or machine changes.'
+        if ($BootstrapLink) {
+            Write-Host 'Dry run: would download the bootstrap bundle from the relay (the link is NOT consumed by a dry run).'
+        }
         return
+    }
+
+    if ($BootstrapLink) {
+        $configPath = Install-MainframeBootstrapConfig -BootstrapLink $BootstrapLink
+        Write-Host "mainframe: bootstrap config placed at $configPath"
+        if ($ConfigOnly) {
+            Write-Host 'mainframe: config placed, -ConfigOnly: no bootstrap dispatched.'
+            return
+        }
+    } elseif ($ConfigOnly) {
+        throw '-ConfigOnly needs -BootstrapLink (there is nothing to place without a link).'
     }
 
     $temporaryDirectory = $null
@@ -92,5 +177,5 @@ function Invoke-MainframeBootstrap {
 
 # Dot-sourcing loads functions only, allowing offline tests with mocked dispatch.
 if ($MyInvocation.InvocationName -ne '.') {
-    Invoke-MainframeBootstrap -DryRun:$DryRun
+    Invoke-MainframeBootstrap -DryRun:$DryRun -BootstrapLink $BootstrapLink -ConfigOnly:$ConfigOnly
 }

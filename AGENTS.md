@@ -73,9 +73,116 @@ path rules that follow from the layout: a script inside `accounts/` or `windows/
 
 ## running the tests
 
-`python3 run-tests.py` runs every suite and prints one verdict (exit 0 only when all pass): the python unittest suite (733 tests), all 10 `tests/*.Tests.ps1` files under pwsh, all 4 `tests/*.Tests.sh` files under bash, and `accounts/account-contract.ps1`. the 20 pre-existing python failures are pinned in `tests/known-failures.txt` — the run fails if the failure set changes in either direction; re-record with `python3 run-tests.py --update-baseline` and review the diff before committing. two ps1 tests are windows-only (`mainframe-paths`, `vault-approval-lock`) and skip loudly on linux; `linux-real.Tests.sh` is expected to fail without git credentials in the temp HOME.
+`python3 run-tests.py` runs every suite and prints one verdict (exit 0 only when all pass): the python unittest suite (739 tests), all 15 `tests/*.Tests.ps1` files under pwsh, all 5 `tests/*.Tests.sh` files under bash, and `accounts/account-contract.ps1`. the 20 pre-existing python failures are pinned in `tests/known-failures.txt` — the run fails if the failure set changes in either direction; re-record with `python3 run-tests.py --update-baseline` and review the diff before committing. two ps1 tests are windows-only (`mainframe-paths`, `vault-approval-lock`) and skip loudly on linux; `linux-real.Tests.sh` is expected to fail without git credentials in the temp HOME.
 
 a test that touches session or profile state MUST run isolated: a temp profile root via `$env:MAINFRAME_PROFILE_ROOT` plus a fake `bw` on PATH (the pattern in `vault-session-expire.Tests.ps1`, `vault-flow.Tests.ps1` and `vault-approval-ttl.Tests.ps1`). the unisolated ttl test deleted the live 12-hour vault session on 2026-11-15. the runner also points `MAINFRAME_PROFILE_ROOT` at a fresh temp dir for every ps1 run as a backstop.
+
+## self-maintaining design (2026-11-15)
+
+mainframe maintains itself on every machine — linux, windows, muse VMs,
+any checkout. nobody sends commands to a machine to keep it current:
+the machine converges on its own at vault-flow time. the two pieces:
+
+### the ntfy topic lives in the vault
+
+the topic is ONE value shared by every machine + the phone, and the
+vault is its home: vault item `github.com/FahadBinHussain/mainframe /
+mainframe.ntfy-topic` (securenote, the 32-char `[a-z0-9]` topic in the
+notes — same shape as the signing-key item `... / approval-signing.key`).
+
+- whenever a vault flow runs with a live bw session, the runner reads
+  the topic from the vault (`Sync-VaultNtfyTopicFromVault` in
+  `windows/vault-approval.psm1`); if it differs from the local config's
+  `ntfyTopic`, the local config is updated atomically (mode 0600) and
+  the vault value is used. the convergence is logged LOUDLY, 4-char
+  fingerprint only, never the value.
+- session dead or no vault item → the local config is used (existing
+  behavior). the approval path never reads the vault: an approval runs
+  when the session is dead by definition, so the vault read can never
+  succeed there.
+- bootstrap: a new machine gets its config from a one-link bootstrap
+  (see below) — a locked vault cannot be read before the first unlock,
+  so the topic still arrives with the bootstrap, just over a link
+  instead of any file copy. the pack still carries the topic for muse
+  VMs. the signing key needs no copy on any platform — it self-heals
+  from the vault after the first unlock.
+- rotation: `windows/rotate-ntfy-topic.ps1` writes the vault item
+  FIRST (fails LOUDLY if the session is dead, touching nothing), then
+  the local config. every other machine converges at its next vault
+  flow — no commands to send. full procedure in
+  `docs/ntfy-topic-rotation.md`.
+- race: ONE machine rotates at a time. two machines rotating together
+  can leave the vault and a local config split; if that happens, rotate
+  once more from a single machine to settle.
+- known edge: if a machine's session dies AND the phone drops the old
+  topic BEFORE that machine's next live flow, its next approval goes to
+  the old topic and is unheard — same class as the C1 deadlock edge.
+  the phone drops the old subscription only after every machine has
+  converged.
+
+### the checkout heals itself
+
+at vault-flow/engine start — BOTH `windows/vault-flow.ps1` and
+`linux/linux_real.py`, before repo modules load — the checkout syncs
+itself (`Sync-MainframeCheckout` in `windows/mainframe-sync.psm1`,
+`sync_checkout()` in `linux/linux_real.py`; two implementations, same
+algorithm, because pwsh may not exist yet when the linux engine
+starts):
+
+- `git pull --ff-only`. on failure (e.g. divergent history after a
+  rewrite): stash uncommitted changes if dirty, fetch, reset `--hard`
+  to the current branch's upstream, pop the stash.
+- uncommitted work is preserved: the stash never takes untracked files
+  (no `-u`), the reset never touches them either. a pop conflict leaves
+  the work in the stash, recoverable, with a loud warning.
+- a sync failure (no network, no git, not a repo, no origin, no
+  upstream) warns LOUDLY and the flow proceeds with local code — an
+  approval is NEVER blocked on a sync failure.
+- the reset targets the current branch's UPSTREAM ref, not a hardcoded
+  `origin/main` — on main that IS `origin/main`; on a feature branch it
+  resets to that branch's upstream instead of destroying the branch.
+- tests: `tests/mainframe-sync.Tests.ps1` +
+  `tests/test_linux_real_sync.py` (real git in temp dirs, no network)
+  and `tests/vault-approval-topic-converge.Tests.ps1` (mock bw).
+
+### the one-link bootstrap
+
+a new machine needs no file copied to it, ever — no config copy, no
+key copy. the whole bootstrap is one link + one run:
+
+- generate, on any existing machine, from the repo root:
+  `pwsh windows/new-bootstrap-link.ps1` (on the muse VMs pwsh is not
+  on PATH — use the full path). it reads the local
+  `mainframe.config.json` and posts it to the relay, which stores it
+  under an unguessable 128-bit token for 1 h. prints ONE link, never
+  the config or the topic. no vault session needed (the config is a
+  local file). the bundle is the config ONLY (topic + server +
+  pagesBase + email) — no signing key. `-DryRun` validates without
+  creating a link.
+- run, on the new machine — linux:
+  `bash bootstrap.sh --bootstrap-link <url>`; windows:
+  `pwsh -ExecutionPolicy Bypass -File bootstrap.ps1 -BootstrapLink
+  <url>` (pwsh 7; download the launcher from the repo first). the
+  launcher downloads the bundle once (single-use — the second download
+  404s), places the config (0600, atomic), clones mainframe and runs
+  the restore, which ends in the fingerprint approval. done.
+- relay: `POST /bootstrap` creates (rate-limited 60/min per IP, 8 KB
+  cap — the M4 limits; a config is ~600 B), `GET /bootstrap/<token>`
+  downloads once. no creation auth: a link only holds what its creator
+  put in it, and the user only uses links he generated. the token is
+  the credential — treat the link like the config itself. relay code
+  in `automata-private/cloudflare.com/mainframe-vault-relay/`, tests
+  in `test/bootstrap.test.mjs`.
+- a dry run never consumes the link (`--dry-run` / `-DryRun`).
+  `--config-only` / `-ConfigOnly` places the config and stops (no
+  bootstrap dispatched).
+- tests: `tests/bootstrap-link.Tests.sh` +
+  `tests/bootstrap-link.Tests.ps1` (temp HOME/profile root: config
+  lands 0600, values intact, no dispatch in config-only mode).
+
+bootstrap-once rule: a machine still on pre-self-maintaining code needs
+ONE manual pull (or reset, if its history diverged) to get it — after
+that, no human ever sends it a command again.
 
 ## account helper contract
 

@@ -114,6 +114,128 @@ def run(cmd: list[str], *, env: dict[str, str] | None = None,
     return proc
 
 
+def _git(checkout: Path, args: list[str], timeout: float) -> subprocess.CompletedProcess | None:
+    """One git call inside the checkout: the CompletedProcess, or None on
+    timeout / missing git. Never raises - the sync treats every failure
+    as "could not sync", never as an error."""
+    try:
+        return run(["git", "-C", str(checkout), *args], check=False,
+                   timeout=timeout)
+    except (RuntimeError, OSError):
+        return None
+
+
+def sync_checkout(checkout: Path, *, timeout: float = 60.0) -> bool:
+    """Self-healing checkout sync: bring the checkout at ``checkout`` onto
+    its upstream tip, without ever asking a human to pull, reset, or relay
+    a command to another machine.
+
+    The python twin of Sync-MainframeCheckout in windows/mainframe-sync.psm1
+    - both implementations run the same algorithm, and both are called at
+    their entry point BEFORE the repo modules load, so a machine that is
+    behind, or sitting on rewritten history, heals itself on its next run
+    and then runs the fresh code.
+
+    Returns True when the checkout is on the upstream tip afterwards
+    (synced, or already current), False when the sync was skipped or
+    failed - in which case the caller proceeds with local code and the
+    warning is already printed. Never raises, never blocks a run.
+    Untracked files are never touched (no -u, no clean).
+    """
+    try:
+        if not checkout.is_dir():
+            log(f"checkout self-sync: not a directory, skipping: {checkout}")
+            return False
+        if not (checkout / ".git").exists():
+            log(f"checkout self-sync: not a git checkout, skipping: {checkout}")
+            return False
+        if shutil.which("git") is None:
+            log("checkout self-sync: git not found on PATH, skipping")
+            return False
+        origin = _git(checkout, ["remote", "get-url", "origin"], 30.0)
+        if origin is None or origin.returncode != 0:
+            log(f"checkout self-sync: no origin remote, skipping: {checkout}")
+            return False
+        upstream_out = _git(checkout, ["rev-parse", "--abbrev-ref",
+                                       "--symbolic-full-name", "@{u}"], 30.0)
+        if upstream_out is None or upstream_out.returncode != 0:
+            log(f"checkout self-sync: no upstream branch, skipping: {checkout}")
+            return False
+        upstream = (upstream_out.stdout or "").strip()
+        if not upstream:
+            log(f"checkout self-sync: no upstream branch, skipping: {checkout}")
+            return False
+
+        # fast path: already current, or a clean fast-forward.
+        pulled = _git(checkout, ["pull", "--ff-only"], timeout)
+        if pulled is not None and pulled.returncode == 0:
+            return True
+
+        # slow path: divergent history (a rewrite, or unpushed local
+        # commits against a moved upstream). stash, fetch, reset, pop.
+        stashed = False
+        status = _git(checkout, ["status", "--porcelain"], 30.0)
+        if status is not None and status.returncode == 0 and (status.stdout or "").strip():
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            stash = _git(checkout, ["stash", "push", "-m",
+                                    f"mainframe self-sync {stamp}"], 30.0)
+            if stash is None or stash.returncode != 0:
+                log("checkout self-sync: git stash failed - aborting the sync, "
+                    "the checkout is left exactly as-is.")
+                return False
+            stashed = True
+
+        def _restore_stash() -> None:
+            restored = _git(checkout, ["stash", "pop"], 30.0)
+            if restored is None or restored.returncode != 0:
+                log("checkout self-sync: the stash could not be popped back - "
+                    "your uncommitted changes are in the stash "
+                    "(git stash list), recover them by hand.")
+
+        fetched = _git(checkout, ["fetch", "origin"], timeout)
+        if fetched is None or fetched.returncode != 0:
+            log("checkout self-sync: git fetch origin failed (no network?) - "
+                "aborting the sync, the checkout is left as-is.")
+            if stashed:
+                _restore_stash()
+            return False
+
+        ahead = _git(checkout, ["rev-list", "--count", "@{u}..HEAD"], 30.0)
+        if ahead is not None and ahead.returncode == 0:
+            try:
+                ahead_count = int((ahead.stdout or "").strip())
+            except ValueError:
+                ahead_count = 0
+            if ahead_count > 0:
+                log(f"checkout self-sync: this checkout has {ahead_count} local "
+                    f"commit(s) not on {upstream} - the reset below keeps them "
+                    "in the reflog only (git reflog to recover).")
+
+        reset = _git(checkout, ["reset", "--hard", upstream], timeout)
+        if reset is None or reset.returncode != 0:
+            log(f"checkout self-sync: git reset --hard {upstream} failed - "
+                "aborting the sync, the checkout is left as-is.")
+            if stashed:
+                _restore_stash()
+            return False
+
+        if stashed:
+            popped = _git(checkout, ["stash", "pop"], 30.0)
+            if popped is None or popped.returncode != 0:
+                log("checkout self-sync: the stash pop conflicted after the "
+                    "reset - your uncommitted changes are STILL in the stash "
+                    "(git stash list), resolve them by hand. "
+                    "the stash was NOT dropped.")
+                return False
+        log(f"checkout self-sync: checkout was reset to {upstream} "
+            "(divergent history) - uncommitted changes preserved.")
+        return True
+    except Exception as exc:  # never block a run on the sync
+        log(f"checkout self-sync hit an unexpected error - aborting, "
+            f"the checkout is left as-is. ({exc})")
+        return False
+
+
 def sudo_prefix() -> list[str]:
     return [] if os.geteuid() == 0 else ["sudo"]
 
@@ -1206,6 +1328,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if sys.platform != "linux" or sys.version_info < (3, 10):
         fail("Linux + Python 3.10 or newer required")
+    # self-healing sync FIRST, before anything else runs: a checkout that
+    # is behind, or sitting on rewritten history, heals itself here and
+    # the run below uses fresh code. the sync never blocks the run - a
+    # failure warns loudly and the run proceeds with local code.
+    sync_checkout(HERE.parent)
     if args.restore_global_agents and args.skip_vault and args.backup_root is None:
         fail("--restore-global-agents requires a backup source; pass --backup-root or allow the vault release download")
     if (args.restore_global_agents and args.backup_root is not None

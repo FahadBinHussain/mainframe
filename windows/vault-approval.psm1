@@ -817,6 +817,104 @@ function Get-VaultApprovalLinkSigningKey {
     }
 }
 
+# --- vault-held ntfy topic (self-maintaining convergence) ------------------
+# the topic is the ONLY credential for the approval channel, and until
+# 2026-11-15 it lived only in each machine's local config - so a rotation
+# meant touching every machine by hand (and a human relaying commands to
+# machines with no direct access). now the vault holds the canonical
+# topic, and every machine converges to it on its next vault flow with a
+# live session. the local config is still the bootstrap (a locked vault
+# cannot be read before the first unlock), and the fallback when the
+# session is dead or the item does not exist yet. the item is a secure
+# note named like the signing-key item, topic value in notes:
+# github.com/FahadBinHussain/mainframe / mainframe.ntfy-topic
+$script:VaultNtfyTopicVaultItemName = 'github.com/FahadBinHussain/mainframe / mainframe.ntfy-topic'
+
+function Get-VaultNtfyTopicFromVault {
+    <#
+    .SYNOPSIS
+        the canonical ntfy topic from the vault item (notes), or $null.
+        never throws, never prints the value. a malformed vault value
+        (not 32 chars of [a-z0-9]) is ignored with a loud warning - a bad
+        item must never poison the local config.
+    #>
+    param([string]$Session = $null)
+
+    if (-not (Test-VaultApprovalLiveSession -Session $Session)) { return $null }
+    $args = @('list', 'items', '--search', $script:VaultNtfyTopicVaultItemName)
+    if ($Session) { $args += @('--session', $Session) }
+    $out = Invoke-BwApprovalCommand -Arguments $args -TimeoutSeconds 15
+    if (-not $out) { return $null }
+    try {
+        $items = ConvertFrom-JsonArray -Json $out
+    } catch {
+        return $null
+    }
+    # --search is a substring match: only the exact item name is the topic.
+    $item = @($items | Where-Object { [string]$_.name -eq $script:VaultNtfyTopicVaultItemName }) | Select-Object -First 1
+    if (-not $item -or -not $item.notes) { return $null }
+    $topic = ([string]$item.notes).Trim()
+    if ($topic -cnotmatch '^[a-z0-9]{32}$') {
+        Write-MainframeWarning 'the vault ntfy-topic item holds a malformed value (not 32 chars of [a-z0-9]) - ignoring it, the local config is unchanged. fix the item with windows/rotate-ntfy-topic.ps1.'
+        return $null
+    }
+    return $topic
+}
+
+function Sync-VaultNtfyTopicFromVault {
+    <#
+    .SYNOPSIS
+        converge the local config to the vault-held topic. returns $true
+        when the vault topic was read (whether or not a write happened),
+        $false when there is no live session, no vault item, or a malformed
+        value - in all of those cases the local config is left exactly as
+        it is (existing behavior). never throws, never prints the value.
+    .DESCRIPTION
+        writes go to every config file that carries a topic: the profile
+        config and the checkout-root config (the checkout wins on reads,
+        so leaving it stale would shadow the converged value). each write
+        is atomic and 0600, via Write-MainframePrivateFile. a config that
+        is missing or carries no topic is left alone; an unparseable one
+        is warned about loudly and left alone. a real change is logged
+        LOUDLY with the 4-char fingerprint only - an already-converged
+        machine stays silent.
+    #>
+    param(
+        [string]$Session = $null,
+        [string]$ProfileConfigPath = $null,
+        [string]$CheckoutConfigPath = $null
+    )
+
+    $vaultTopic = Get-VaultNtfyTopicFromVault -Session $Session
+    if (-not $vaultTopic) { return $false }
+    $profileConfig = if ($ProfileConfigPath) { $ProfileConfigPath } else { (Join-Path (Get-MainframeProfileRoot) 'mainframe.config.json') }
+    $checkoutConfig = if ($CheckoutConfigPath) { $CheckoutConfigPath } else { (Join-Path $PSScriptRoot '..\mainframe.config.json') }
+    $changed = $false
+    foreach ($path in @($profileConfig, $checkoutConfig)) {
+        if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
+        try {
+            $json = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            Write-MainframeWarning "ntfy topic convergence: config is not parseable json, left alone: $path"
+            continue
+        }
+        if (-not $json.ntfyTopic) { continue }
+        if ([string]$json.ntfyTopic -eq $vaultTopic) { continue }
+        $json.ntfyTopic = $vaultTopic
+        try {
+            $content = ($json | ConvertTo-Json -Depth 10) + "`n"
+            Write-MainframePrivateFile -Path $path -Content $content | Out-Null
+            $changed = $true
+        } catch {
+            Write-MainframeWarning "ntfy topic convergence: could not write $path - the local config is unchanged. ($($_.Exception.Message))"
+        }
+    }
+    if ($changed) {
+        Write-MainframeWarning "ntfy topic converged from the vault (now $(Get-NtfyTopicFingerprint -Topic $vaultTopic)) - the local config was stale"
+    }
+    return $true
+}
+
 function Get-NtfyTopicFingerprint {
     <#
     .SYNOPSIS
@@ -1757,6 +1855,8 @@ Export-ModuleMember -Function `
     Get-VaultApprovalLinkPayload, `
     Get-VaultApprovalLinkSignature, `
     Sync-VaultApprovalSigningKeyFromVault, `
+    Get-VaultNtfyTopicFromVault, `
+    Sync-VaultNtfyTopicFromVault, `
     Get-NtfyTopicFingerprint, `
     Select-VaultApprovalCiphertext, `
     Send-VaultApprovalNotification, `

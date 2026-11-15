@@ -13,12 +13,65 @@ MAINFRAME_TRAPS_INSTALLED=0
 
 mainframe_usage() {
     cat <<'EOF'
-Usage: bootstrap.sh [--dry-run] [--help] [-- BOOT_ARGUMENTS...]
+Usage: bootstrap.sh [--dry-run] [--bootstrap-link <url>] [--config-only] [--help] [-- BOOT_ARGUMENTS...]
 
 Select and run the Linux boot.sh bootstrap. --dry-run only reports the route.
 Use -- --restore ... or -- --packages ... from a reviewed checkout.
 Use -- --setup-tools for prerequisite setup only (not a restore).
+--bootstrap-link <url> downloads the config bundle once from the relay
+(single-use link from new-bootstrap-link.ps1) and places it as
+mainframe.config.json (0600) before the bootstrap runs. --config-only
+places the config and stops (no bootstrap dispatched).
 EOF
+}
+
+# One-link bootstrap: download the config bundle once from the relay and
+# place it as mainframe.config.json (0600, atomic). The link is single-use:
+# a successful download consumes it, so a failure AFTER the download means
+# a new link must be generated. MAINFRAME_BOOTSTRAP_TEST_BUNDLE (a local
+# file path) replaces the download - test hook only, never used in production.
+mainframe_bootstrap_config() {
+    local link=$1
+    if [[ ! "$link" =~ ^https://[^/]+/bootstrap/[A-Za-z0-9_-]{22}$ ]]; then
+        printf 'mainframe: not a bootstrap link: %s (expected https://<relay>/bootstrap/<22-char token>)\n' "$link" >&2
+        return 2
+    fi
+    local profile_root=${MAINFRAME_PROFILE_ROOT:-$HOME/.config/mainframe}
+    mkdir -p -- "$profile_root" || return
+    local temp_file="$profile_root/.mainframe.config.json.tmp.$$.${RANDOM}"
+    # 0600 from creation: the bundle holds the topic, so it must never sit
+    # in the profile dir with default umask permissions, even briefly.
+    : > "$temp_file" || return
+    chmod 0600 -- "$temp_file" || { rm -f -- "$temp_file"; return 1; }
+    if [[ -n "${MAINFRAME_BOOTSTRAP_TEST_BUNDLE:-}" ]]; then
+        if ! cp -- "$MAINFRAME_BOOTSTRAP_TEST_BUNDLE" "$temp_file" 2>/dev/null; then
+            rm -f -- "$temp_file"
+            printf 'mainframe: test bundle not readable: %s\n' "$MAINFRAME_BOOTSTRAP_TEST_BUNDLE" >&2
+            return 1
+        fi
+    else
+        if ! curl --fail --show-error --silent --location "$link" --output "$temp_file"; then
+            rm -f -- "$temp_file"
+            printf 'mainframe: the bootstrap link download failed - the link may already be used or expired (single-use, 1h). generate a new link and re-run.\n' >&2
+            return 1
+        fi
+    fi
+    # the relay validated the bundle at creation; this catches a corrupt or
+    # truncated download (or an error page) before it becomes the config.
+    if ! grep -q '"ntfyTopic"[[:space:]]*:[[:space:]]*"[a-z0-9]\{32\}"' "$temp_file"; then
+        rm -f -- "$temp_file"
+        printf 'mainframe: the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. the link was consumed by the download, so generate a new link and re-run.\n' >&2
+        return 1
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$temp_file" 2>/dev/null; then
+            rm -f -- "$temp_file"
+            printf 'mainframe: the downloaded bundle is not valid JSON. the link was consumed by the download, so generate a new link and re-run.\n' >&2
+            return 1
+        fi
+    fi
+    mv -f -- "$temp_file" "$profile_root/mainframe.config.json" || { rm -f -- "$temp_file"; return 1; }
+    printf 'mainframe: bootstrap config placed at %s (0600)\n' "$profile_root/mainframe.config.json"
 }
 
 mainframe_platform() {
@@ -102,10 +155,16 @@ mainframe_finish() {
 
 mainframe_run() {
     local dry_run=0
+    local config_only=0
+    local bootstrap_link=''
     local -a boot_arguments=()
     while (($#)); do
         case "$1" in
             --dry-run) dry_run=1; shift ;;
+            --config-only) config_only=1; shift ;;
+            --bootstrap-link)
+                if (($# < 2)); then printf 'mainframe: --bootstrap-link needs a value\n' >&2; return 2; fi
+                bootstrap_link=$2; shift 2 ;;
             --help|-h) mainframe_usage; return 0 ;;
             --) shift; boot_arguments=("$@"); break ;;
             *) printf 'mainframe: unknown argument: %s\n' "$1" >&2; return 2 ;;
@@ -121,7 +180,25 @@ mainframe_run() {
     printf 'mainframe: selected Linux -> boot.sh\n'
     if ((dry_run)); then
         printf 'Dry run: no downloads, bootstrap execution, or machine changes.\n'
+        if [[ -n "$bootstrap_link" ]]; then
+            printf 'Dry run: would download the bootstrap bundle from the relay (the link is NOT consumed by a dry run).\n'
+        fi
         return 0
+    fi
+
+    if [[ -n "$bootstrap_link" ]]; then
+        mainframe_bootstrap_config "$bootstrap_link"
+        local cfg_status=$?
+        if ((cfg_status != 0)); then
+            return "$cfg_status"
+        fi
+        if ((config_only)); then
+            printf 'mainframe: config placed, --config-only: no bootstrap dispatched.\n'
+            return 0
+        fi
+    elif ((config_only)); then
+        printf 'mainframe: --config-only needs --bootstrap-link (there is nothing to place without a link).\n' >&2
+        return 2
     fi
 
     local source_path=''

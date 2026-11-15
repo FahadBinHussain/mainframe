@@ -1,20 +1,37 @@
 <#
 .SYNOPSIS
-    rotate the ntfy approval topic on this machine.
+    rotate the ntfy approval topic: the vault first, then this machine.
 
 .DESCRIPTION
     generates a new 32-char [a-z0-9] topic from a cryptographic rng and
-    writes it as ntfyTopic in the profile config
-    (~/.config/mainframe/mainframe.config.json on linux,
-    %APPDATA%\mainframe\mainframe.config.json on windows). if the
-    checkout-root mainframe.config.json carries an ntfyTopic it gets the
-    same value; if it exists without one, a warning is printed.
+    writes it in two places, in this order:
+
+      1. the vault item `github.com/FahadBinHussain/mainframe /
+         mainframe.ntfy-topic` (a secure note, topic value in notes) -
+         FIRST, and the rotation refuses loudly here if there is no live
+         bw session. nothing local is touched when the vault write cannot
+         happen.
+      2. the local config: ntfyTopic in the profile config
+         (~/.config/mainframe/mainframe.config.json on linux,
+         %APPDATA%\mainframe\mainframe.config.json on windows), and the
+         checkout-root mainframe.config.json too IF it carries a
+         ntfyTopic.
+
+    the vault is the canonical topic now: every other machine converges
+    to it on its next vault flow with a live session
+    (Sync-VaultNtfyTopicFromVault in vault-approval.psm1), with no
+    command sent to it at all. -Topic is the fallback for applying a
+    value that was generated out-of-band (offline), not the procedure
+    for moving machines any more.
 
     the topic is ONE value shared by every machine + the phone, so a
-    rotation only works if all of them land on the SAME value: run this
-    script plain (or with -ShowTopic) on the FIRST machine only, then
-    apply that same value everywhere else with -Topic. a plain run on a
-    second machine generates a DIFFERENT topic and splits the fleet.
+    rotation only works if all of them land on the SAME new value.
+    RACE: rotate from ONE machine at a time. two simultaneous rotations
+    both write the vault and the last one wins; a machine that rotated
+    with the losing value converges to the winner on its next flow, but
+    the phone may have been told the loser's value - so never rotate
+    from two machines at once, and if it happens anyway, rotate once
+    more from a single machine to settle on one value.
 
     the new topic is NEVER printed by default - it would land in logs
     and transcripts, which is how the old one leaked (the runner printed
@@ -29,15 +46,20 @@
     loudly and writes nothing.
 
     see docs/ntfy-topic-rotation.md for the full rollout order
-    (machines first, phone LAST, then verify).
+    (phone subscribes first, machines converge, phone drops the old
+    topic last, then verify).
 #>
 param(
     [switch]$ShowTopic,
     [switch]$ShowCurrent,
-    [string]$Topic
+    [string]$Topic,
+    [string]$BwPath = 'bw'
 )
 
 $ErrorActionPreference = 'Stop'
+
+$script:VaultNtfyTopicVaultItemName = 'github.com/FahadBinHussain/mainframe / mainframe.ntfy-topic'
+$script:BwLastError = ''
 
 function New-NtfyTopic {
     # 32 chars of [a-z0-9] from a cryptographic rng, rejection-sampled
@@ -92,6 +114,166 @@ function Write-JsonAtomically {
         if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
         throw
     }
+}
+
+function Resolve-BwPath {
+    # the bw CLI: -BwPath wins when it names a file (a path with a
+    # separator is used literally); otherwise PATH, then the known linux
+    # install locations. throws loudly when nothing is found - a rotation
+    # without bw cannot write the vault item, and must not proceed.
+    param([string]$Wanted)
+    if ($Wanted -match '[\\/]') {
+        if (Test-Path -LiteralPath $Wanted) { return $Wanted }
+        throw "bw not found at -BwPath '$Wanted' - pass the real bw path, or put bw on PATH."
+    }
+    $found = Get-Command $Wanted -ErrorAction SilentlyContinue
+    if ($found) { return $found.Source }
+    $candidates = @(
+        (Join-Path $HOME '.local/bin/bw')
+        (Join-Path $HOME '.local/share/mainframe/tools/bw/bw')
+    )
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    }
+    throw "bw CLI not found on PATH or at the known install locations - a rotation needs a live bw session to write the vault item first. install the bitwarden CLI and unlock the vault, then re-run this script. nothing was changed."
+}
+
+function Get-BwSessionArgs {
+    # --session args from the cached session key file when it exists.
+    # the vault flow caches the key at accounts/bitwarden/session.key
+    # under the profile root; without it, bw falls back to BW_SESSION or
+    # its own state, and the status check below is the judge.
+    param([string]$ProfileRoot)
+    $sessionFile = Join-Path (Join-Path (Join-Path $ProfileRoot 'accounts') 'bitwarden') 'session.key'
+    if (Test-Path -LiteralPath $sessionFile) {
+        try {
+            $key = (Get-Content -LiteralPath $sessionFile -Raw -ErrorAction Stop).Trim()
+            if ($key) { return @('--session', $key) }
+        } catch {}
+    }
+    return @()
+}
+
+function Invoke-Bw {
+    # run bw, return stdout on exit 0, $null otherwise. stderr goes to a
+    # temp file so stdout stays clean JSON for the calls that parse it,
+    # and the error text lands in $script:BwLastError for the caller's
+    # message. -Stdin pipes a string to the child (encode/create/edit).
+    # the topic itself is never in an argument list - it travels via
+    # stdin JSON, never via a process command line anyone can read.
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Bw,
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [string]$Stdin = $null
+    )
+    $errFile = [IO.Path]::GetTempFileName()
+    try {
+        if ($null -ne $Stdin) {
+            $out = $Stdin | & $Bw @Arguments 2>$errFile
+        } else {
+            $out = & $Bw @Arguments 2>$errFile
+        }
+        $script:BwLastError = ''
+        if (Test-Path -LiteralPath $errFile) {
+            $err = Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue
+            if ($err) { $script:BwLastError = $err.Trim() }
+        }
+        if ($LASTEXITCODE -ne 0) { return $null }
+        if ($null -eq $out) { return '' }
+        return ($out -join "`n")
+    } catch {
+        $script:BwLastError = $_.Exception.Message
+        return $null
+    } finally {
+        Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function ConvertFrom-BwJsonArray {
+    # bw list output is a JSON array; windows powershell 5.1 turns '[]'
+    # into $null, so an empty result is checked before parsing.
+    param([string]$Json)
+    if (-not $Json -or $Json.Trim() -eq '' -or $Json.Trim() -eq '[]') { return @() }
+    return @($Json | ConvertFrom-Json)
+}
+
+function Set-VaultNtfyTopic {
+    # write the topic into the vault item FIRST - before any local config
+    # is touched. throws loudly on any failure (no live session, bw
+    # error, create/edit refused) so the caller never half-rotates.
+    # idempotent: when the item already holds this value, nothing is
+    # written - that is the crash-recovery path (a previous run wrote the
+    # vault and died before the local config).
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Topic,
+        [Parameter(Mandatory = $true)]
+        [string]$Bw,
+        [string[]]$SessionArgs = @()
+    )
+    $statusOut = Invoke-Bw -Bw $Bw -Arguments (@('status') + $SessionArgs)
+    $status = $null
+    if ($statusOut) {
+        try { $status = $statusOut | ConvertFrom-Json } catch { $status = $null }
+    }
+    if (-not $status -or $status.status -ne 'unlocked') {
+        throw "no live bw session - the vault item must be written FIRST, and the vault is locked. unlock the vault (run the vault flow), then re-run this script. nothing was changed."
+    }
+    $listOut = Invoke-Bw -Bw $Bw -Arguments (@('list', 'items', '--search', $script:VaultNtfyTopicVaultItemName) + $SessionArgs)
+    if ($null -eq $listOut) {
+        throw "bw list items failed - cannot find the vault topic item, refusing to rotate. ($script:BwLastError) nothing was changed."
+    }
+    $items = ConvertFrom-BwJsonArray -Json $listOut
+    # --search is a substring match: only the exact item name is the topic.
+    $item = @($items | Where-Object { [string]$_.name -eq $script:VaultNtfyTopicVaultItemName }) | Select-Object -First 1
+    if ($item -and ([string]$item.notes).Trim() -eq $Topic) {
+        Write-Host 'vault topic item already holds this value - nothing to write there (a previous run wrote the vault and stopped before the local config).'
+        return
+    }
+    if ($item) {
+        $itemJson = Invoke-Bw -Bw $Bw -Arguments (@('get', 'item', [string]$item.id) + $SessionArgs)
+        if (-not $itemJson) {
+            throw "bw get item failed for the vault topic item - refusing to rotate. ($script:BwLastError) nothing was changed."
+        }
+        try {
+            $full = $itemJson | ConvertFrom-Json
+        } catch {
+            throw "bw get item returned unparseable json - refusing to rotate. nothing was changed."
+        }
+        $full.notes = $Topic
+        $encoded = Invoke-Bw -Bw $Bw -Arguments @('encode') -Stdin ($full | ConvertTo-Json -Depth 10 -Compress)
+        if (-not $encoded) {
+            throw "bw encode failed for the updated vault topic item - refusing to rotate. ($script:BwLastError) nothing was changed."
+        }
+        $edited = Invoke-Bw -Bw $Bw -Arguments (@('edit', 'item', [string]$item.id) + $SessionArgs) -Stdin $encoded.Trim()
+        if ($null -eq $edited) {
+            throw "bw edit item failed for the vault topic item - refusing to rotate. ($script:BwLastError) nothing was changed."
+        }
+        Write-Host "vault topic item updated: $script:VaultNtfyTopicVaultItemName"
+        return
+    }
+    $templateOut = Invoke-Bw -Bw $Bw -Arguments @('get', 'template', 'item.securenote')
+    if (-not $templateOut) {
+        throw "bw get template item.securenote failed - cannot create the vault topic item, refusing to rotate. ($script:BwLastError) nothing was changed."
+    }
+    try {
+        $template = $templateOut | ConvertFrom-Json
+    } catch {
+        throw "bw get template returned unparseable json - refusing to rotate. nothing was changed."
+    }
+    $template.name = $script:VaultNtfyTopicVaultItemName
+    $template.notes = $Topic
+    $encoded = Invoke-Bw -Bw $Bw -Arguments @('encode') -Stdin ($template | ConvertTo-Json -Depth 10 -Compress)
+    if (-not $encoded) {
+        throw "bw encode failed for the new vault topic item - refusing to rotate. ($script:BwLastError) nothing was changed."
+    }
+    $created = Invoke-Bw -Bw $Bw -Arguments (@('create', 'item') + $SessionArgs) -Stdin $encoded.Trim()
+    if ($null -eq $created) {
+        throw "bw create item failed for the vault topic item - refusing to rotate. ($script:BwLastError) nothing was changed."
+    }
+    Write-Host "vault topic item created: $script:VaultNtfyTopicVaultItemName"
 }
 
 # --- argument validation ----------------------------------------------------
@@ -185,6 +367,15 @@ if (Test-Path -LiteralPath $checkoutConfig) {
     $checkoutHasTopic = [bool]$checkoutJson.ntfyTopic
 }
 
+# --- write the vault item FIRST ---------------------------------------------
+# the vault is the canonical topic: every other machine converges to it on
+# its next vault flow. a failure here throws loudly and NO local config is
+# touched - a half-rotated fleet (local new, vault old) would converge
+# this machine straight back to the old topic on its next flow.
+$bw = Resolve-BwPath -Wanted $BwPath
+$sessionArgs = @(Get-BwSessionArgs -ProfileRoot $profileRoot)
+Set-VaultNtfyTopic -Topic $newTopic -Bw $bw -SessionArgs $sessionArgs
+
 # --- write: profile first, then checkout ------------------------------------
 $profileJson.ntfyTopic = $newTopic
 Write-JsonAtomically -Path $profileConfig -JsonObject $profileJson
@@ -209,25 +400,25 @@ if ($ShowTopic) {
     Write-Host 'WARNING: the new topic is printed below because you asked with -ShowTopic. it will land in logs/transcripts if this output is captured - copy it, then clear scrollback if you care.'
     Write-Host "new ntfy topic: $newTopic"
     Write-Host ''
-    Write-Host 'next steps (same value everywhere - the phone moves LAST):'
-    Write-Host '  1. on every OTHER machine (A, B, laptop, desktop), apply this SAME topic:'
-    Write-Host "     pwsh windows/rotate-ntfy-topic.ps1 -Topic $newTopic"
-    Write-Host '     never run it plain on a second machine - each plain run generates a DIFFERENT topic.'
-    Write-Host '  2. phone LAST: ntfy app -> subscription -> change the topic to the new value.'
+    Write-Host 'next steps (the vault holds the new topic; machines converge on their own):'
+    Write-Host '  1. phone FIRST: ntfy app -> subscribe to the new topic, KEEP the old one for now.'
     Write-Host '     (the topic must be typed into the phone by hand - there is no automation for that step.)'
-    Write-Host '  3. verify: trigger one approval and confirm the phone shows it.'
+    Write-Host '  2. every other machine converges automatically at its next vault flow - no commands to send.'
+    Write-Host '     (each machine logs "ntfy topic converged from the vault" when it switches.)'
+    Write-Host '  3. once every machine has converged, drop the old phone subscription.'
+    Write-Host '  4. verify: trigger one approval and confirm the phone shows it.'
 } else {
     Write-Host 'the new topic is NOT printed here (it would land in logs/transcripts).'
-    Write-Host 'next steps (same value everywhere - the phone moves LAST):'
+    Write-Host 'next steps (the vault holds the new topic; machines converge on their own):'
     Write-Host '  1. on THIS machine, show the new topic (your terminal only):'
     Write-Host '     pwsh windows/rotate-ntfy-topic.ps1 -ShowCurrent'
     Write-Host '     (warning: the value will land in logs/transcripts - copy it, then clear scrollback if you care.)'
     Write-Host '     never re-run this script plain to "see" the value - that rotates AGAIN.'
-    Write-Host '  2. on every OTHER machine (A, B, laptop, desktop), apply the SAME topic:'
-    Write-Host '     pwsh windows/rotate-ntfy-topic.ps1 -Topic <new-topic>'
-    Write-Host '     never run it plain on a second machine - each plain run generates a DIFFERENT topic.'
-    Write-Host '  3. phone LAST: ntfy app -> subscription -> change the topic to the new value.'
+    Write-Host '  2. phone FIRST: ntfy app -> subscribe to the new topic, KEEP the old one for now.'
     Write-Host '     (the topic must be typed into the phone by hand - there is no automation for that step.)'
-    Write-Host '  4. verify: trigger one approval and confirm the phone shows it.'
+    Write-Host '  3. every other machine converges automatically at its next vault flow - no commands to send.'
+    Write-Host '     (each machine logs "ntfy topic converged from the vault" when it switches.)'
+    Write-Host '  4. once every machine has converged, drop the old phone subscription.'
+    Write-Host '  5. verify: trigger one approval and confirm the phone shows it.'
 }
 Write-Host 'honest limit: the OLD topic stays usable - there is no relay-side deny list. rotation limits future exposure, it does not revoke the old topic.'

@@ -65,6 +65,12 @@ $ErrorActionPreference = 'Stop'
 # which lands in the information stream - silencing it keeps stdout a clean
 # JSON document on both windows powershell 5.1 and pwsh 7.
 $InformationPreference = 'SilentlyContinue'
+# self-healing sync FIRST, before the repo modules load: a checkout that is
+# behind, or sitting on rewritten history, heals itself here and the modules
+# below load fresh. the sync never blocks the flow - a failure warns loudly
+# and the flow proceeds with local code.
+Import-Module (Join-Path $PSScriptRoot 'mainframe-sync.psm1') -Force -DisableNameChecking
+$null = Sync-MainframeCheckout -Checkout $Checkout
 # the flow's own calls use $BwPath, but the imported modules call bare `bw`.
 # on windows bw is on PATH; on linux it usually is not (the local install
 # lives under the work root), so point PATH at the binary the flow was told
@@ -225,6 +231,10 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     # key now if this machine lacks it, so the next approval is signed from
     # the first tap. best-effort, never fails the flow.
     try { $null = Sync-VaultApprovalSigningKeyFromVault -Session $cached.Trim() } catch {}
+    # same moment, same rule: converge the local ntfy topic to the
+    # vault-held one, so a rotation reaches this machine without anyone
+    # touching it. best-effort, never fails the flow.
+    try { $null = Sync-VaultNtfyTopicFromVault -Session $cached.Trim() } catch {}
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $cached 2>$null | Out-String))
 } else {
     if ($cached -and $status.status -eq 'unauthenticated') {
@@ -279,6 +289,10 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     # shared approval signing key now if this machine lacks it, so the NEXT
     # approval is signed. best-effort, never fails the flow.
     try { $null = Sync-VaultApprovalSigningKeyFromVault -Session $session.Trim() } catch {}
+    # same moment, same rule: converge the local ntfy topic to the
+    # vault-held one, so the next approval goes to the current topic.
+    # best-effort, never fails the flow.
+    try { $null = Sync-VaultNtfyTopicFromVault -Session $session.Trim() } catch {}
     Write-FlowLog "vault session cached at $(Get-MainframeSessionKeyPath)"
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $session.Trim() 2>$null | Out-String))
 }
