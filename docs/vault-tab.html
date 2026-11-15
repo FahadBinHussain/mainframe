@@ -337,15 +337,33 @@
     letter-spacing: 0.05em;
     transition: all 0.2s ease;
   }
+  /* the status line lives directly under the header, so a success or an
+     error is visible the moment it happens - no scrolling to find out
+     whether the tap worked. empty until the first message, so it takes
+     no space while the user is still approving. */
   #msg {
-    margin-top: 1rem;
+    margin: 0 0 1rem;
     font-weight: 500;
     font-size: 0.95rem;
     word-break: break-word;
     text-align: center;
   }
-  #msg.success { color: var(--accent); }
-  #msg.error { color: var(--danger); font-weight: 600; }
+  #msg:empty { display: none; }
+  #msg.success {
+    color: #ffffff;
+    background: var(--accent);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  #msg.error {
+    color: #ffffff;
+    background: var(--danger);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    font-weight: 600;
+  }
   /* a request that outlived the runner's wait: visibly dead, not approvable */
   .expiry-line {
     margin: -0.5rem 0 1.25rem;
@@ -387,6 +405,9 @@
     <h2 id="title">Vault Approval Request</h2>
     <p id="desc">Runner is waiting for authorization to unlock Bitwarden secrets.</p>
   </div>
+
+  <!-- status line: under the header so success/errors need no scrolling -->
+  <p id="msg"></p>
 
   <!-- Number Matching Card -->
   <div id="verify-box" class="verify-card" style="display:none">
@@ -454,7 +475,6 @@
     <button id="clear-bio" class="btn-secondary" type="button" style="display:none">Reset biometric enrollment</button>
   </form>
 
-  <p id="msg"></p>
   <div id="fb" style="display:none">
     <p>If the script didn't pick up the relay automatically, copy this ciphertext:</p>
     <textarea id="ct" readonly rows="3"></textarea>
@@ -471,6 +491,22 @@ function show(text, type='') {
   const el = document.getElementById('msg');
   el.textContent = text;
   el.className = type;
+}
+
+// terminal success: the approval is sent, so the page becomes the
+// confirmation. everything the user could still tap or type is hidden,
+// the green banner is already at the top, and the view scrolls there.
+function showDone(text) {
+  show(text, 'success');
+  for (const id of ['verify-box', 'expiry-line', 'ttl-box', 'bio-section', 'f']) {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  }
+  const title = document.getElementById('title');
+  if (title) title.textContent = 'Approved';
+  const desc = document.getElementById('desc');
+  if (desc) desc.style.display = 'none';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 // ---- request freshness ------------------------------------------------------
@@ -706,7 +742,7 @@ async function transmitCiphertext(b64, sid, is12h = false) {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const durMsg = is12h ? ' (12-hour session)' : '';
-    show(`Ciphertext sent to ${REQUEST.host || 'the runner'}${durMsg} — it unlocks within a few seconds. You can close this tab.`, 'success');
+    showDone(`Ciphertext sent to ${REQUEST.host || 'the runner'}${durMsg} — it unlocks within a few seconds. You can close this tab.`);
     document.getElementById('icon-container').className = 'icon-wrap';
     document.getElementById('bio-btn').disabled = true;
   } else {
@@ -718,7 +754,7 @@ async function transmitCiphertext(b64, sid, is12h = false) {
     a.click();
     a.remove();
     const durMsg = is12h ? ' (12-hour session)' : '';
-    show(`Encrypted file downloaded${durMsg}. Restoring unattended.`, 'success');
+    showDone(`Encrypted file downloaded${durMsg}. Restoring unattended.`);
   }
 }
 
