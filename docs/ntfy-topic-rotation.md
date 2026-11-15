@@ -25,30 +25,39 @@ existed there was no rotation mechanism at all.
 the topic is ONE value shared by every machine + the phone. a rotation
 only works if all of them land on the SAME new value:
 
-- run the script plain (or with `-ShowTopic`) on the FIRST machine
-  only — that run generates the new topic.
-- every other machine gets that SAME value with `-Topic <value>`.
+- generate the value ONCE, without applying it to any machine: a
+  32-char `[a-z0-9]` string from a cryptographic rng (python
+  `secrets`, or the script's plain run — but a plain run applies to
+  that machine immediately, so prefer generating offline).
+- every machine gets that SAME value with `-Topic <value>`.
 - never run it plain on a second machine: each plain run generates a
   DIFFERENT topic, and the fleet splits — a machine on a different
   topic than the phone sends approvals the phone never hears.
 
 ## rollout order
 
-A → B → laptop → desktop → phone LAST, then verify.
+phone FIRST (adds the new topic, keeps the old), then the machines,
+then the phone drops the old topic, then verify.
 
-1. A (muse VM): generate + show the new topic, note the value.
-2. B (muse VM): apply the SAME value with `-Topic`.
-3. laptop, then desktop: apply the SAME value with `-Topic`.
-4. phone LAST: ntfy app → subscription → change the topic to the new
-   value (see "phone steps" below).
-5. verify: trigger one approval and confirm the phone shows it (see
+0. generate the new value WITHOUT applying it to any machine: a 32-char
+   `[a-z0-9]` string from a cryptographic rng (e.g. python `secrets`).
+   the script's plain run also generates, but it applies to that
+   machine immediately — prefer generating offline.
+1. phone: ntfy app → subscribe to the new topic. KEEP the old
+   subscription for now — the phone listens on both topics during the
+   rotation, so no approval is ever unheard (see "phone steps" below).
+2. A, then B, then laptop, then desktop: apply the SAME value with
+   `-Topic <new-topic>`.
+3. phone: drop the old subscription.
+4. verify: trigger one approval and confirm the phone shows it (see
    "verification" below).
 
-why the phone is last: any machine still on the old topic after the
-phone moves sends approvals the phone never hears — its approval
-requests go to a topic nothing is listening to. moving the phone last
-keeps every not-yet-rotated machine working until its turn, and the
-verify step immediately after catches a machine that was missed.
+why the phone adds first: a machine on a topic the phone is not
+subscribed to sends approvals the phone never hears. with the phone
+subscribed to both topics, every machine keeps working through its own
+switch, and the verify step immediately after catches a machine that
+was missed. (the old order — machines first, phone last — left every
+switched machine unheard until the phone moved; do not use it.)
 
 if a machine is offline or unreachable during the rotation, leave it:
 it stays on the old topic and its approvals will not reach the phone
@@ -60,15 +69,17 @@ value somewhere safe until every machine has it.
 
 from the mainframe repo root on each machine.
 
-first machine — generates the new topic and shows it (your terminal
-only; the value will land in logs/transcripts if the output is
-captured):
-
-    pwsh windows/rotate-ntfy-topic.ps1 -ShowTopic
-
-every other machine — applies the SAME topic (no output value):
+when the value was generated offline (the preferred route), every
+machine — including the first — applies it with `-Topic`:
 
     pwsh windows/rotate-ntfy-topic.ps1 -Topic <new-topic>
+
+generating via the script instead — first machine only: generates the
+new topic and shows it (your terminal only; the value will land in
+logs/transcripts if the output is captured). note this applies the new
+topic to that machine immediately:
+
+    pwsh windows/rotate-ntfy-topic.ps1 -ShowTopic
 
 on the muse VMs pwsh is not on PATH; use the full path there:
 
@@ -99,17 +110,16 @@ config instead (changes nothing):
 - never prints the topic by default. `-ShowTopic` / `-ShowCurrent` print
   it, with a warning that the value will land in logs/transcripts.
 
-## phone steps (last)
+## phone steps (first add, last drop)
 
 1. open the ntfy app.
-2. open the subscription for the approval topic.
-3. change the topic to the new value — type it in by hand (there is no
+2. subscribe to the new topic — type it in by hand (there is no
    automation for this step). double-check every character: the topic
    is 32 lowercase letters/digits, and one wrong character means the
-   phone hears nothing. if your ntfy version has no edit action,
-   unsubscribe from the old topic and subscribe to the new one —
-   same result.
-4. save. the old subscription is gone the moment the topic changes;
+   phone hears nothing on it.
+3. KEEP the old subscription until every machine has switched (step 2
+   of the rollout order). the phone listens on both topics meanwhile.
+4. once every machine is on the new topic, drop the old subscription.
    nothing else to clean up on the phone.
 
 ## verification
