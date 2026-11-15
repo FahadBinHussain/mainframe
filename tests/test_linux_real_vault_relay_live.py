@@ -102,13 +102,15 @@ Write-Output "PASSWORD $plain"
     def test_a_timeout_publishes_the_expired_marker(self):
         script = self._script(f"""
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+$VerbosePreference = 'Continue'
 $pw = Get-VaultMasterPassword -NtfyTopic '{self.topic}' -TimeoutSeconds 8 -PromptContext 'live test' -Server '{RELAY}'
 Write-Output "RESULT $pw"
 """)
         proc = subprocess.Popen([PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(script)],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=self.env)
         out, err = proc.communicate(timeout=120)
-        sid = re.search(r"sid=(mf-vault-[0-9a-f]+)", out)
+        # the approval URL is verbose-only now (L19), so it lands on stderr.
+        sid = re.search(r"sid=(mf-vault-[0-9a-f]+)", out + err)
         self.assertIsNotNone(sid, f"no sid in the approval url: {out[-800:]} {err[-400:]}")
         markers = []
         deadline = time.time() + 20

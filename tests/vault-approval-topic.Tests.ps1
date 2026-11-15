@@ -116,6 +116,9 @@ try {
     Assert-True ($stderr -match 'no credential to set') 'the refusal says there is no credential to set'
     Assert-True ($stderr -match 'ntfyTopic') 'the refusal names the topic setting to check'
     Assert-True ($stderr -notmatch 'ntfyToken') 'the refusal must not name a credential setting'
+    # H1: the refusal may carry the topic fingerprint, never the topic
+    Assert-True ($stderr -notmatch 'refusetopic') 'the refusal never prints the full topic'
+    Assert-True ($stderr -match 'refu') 'the refusal carries the topic fingerprint'
 } finally {
     Remove-Item Env:\MF_CAPTURE -ErrorAction SilentlyContinue
     Remove-Item Env:\MF_REFUSE -ErrorAction SilentlyContinue

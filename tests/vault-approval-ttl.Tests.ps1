@@ -87,6 +87,20 @@ try {
     Assert-Equal 720 (Get-VaultApprovedTtlMinutes) 'approved TTL is 720 minutes'
     Assert-Equal '720' $env:MAINFRAME_VAULT_APPROVED_TTL 'env MAINFRAME_VAULT_APPROVED_TTL is 720'
 
+    # 2b. a TTL over 12 hours is clamped to 720 (L15) - the value comes from
+    # the phone side, so a wild number must never mint a longer session
+    $wildPayload = '{"pw":"WildPassword999!","ttl":9999}'
+    $wildBytes = [System.Text.Encoding]::UTF8.GetBytes($wildPayload)
+    $wildCipher = [Convert]::ToBase64String($rsa.Encrypt($wildBytes, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+    $decryptedWildPw = Decrypt-VaultApprovalCiphertext -Rsa $rsa -Ciphertext $wildCipher
+    Assert-Equal 'WildPassword999!' $decryptedWildPw 'a clamped payload still extracts the master password'
+    Assert-Equal 720 (Get-VaultApprovedTtlMinutes) 'a 9999-minute TTL is clamped to 720'
+    $wildPayload2 = '{"pw":"WildPassword999!","ttlMinutes":100000}'
+    $wildBytes2 = [System.Text.Encoding]::UTF8.GetBytes($wildPayload2)
+    $wildCipher2 = [Convert]::ToBase64String($rsa.Encrypt($wildBytes2, [System.Security.Cryptography.RSAEncryptionPadding]::OaepSHA256))
+    $null = Decrypt-VaultApprovalCiphertext -Rsa $rsa -Ciphertext $wildCipher2
+    Assert-Equal 720 (Get-VaultApprovedTtlMinutes) 'a 100000-minute ttlMinutes is clamped to 720'
+
     # 3. Set-VaultSessionKey persists .ttl file next to session.key
     $testSessionKey = 'test-session-key-abcdef1234567890'
     $sessionPath = Set-VaultSessionKey -SessionKey $testSessionKey

@@ -10,6 +10,7 @@
 # the profile root is resolved by one shared module, so windows and linux read
 # the same place (see mainframe-paths.psm1).
 Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
 
 function Get-MiniMaxSessionId {
     # The MiniMax Code desktop app gives each session an id that shows up in
@@ -411,15 +412,21 @@ function ConvertTo-SubjectPublicKeyInfo {
 # The approval descriptor: the exact set of facts the phone is asked to trust.
 #
 # The link fragment carries the RSA public key (k), the single-use topic (sid),
-# the verification code, the expiry and where the answer may be posted.
-# The fragment is trusted because the link only reaches the phone through the
-# ntfy topic, and the topic is the credential: whoever knows the 32-char topic
-# can send a link. The phone card shows host, agent, model and the verification
-# code, so a link from a machine the user does not recognise stands out - check
-# the code against the terminal before tapping approve. (An earlier design
-# signed the fragment against a registered-key list; it was removed
-# 2026-11-15 because every new machine needed a manual registration step.
-# docs/approval-signing-bootstrap.md records why.)
+# the verification code, the expiry and where the answer may be posted - plus
+# a signature (sig) over k/sid/code/exp/srv, made with ONE shared EC P-256 key
+# for the whole ecosystem (approval-signing.key in the profile root, public
+# half pinned in the page). The page verifies the signature before it offers
+# the approve button: a link nobody signed warns loudly, and a link signed
+# with the wrong key is refused outright. A missing key means an UNSIGNED
+# link, which the page warns about but still allows - that only happens on
+# existing machines during the transition (a new device gets key+topic
+# together in the pack, so its first approval is already signed). The key
+# self-heals from the vault whenever a live session exists (see
+# Sync-VaultApprovalSigningKeyFromVault), so after the first unlock every
+# approval is signed and the approval itself never fails for a missing key.
+# (An earlier per-machine registration design was removed 2026-11-15 because
+# every new machine needed a manual registration step; the shared key
+# replaces it - see docs/approval-signing-bootstrap.md.)
 
 # the query on the approval page URL. it busts the browser cache, so a phone
 # that still has an OLD page cached fetches the new one instead of using it.
@@ -566,6 +573,264 @@ function Get-VaultApprovalPublicKey {
     }
 }
 
+# --- link signing (C1): ONE shared EC P-256 key for the whole ecosystem -----
+#
+# This is deliberately NOT the per-machine registration design that was
+# removed 2026-11-15 (it needed a manual registration step per machine, and
+# the user rejected it): one key pair, private half in the profile root as
+# approval-signing.key (SEC1 PEM, EC P-256, 0600), public half pinned in the
+# approval page. The runner signs k/sid/code/exp/srv and the page verifies
+# against the pinned key, so a link from anyone else fails closed.
+#
+# A new device needs ZERO setup: the key travels WITH the topic in the
+# migration pack, so a device that can send an approval at all already has
+# the key and its FIRST approval is signed. (A device without the topic
+# cannot approve - the runner fails loudly with "no ntfy topic configured"
+# - so there is no "new device, no key" case.) The unsigned link only
+# occurs on EXISTING machines during the transition, when their vault
+# session is dead at the moment of the first approval after the warn-mode
+# page deploys: unsigned approval (page warns, allows) -> fingerprint ->
+# unlock -> the runner fetches the key with the session the unlock just
+# created -> all later approvals signed.
+#
+# Three heal points, one rule - the fetch runs ONLY when a live session
+# already exists, never prompts, never blocks, never attempts against a
+# locked vault:
+#   1. flow-start-when-live (vault-flow.ps1, cached session): the session
+#      is already live and no approval is needed at all - heal the key now.
+#   2. request-time-if-live (Get-VaultApprovalLinkSigningKey): the approval
+#      is being built and a live session happens to exist - heal, then sign.
+#   3. after-unlock (vault-flow.ps1 + Ensure-VaultSession): the unlock just
+#      proved a live session - heal, so the NEXT approval is signed.
+# Signing never fails or delays an approval: any failure here degrades to
+# an unsigned link.
+#
+# Scheme (interop-proven: pwsh ECDsa signs, Node WebCrypto verifies):
+# ECDSA P-256 + SHA-256, signature = 64-byte raw R||S (P1363, which is what
+# .NET ECDsa.SignData returns by default), base64url, no padding, carried as
+# the fragment param `sig`. Payload, byte-exact on both sides:
+# k LF sid LF code LF exp LF srv (UTF-8), where exp/srv are the exact strings
+# placed in the URL ('' when the param is absent).
+#
+# This is a DIFFERENT key from the old RSA machine key above
+# (mainframe.approval-signing.key + Get-VaultApprovalSigningKey): that one is
+# dead code the user has not decided to remove, and nothing here touches it.
+$script:VaultApprovalLinkSigningKeyFileName = 'approval-signing.key'
+$script:VaultApprovalLinkSigningVaultItemName = 'github.com/FahadBinHussain/mainframe / approval-signing.key'
+
+function Get-VaultApprovalLinkSigningKeyPath {
+    <#
+    .SYNOPSIS
+        where the shared link-signing private key lives: the profile root,
+        resolved through Get-MainframeProfileRoot, never a hardcoded path.
+    #>
+    param([string]$Path = $null)
+
+    if ($Path) { return $Path }
+    return (Join-Path (Get-MainframeProfileRoot) $script:VaultApprovalLinkSigningKeyFileName)
+}
+
+function Get-VaultApprovalLinkPayload {
+    <#
+    .SYNOPSIS
+        the exact bytes the link signature covers: k LF sid LF code LF exp
+        LF srv. exp/srv are the strings as serialized into the URL ('' when
+        the param is absent) - sign the string, never re-format it.
+    #>
+    param(
+        [string]$Key,
+        [string]$Sid,
+        [string]$Code,
+        [string]$Exp = '',
+        [string]$Server = ''
+    )
+
+    if ($null -eq $Key) { $Key = '' }
+    if ($null -eq $Sid) { $Sid = '' }
+    if ($null -eq $Code) { $Code = '' }
+    if ($null -eq $Exp) { $Exp = '' }
+    if ($null -eq $Server) { $Server = '' }
+    return ($Key + "`n" + $Sid + "`n" + $Code + "`n" + $Exp + "`n" + $Server)
+}
+
+function Get-VaultApprovalLinkSignature {
+    <#
+    .SYNOPSIS
+        sign a link payload with the shared EC key. returns the 64-byte raw
+        R||S signature as base64url, no padding.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.Cryptography.ECDsa]$Key,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Payload
+    )
+
+    # SignData's default format is P1363 (raw R||S) - 64 bytes for P-256,
+    # which is exactly what WebCrypto's ECDSA verify expects.
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Payload)
+    $sig = $Key.SignData($bytes, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    return [Convert]::ToBase64String($sig).Replace('+', '-').Replace('/', '_').TrimEnd('=')
+}
+
+function Invoke-BwApprovalCommand {
+    <#
+    .SYNOPSIS
+        run the bw CLI with a hard timeout. returns stdout on success, $null
+        on any failure (bw missing, non-zero exit, timeout) - the signing
+        path treats every failure as "no live session", never as an error.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments,
+        [int]$TimeoutSeconds = 10
+    )
+
+    $bw = Get-Command bw -ErrorAction SilentlyContinue
+    if (-not $bw) { return $null }
+    try {
+        # Arguments (not ArgumentList) so windows powershell 5.1 works too.
+        $quoted = foreach ($a in $Arguments) { '"' + ($a -replace '"', '\"') + '"' }
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $bw.Source
+        $psi.Arguments = ($quoted -join ' ')
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $proc.Kill() } catch {}
+            return $null
+        }
+        $out = $proc.StandardOutput.ReadToEnd()
+        if ($proc.ExitCode -ne 0) { return $null }
+        return $out
+    } catch {
+        return $null
+    }
+}
+
+function Test-VaultApprovalLiveSession {
+    <#
+    .SYNOPSIS
+        true when the bw CLI reports unlocked - the only condition under
+        which the signing key may be fetched from the vault without a user
+        step. never prompts, never throws.
+    #>
+    param([string]$Session = $null)
+
+    $args = @('status')
+    if ($Session) { $args += @('--session', $Session) }
+    $out = Invoke-BwApprovalCommand -Arguments $args -TimeoutSeconds 10
+    if (-not $out) { return $false }
+    try {
+        $status = $out | ConvertFrom-Json
+        return ($status.status -eq 'unlocked')
+    } catch {
+        return $false
+    }
+}
+
+function Sync-VaultApprovalSigningKeyFromVault {
+    <#
+    .SYNOPSIS
+        self-heal the shared link-signing key: if the profile-root key file
+        is missing and a live bw session exists, fetch the PEM from the
+        vault (item notes) and save it 0600. returns $true when the key file
+        exists afterwards, $false otherwise. never throws, never prints the
+        key, never prompts - a failure just means the next link is unsigned.
+    .DESCRIPTION
+        DEADLOCK EDGE (future enforcement): under unsigned-refused
+        enforcement, "session dead + key file lost" at the same time is a
+        deadlock - the runner cannot approve (unsigned refused) and cannot
+        fetch the key (no session). recovery is re-delivering key+topic
+        together via the migration pack. two simultaneous failures; noted
+        honestly here, not engineered around.
+    #>
+    param(
+        [string]$Session = $null,
+        [string]$Path = $null
+    )
+
+    $keyPath = if ($Path) { $Path } else { Get-VaultApprovalLinkSigningKeyPath }
+    if (Test-Path -LiteralPath $keyPath) { return $true }
+    if (-not (Test-VaultApprovalLiveSession -Session $Session)) { return $false }
+    $args = @('list', 'items', '--search', $script:VaultApprovalLinkSigningVaultItemName)
+    if ($Session) { $args += @('--session', $Session) }
+    $out = Invoke-BwApprovalCommand -Arguments $args -TimeoutSeconds 15
+    if (-not $out) { return $false }
+    try {
+        $items = ConvertFrom-JsonArray -Json $out
+    } catch {
+        return $false
+    }
+    # --search is a substring match: only the exact item name is the key.
+    $item = @($items | Where-Object { [string]$_.name -eq $script:VaultApprovalLinkSigningVaultItemName }) | Select-Object -First 1
+    if (-not $item -or -not $item.notes) { return $false }
+    $pem = ([string]$item.notes).Trim()
+    if ($pem -notmatch 'BEGIN EC PRIVATE KEY') { return $false }
+    try {
+        Write-MainframePrivateFile -Path $keyPath -Content ($pem + "`n") | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-VaultApprovalLinkSigningKey {
+    <#
+    .SYNOPSIS
+        the shared EC P-256 link-signing key, or $null when this machine has
+        none (unsigned link). a missing file self-heals from the vault when
+        a live session exists; otherwise the link just goes out unsigned.
+        never throws - signing must never fail an approval.
+    #>
+    param([string]$Path = $null)
+
+    $keyPath = if ($Path) { $Path } else { Get-VaultApprovalLinkSigningKeyPath }
+    if (-not (Test-Path -LiteralPath $keyPath)) {
+        $null = Sync-VaultApprovalSigningKeyFromVault -Path $keyPath
+        if (-not (Test-Path -LiteralPath $keyPath)) { return $null }
+    }
+    try {
+        $pem = [IO.File]::ReadAllText($keyPath)
+        $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
+        try {
+            # ImportFromPem is .NET Core only - windows powershell 5.1 has no
+            # such method, so a 5.1 runner signs nothing (unsigned link).
+            # the check is by NAME: the only overload takes a ReadOnlySpan,
+            # and a GetMethod call naming [string] finds nothing even where
+            # the method exists (powershell binds the string to the span
+            # implicitly at the call below).
+            $import = @([System.Security.Cryptography.ECDsa].GetMethods() | Where-Object { $_.Name -eq 'ImportFromPem' })
+            if ($import.Count -eq 0) { $ecdsa.Dispose(); return $null }
+            $ecdsa.ImportFromPem($pem)
+        } catch {
+            $ecdsa.Dispose()
+            return $null
+        }
+        return $ecdsa
+    } catch {
+        return $null
+    }
+}
+
+function Get-NtfyTopicFingerprint {
+    <#
+    .SYNOPSIS
+        what the terminal is allowed to print about the ntfy topic: the
+        first 4 chars + an ellipsis. the topic is the ONLY credential, so
+        the full name never appears in output (H1).
+    #>
+    param([string]$Topic)
+
+    if (-not $Topic) { return '?' }
+    $head = $Topic.Substring(0, [Math]::Min(4, $Topic.Length))
+    return "$head…"
+}
+
 
 function Get-VaultApprovalUrl {
     param(
@@ -595,10 +860,13 @@ function Get-VaultApprovalUrl {
     $sidHex = -join ($sidBytes | ForEach-Object { $_.ToString('x2') })
     $sid = "mf-vault-$sidHex"
 
-    # Cryptographic random 2-digit verification code for Number Matching
-    $codeBytes = New-Object byte[] 1
+    # Cryptographic random 4-digit verification code for Number Matching
+    # (1000 + uniform 0..8999 from 2 random bytes - the modulo bias over a
+    # 16-bit space is not worth mentioning). It stays a user-matching aid,
+    # not a secret.
+    $codeBytes = New-Object byte[] 2
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($codeBytes)
-    $code = (10 + ($codeBytes[0] % 90)).ToString()
+    $code = (1000 + ([BitConverter]::ToUInt16($codeBytes, 0) % 9000)).ToString()
 
     $escapedCtx = [Uri]::EscapeDataString($PromptContext)
     $escapedHost = [Uri]::EscapeDataString($HostName)
@@ -621,6 +889,29 @@ function Get-VaultApprovalUrl {
         $url += "&srv=$([Uri]::EscapeDataString($resolvedRelay))"
     }
 
+    # link signing (C1): sign the exact strings in the URL. exp/srv are ''
+    # when the param is absent. k/sid/code/exp are URL-safe so raw ==
+    # escaped; srv is signed UNescaped because the page URL-decodes the
+    # fragment before verifying. a missing key means an unsigned link - the
+    # page warns but allows it, and the approval never fails for it.
+    $expString = if ($null -ne $expUnix) { "$expUnix" } else { '' }
+    $srvString = $relayHint
+    $signature = $null
+    $signedPayload = $null
+    $linkKey = Get-VaultApprovalLinkSigningKey
+    if ($linkKey) {
+        try {
+            $signedPayload = Get-VaultApprovalLinkPayload -Key $k -Sid $sid -Code $code -Exp $expString -Server $srvString
+            $signature = Get-VaultApprovalLinkSignature -Key $linkKey -Payload $signedPayload
+            $url += "&sig=$signature"
+        } catch {
+            $signature = $null
+            $signedPayload = $null
+        } finally {
+            $linkKey.Dispose()
+        }
+    }
+
     return [PSCustomObject]@{
         Url           = $url
         Sid           = $sid
@@ -630,6 +921,8 @@ function Get-VaultApprovalUrl {
         Model         = $resolvedModel
         ExpiresAtUnix = $expUnix
         Server        = $relayHint
+        Signature     = $signature
+        SignedPayload = $signedPayload
     }
 }
 
@@ -681,10 +974,11 @@ function Send-VaultApprovalNotification {
             # the relay answers 403 only when the topic or server is wrong -
             # there is no credential to set, the topic name in
             # mainframe.config.json is the credential. without this warning
-            # the only symptom is a phone that never buzzes.
-            Write-MainframeWarning "ntfy refused the push to topic '$Topic' (HTTP $status): the relay or topic is misconfigured. check ntfyTopic and ntfyServer in mainframe.config.json - there is no credential to set."
+            # the only symptom is a phone that never buzzes. the topic
+            # itself is never printed - only its fingerprint (H1).
+            Write-MainframeWarning "ntfy refused the push (HTTP $status, topic '$(Get-NtfyTopicFingerprint -Topic $Topic)'): the relay or topic is misconfigured. check ntfyTopic and ntfyServer in mainframe.config.json - there is no credential to set."
         } else {
-            Write-MainframeWarning "ntfy push dispatch to topic '$Topic' failed: $_"
+            Write-MainframeWarning "ntfy push dispatch (topic '$(Get-NtfyTopicFingerprint -Topic $Topic)') failed: $_"
         }
         return $false
     }
@@ -778,6 +1072,44 @@ function Test-VaultApprovalCiphertext {
     return $true
 }
 
+function Select-VaultApprovalCiphertext {
+    <#
+    .SYNOPSIS
+        pick the FIRST valid ciphertext out of one raw relay poll. a fake
+        posted after the real one must never win (M5), and a flood of fakes
+        must not burn the whole poll on trial decryptions.
+    .DESCRIPTION
+        lines are tried in arrival order. shape is checked first (cheap);
+        only a well-formed block costs a trial decrypt, at most
+        MaxTrialsPerPoll of them per call. lines already trial-decrypted in
+        an earlier poll are remembered in -Tested and skipped, so a flood
+        is worked through poll by poll instead of re-tried forever - the
+        real ciphertext is eventually reached even behind 200 fakes.
+        returns the first valid ciphertext, or $null.
+    #>
+    param(
+        [AllowEmptyString()]
+        [string]$Body,
+        [System.Security.Cryptography.RSA]$Rsa = $null,
+        [System.Collections.Generic.HashSet[string]]$Tested = $null,
+        [int]$MaxTrialsPerPoll = 10
+    )
+
+    if (-not $Body) { return $null }
+    $trials = 0
+    foreach ($rawLine in ($Body -split "`n")) {
+        $line = $rawLine.Trim()
+        if (-not $line) { continue }
+        if ($Tested -and $Tested.Contains($line)) { continue }
+        if (-not (Test-VaultApprovalCiphertext -Value $line)) { continue }
+        if ($trials -ge $MaxTrialsPerPoll) { break }
+        $trials++
+        if ($Tested) { [void]$Tested.Add($line) }
+        if (Test-VaultApprovalCiphertext -Value $line -Rsa $Rsa) { return $line }
+    }
+    return $null
+}
+
 function Wait-VaultApprovalCiphertext {
     param(
         [Parameter(Mandatory = $true)]
@@ -797,6 +1129,9 @@ function Wait-VaultApprovalCiphertext {
     $sessionFile = Get-MainframeSessionKeyPath
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $pollDelay = 2
+    # ciphertexts already trial-decrypted in an earlier poll: skipped, so a
+    # flood of fakes is worked through instead of re-tried forever (M5).
+    $testedCiphertexts = New-Object System.Collections.Generic.HashSet[string]
 
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds $pollDelay
@@ -824,15 +1159,15 @@ function Wait-VaultApprovalCiphertext {
                 # raw returns every message on the topic, newline separated.
                 # only a payload that is a valid RSA block for this request is
                 # an approval; expired markers and spoofed bodies are skipped so
-                # they cannot end the wait.
-                $cipherLines = @(
-                    $body -split "`n" |
-                        ForEach-Object { $_.Trim() } |
-                        Where-Object { Test-VaultApprovalCiphertext -Value $_ -Rsa $Rsa }
-                )
-                if ($cipherLines.Count -gt 0) {
-                    return $cipherLines[-1]
+                # they cannot end the wait. the FIRST valid block wins - a fake
+                # posted after the real one must never displace it (M5).
+                $found = Select-VaultApprovalCiphertext -Body $body -Rsa $Rsa -Tested $testedCiphertexts -MaxTrialsPerPoll 10
+                if ($found) {
+                    return $found
                 }
+                # bound the memory: re-testing a thousand old lines costs one
+                # slow poll, keeping them forever costs the whole wait.
+                if ($testedCiphertexts.Count -gt 1000) { $testedCiphertexts.Clear() }
             }
             $pollDelay = 2
         } catch {
@@ -893,6 +1228,9 @@ function Decrypt-VaultApprovalCiphertext {
                 $pw = [string]$parsed.pw
                 if ($parsed.ttl) { $ttlMinutes = [int]$parsed.ttl }
                 elseif ($parsed.ttlMinutes) { $ttlMinutes = [int]$parsed.ttlMinutes }
+                # the TTL comes from the phone side: trust it, but clamp it -
+                # a session longer than 12 hours is never what was asked for.
+                if ($ttlMinutes -gt 720) { $ttlMinutes = 720 }
             }
         } catch {}
     }
@@ -1031,6 +1369,9 @@ function Write-VaultApprovalLockFile {
     $json = ConvertTo-Json -InputObject $Data -Compress
     try {
         [IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        # the record carries the sid + code: 0600 before the move, so the
+        # lock file is never created with default perms (L11).
+        Set-MainframeFileOwnerOnly -Path $tmp
         [IO.File]::Move($tmp, $Path)
         return $true
     } catch [System.IO.IOException] {
@@ -1267,6 +1608,7 @@ function Close-VaultApprovalRequest {
 }
 
 function Get-VaultMasterPassword {
+    [CmdletBinding()]
     param(
         [string]$NtfyTopic = $null,
         [string]$PromptContext = "vault access",
@@ -1324,12 +1666,15 @@ function Get-VaultMasterPassword {
         Write-Host "  Context: $PromptContext" -ForegroundColor Gray
         Write-Host "  (Ensure the number on your phone matches $code)" -ForegroundColor Yellow
         Write-Host "==================================================" -ForegroundColor Green
-        Write-Host "approval url: $url" -ForegroundColor Gray
+        # the full URL carries k/sid/code - it lands in transcripts and logs,
+        # so it only prints with -Verbose (L19). the phone gets it via the
+        # push, not the terminal.
+        Write-Verbose "approval url: $url"
 
         if ($NtfyTopic) {
             $sent = Send-VaultApprovalNotification -Topic $NtfyTopic -Url $url -Code $code -PromptContext $PromptContext -HostName $HostName -Agent $resolvedAgent -Model $resolvedModel -Server $resolvedServer
             if ($sent) {
-                Write-Host "push notification sent to ntfy topic: $NtfyTopic" -ForegroundColor Green
+                Write-Host "push notification sent (ntfy topic $(Get-NtfyTopicFingerprint -Topic $NtfyTopic))" -ForegroundColor Green
             } else {
                 # rule 8: no silent degradation. without the push the phone
                 # never hears about this request, so waiting would burn the
@@ -1374,7 +1719,9 @@ function Get-VaultMasterPassword {
                     code    = $code
                     state   = 'approved'
                 }
-                $lastApproval | ConvertTo-Json -Compress | Set-Content -LiteralPath $lastApprovalFile -Encoding UTF8 -Force
+                # 0600 via the private-file write: the record carries the
+                # approval code (L11).
+                Write-MainframePrivateFile -Path $lastApprovalFile -Content ($lastApproval | ConvertTo-Json -Compress) | Out-Null
             } catch {}
             return $pw
         } else {
@@ -1405,6 +1752,13 @@ Export-ModuleMember -Function `
     New-VaultApprovalSigningKeyFile, `
     Get-VaultApprovalSigningKeyPath, `
     Get-VaultApprovalPublicKey, `
+    Get-VaultApprovalLinkSigningKeyPath, `
+    Get-VaultApprovalLinkSigningKey, `
+    Get-VaultApprovalLinkPayload, `
+    Get-VaultApprovalLinkSignature, `
+    Sync-VaultApprovalSigningKeyFromVault, `
+    Get-NtfyTopicFingerprint, `
+    Select-VaultApprovalCiphertext, `
     Send-VaultApprovalNotification, `
     Send-VaultRequestExpired, `
     Open-VaultApprovalOnPhone, `

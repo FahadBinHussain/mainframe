@@ -97,6 +97,67 @@ try {
     } finally {
         [Environment]::SetEnvironmentVariable('USERPROFILE', $savedUserProfile)
     }
+
+    # 10. the working directory is NOT a config candidate (M7): a crafted
+    # mainframe.config.json in the directory the runner happens to run from
+    # must not override anything - the profile root wins, and a key that
+    # exists ONLY in the CWD file is invisible.
+    $cwdRoot = Join-Path ([IO.Path]::GetTempPath()) ('mf-paths-cwd-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $cwdDir = Join-Path $cwdRoot 'work'
+    $cwdProfile = Join-Path $cwdRoot 'profile'
+    New-Item -ItemType Directory -Force -Path $cwdDir, $cwdProfile | Out-Null
+    Set-Content -LiteralPath (Join-Path $cwdDir 'mainframe.config.json') -Value '{"testCwdProbeKey123":"cwd-value","testCwdOnlyKey123":"cwd-only"}' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $cwdProfile 'mainframe.config.json') -Value '{"testCwdProbeKey123":"profile-value"}' -Encoding UTF8
+    $savedCwd = (Get-Location).Path
+    try {
+        [Environment]::SetEnvironmentVariable('MAINFRAME_PROFILE_ROOT', $cwdProfile)
+        Set-Location -LiteralPath $cwdDir
+        Assert-Equal 'profile-value' (Get-MainframeConfigValue -Key 'testCwdProbeKey123') `
+            'a CWD config never overrides the profile config'
+        Assert-Equal $null (Get-MainframeConfigValue -Key 'testCwdOnlyKey123') `
+            'a key that exists only in a CWD config is invisible'
+    } finally {
+        Set-Location -LiteralPath $savedCwd
+        Remove-Item -LiteralPath $cwdRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # 11. a private file is written 0600, exact bytes, and an overwrite keeps
+    # the mode and leaves no temp file behind (L11/L12)
+    $privRoot = Join-Path ([IO.Path]::GetTempPath()) ('mf-paths-priv-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Force -Path $privRoot | Out-Null
+    try {
+        $privFile = Join-Path $privRoot 'secret.txt'
+        Write-MainframePrivateFile -Path $privFile -Content 'first-secret' | Out-Null
+        Assert-Equal 'first-secret' ([IO.File]::ReadAllText($privFile)) 'the private file holds the exact bytes'
+        $privMode = $null
+        if ($env:OS -ne 'Windows_NT' -and (Get-Command stat -ErrorAction SilentlyContinue)) {
+            $privMode = ((& stat -c %a $privFile 2>$null) -join '').Trim()
+            Assert-Equal '600' $privMode 'the private file is created 0600'
+        }
+        Write-MainframePrivateFile -Path $privFile -Content 'second-secret' | Out-Null
+        Assert-Equal 'second-secret' ([IO.File]::ReadAllText($privFile)) 'an overwrite replaces the bytes'
+        if ($null -ne $privMode) {
+            $privMode2 = ((& stat -c %a $privFile 2>$null) -join '').Trim()
+            Assert-Equal '600' $privMode2 'an overwrite keeps the file 0600'
+        }
+        $leftovers = @(Get-ChildItem -LiteralPath $privRoot -Filter '*.tmp' -ErrorAction SilentlyContinue)
+        Assert-Equal 0 $leftovers.Count 'no temp file is left behind'
+
+        # 12. the mode helper tightens an existing loose file (posix only)
+        $looseFile = Join-Path $privRoot 'loose.txt'
+        Set-Content -LiteralPath $looseFile -Value 'x' -NoNewline
+        if ($env:OS -ne 'Windows_NT' -and (Get-Command stat -ErrorAction SilentlyContinue)) {
+            & chmod 644 $looseFile
+            Set-MainframeFileOwnerOnly -Path $looseFile
+            $looseMode = ((& stat -c %a $looseFile 2>$null) -join '').Trim()
+            Assert-Equal '600' $looseMode 'the mode helper tightens a loose file to 0600'
+        } else {
+            Set-MainframeFileOwnerOnly -Path $looseFile
+            Assert-True $true 'the mode helper is a no-op on windows'
+        }
+    } finally {
+        Remove-Item -LiteralPath $privRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 } finally {
     Restore-Env
 }

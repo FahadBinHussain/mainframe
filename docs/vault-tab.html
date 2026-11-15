@@ -364,6 +364,19 @@
     padding: 0.9rem 1rem;
     font-weight: 600;
   }
+  /* legacy-enrolment warning (H3): loud, always visible while a legacy
+     enrolment is stored — never a silent fallback */
+  #legacy-note {
+    display: none;
+    margin: 0 0 1rem;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--danger);
+    border-radius: 8px;
+    background: rgba(248, 81, 73, 0.12);
+    color: var(--text);
+    font-size: 0.88rem;
+    text-align: center;
+  }
   /* a request that outlived the runner's wait: visibly dead, not approvable */
   .expiry-line {
     margin: -0.5rem 0 1.25rem;
@@ -408,6 +421,10 @@
 
   <!-- status line: under the header so success/errors need no scrolling -->
   <p id="msg"></p>
+
+  <!-- legacy-enrolment warning (H3): shown whenever the stored fingerprint
+       enrolment uses the legacy method instead of PRF -->
+  <p id="legacy-note"></p>
 
   <!-- Number Matching Card -->
   <div id="verify-box" class="verify-card" style="display:none">
@@ -486,6 +503,25 @@ const STORE_KEY_ENC = 'mf_vault_enc';
 const STORE_KEY_SALT = 'mf_vault_salt';
 const STORE_KEY_IV = 'mf_vault_iv';
 const STORE_KEY_CRED = 'mf_bio_cred';
+const STORE_KEY_MODE = 'mf_vault_mode'; // 'prf' | 'legacy' — absent means legacy (pre-PRF enrolment)
+const STORE_KEY_PRF_SALT = 'mf_vault_prf_salt';
+
+// C1: link signing — SHARED-KEY design (not per-machine registration: that
+// needed a manual step per machine and was rejected). The runner signs
+// k/sid/code/exp/srv with ECDSA P-256 + SHA-256; the signature is 64-byte raw
+// R||S (P1363), base64url, in the fragment param `sig`. This pinned public
+// key is PUBLIC — safe to embed in the page source.
+// Rollout is WARN-THEN-ENFORCE: while ENFORCE_SIGNING is false, unsigned or
+// invalid links show a red banner but still allow approval; flipping this ONE
+// constant to true refuses them outright. A valid signature shows no banner.
+const ENFORCE_SIGNING = false;
+const SIGNING_PUBLIC_KEY_JWK = { kty: 'EC', crv: 'P-256', x: '-h4maTaG7yjGXzGcwgADSHpC8M2lS6bu88p4yGyZ9-Q', y: 'Y8LcTvnYiRGwX6YxFWQ_OZGARJHuK9fRZbiNjlUWrXA' };
+
+// H3: loud note shown whenever the stored enrolment uses the legacy method.
+const LEGACY_NOTE_TEXT = 'legacy fingerprint enrolment — this device did not return PRF key material, so the stored password is protected by device access only, not by fingerprint hardware. clear the enrolment below and re-enrol with the password to retry the upgrade.';
+
+// L17: RSA-2048 + OAEP-SHA256 plaintext ceiling: 256 - 2*32 - 2 = 190 bytes.
+const PLAINTEXT_LIMIT_BYTES = 190;
 
 function show(text, type='') {
   const el = document.getElementById('msg');
@@ -519,19 +555,21 @@ function showDone(text) {
 // without this the page happily announced "approved" for requests nobody was
 // listening to any more.
 
-// The relay the runner reads from. Defaults to ntfy.sh; a runner whose egress
-// proxy denies ntfy.sh passes `srv=<relay base>` in the link fragment and the
-// card posts the ciphertext back through that relay instead. The phone side
-// keeps using the same ntfy app either way.
-let NTFY_BASE = 'https://ntfy.sh';
+// The relay the runner reads from. There is NO default: the runner passes
+// `srv=<relay base>` in the link fragment, and a link without `srv` is
+// refused outright below — the page never silently falls back to public
+// ntfy.sh (M10). The phone side keeps using the same ntfy app either way.
+let NTFY_BASE = null;
 const REQUEST = { expiresAt: null, sid: null, host: null, stale: false, timer: null, markerTimer: null, relayDown: false };
 
-// Trust model: the link only reaches this page through the ntfy topic,
-// and the topic is the credential. The card shows host, agent, model and
-// the verification code - check the code against the terminal before
-// tapping approve. (An earlier design signed each link against a
-// registered-key list kept here and on the relay; removed 2026-11-15
-// because every new machine needed a manual registration step.)
+// Trust model: every approval link is signed by the runner (ECDSA P-256 over
+// k/sid/code/exp/srv, shared key pinned above as SIGNING_PUBLIC_KEY_JWK) and
+// verified here before any approve UI is shown — a link that fails the check
+// cannot be a real runner's link. The card still shows host, agent, model and
+// the verification code: check the code against the terminal before tapping
+// approve. (An earlier per-machine registered-key design was removed
+// 2026-11-15 because every new machine needed a manual registration step;
+// the shared-key design replaces it with no per-machine setup.)
 
 function fmtLeft(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -651,6 +689,12 @@ function b64ToBytes(s) {
   return out;
 }
 
+// base64url without padding — the form WebAuthn wants for credential ids
+// (evalByCredential keys) and the form the runner uses for `sig`.
+function bytesToB64Url(bytes) {
+  return bytesToB64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 function getParams() {
   const hash = location.hash.startsWith('#') ? location.hash.slice(1) : location.hash;
   const params = new URLSearchParams(hash);
@@ -673,12 +717,18 @@ function getParams() {
   const srvParam = params.get('srv');
   const srvRaw = (hash.match(/(?:^|&)srv=([^&]+)/) || [])[1];
   const srv = srvParam || (srvRaw ? decodeURIComponent(srvRaw) : null);
+  const sig = params.get('sig') || (hash.match(/(?:^|&)sig=([A-Za-z0-9_-]+)/) || [])[1];
   return {
     k,
     sid,
     code,
+    sig: sig || null,
     exp: Number.isFinite(exp) && exp > 0 ? exp : null,
+    // expRaw / srvRaw are the EXACT fragment strings (pre-parse, pre-strip):
+    // the signature is computed over them, so they must not be normalised.
+    expRaw: expRaw || null,
     srv: srv ? srv.replace(/\/+$/, '') : null,
+    srvRaw: srv || null,
     host: hostParam !== null ? hostParam : (hostRaw ? decodeURIComponent(hostRaw) : null),
     ctx: ctxParam !== null ? ctxParam : (ctxRaw ? decodeURIComponent(ctxRaw) : null),
     agent: agentParam !== null ? agentParam : (agentRaw ? decodeURIComponent(agentRaw) : null),
@@ -686,7 +736,50 @@ function getParams() {
   };
 }
 
+// C1: verify the runner's signature over the exact fragment strings.
+// Returns 'valid' | 'unsigned' | 'invalid'. The signed payload is
+// k + LF + sid + LF + code + LF + exp + LF + srv (UTF-8); a missing value
+// counts as the empty string. Any verification error counts as 'invalid'
+// (fail closed on the check itself — the warn/enforce decision is the
+// caller's, via ENFORCE_SIGNING).
+async function verifyLinkSignature(p) {
+  if (!p.sig) return 'unsigned';
+  try {
+    const key = await crypto.subtle.importKey(
+      'jwk', SIGNING_PUBLIC_KEY_JWK, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']
+    );
+    const payload = [p.k || '', p.sid || '', p.code || '', p.expRaw || '', p.srvRaw || ''].join('\n');
+    const sigBytes = b64ToBytes(p.sig);
+    if (sigBytes.length !== 64) return 'invalid';
+    const ok = await crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' }, key, sigBytes, new TextEncoder().encode(payload)
+    );
+    return ok ? 'valid' : 'invalid';
+  } catch {
+    return 'invalid';
+  }
+}
 
+function showLegacyNote() {
+  const note = document.getElementById('legacy-note');
+  if (note) {
+    note.textContent = LEGACY_NOTE_TEXT;
+    note.style.display = 'block';
+  }
+}
+
+function hideLegacyNote() {
+  const note = document.getElementById('legacy-note');
+  if (note) note.style.display = 'none';
+}
+
+// Legacy enrolment key derivation (H3): the PBKDF2 input is a PUBLIC constant,
+// so this is obfuscation, not encryption — anyone holding the localStorage
+// values can reimplement this from the public page source and decrypt the
+// stored password offline, no fingerprint needed. Kept ONLY so enrolments made
+// before the PRF rework keep working until the user re-enrols once by typing
+// the password; new enrolments use deriveKeyFromPrf when the authenticator
+// returns PRF output.
 async function deriveLocalKey(salt) {
   const enc = new TextEncoder();
   const baseKey = await crypto.subtle.importKey(
@@ -701,7 +794,87 @@ async function deriveLocalKey(salt) {
   );
 }
 
+// H3: PRF-based enrolment key. The 32-byte PRF output is credential-scoped
+// secret material that never leaves the authenticator — it is NOT in
+// localStorage, so the stored enrolment cannot be decrypted offline from
+// browser storage alone. The PRF salt is a per-enrolment random value kept in
+// localStorage (it is an input, not a secret). HKDF turns the PRF output into
+// the AES-GCM key (the KDF pattern Yubico recommends for PRF encryption).
+async function deriveKeyFromPrf(prfOutput, salt) {
+  const baseKey = await crypto.subtle.importKey('raw', prfOutput, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: salt, info: new TextEncoder().encode('mainframe-vault-prf-v1') },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+// The PRF output of a create/get ceremony, or null when the authenticator did
+// not return one (unsupported, or the extension was ignored).
+function getPrfFirst(cred) {
+  try {
+    if (!cred || typeof cred.getClientExtensionResults !== 'function') return null;
+    const ext = cred.getClientExtensionResults();
+    const first = ext && ext.prf && ext.prf.results && ext.prf.results.first;
+    return first ? new Uint8Array(first) : null;
+  } catch {
+    return null;
+  }
+}
+
+// H3 hardening for BOTH enrolment modes: the assertion is actually checked
+// instead of discarded — rpIdHash must match this origin, the UV (user
+// verification) flag must be set, and the challenge must echo. Throws on any
+// mismatch. (This does NOT fix the legacy mode's obfuscation-grade storage —
+// it only proves the fingerprint ceremony really happened for this site.)
+async function verifyAssertion(assertion, challenge) {
+  const response = assertion && assertion.response;
+  if (!response || !response.authenticatorData || !response.clientDataJSON) {
+    throw new Error('Biometric assertion is missing data.');
+  }
+  const authData = new Uint8Array(response.authenticatorData);
+  if (authData.length < 37) {
+    throw new Error('Biometric assertion is malformed.');
+  }
+  // flags byte (offset 32), bit 2 (0x04) = user verified
+  if ((authData[32] & 0x04) === 0) {
+    throw new Error('Biometric verification did not confirm the user.');
+  }
+  const rpIdHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(window.location.hostname)));
+  for (let i = 0; i < 32; i++) {
+    if (authData[i] !== rpIdHash[i]) {
+      throw new Error('Biometric assertion is for a different site.');
+    }
+  }
+  let clientData;
+  try {
+    clientData = JSON.parse(new TextDecoder().decode(response.clientDataJSON));
+  } catch {
+    throw new Error('Biometric assertion has unreadable client data.');
+  }
+  if (!clientData || clientData.type !== 'webauthn.get') {
+    throw new Error('Biometric assertion has the wrong type.');
+  }
+  const echoed = b64ToBytes(clientData.challenge || '');
+  if (echoed.length !== challenge.length) {
+    throw new Error('Biometric assertion challenge mismatch.');
+  }
+  for (let i = 0; i < echoed.length; i++) {
+    if (echoed[i] !== challenge[i]) {
+      throw new Error('Biometric assertion challenge mismatch.');
+    }
+  }
+}
+
 async function encryptForRunner(plaintext, spkiPubBase64) {
+  // L17: RSA-2048 + OAEP-SHA256 caps the plaintext at 190 bytes. Fail LOUDLY
+  // with the real reason instead of a generic WebCrypto error.
+  const plainBytes = new TextEncoder().encode(plaintext);
+  if (plainBytes.length > PLAINTEXT_LIMIT_BYTES) {
+    throw new Error('password too long for approval encryption — maximum 190 bytes');
+  }
   const keyBytes = b64ToBytes(spkiPubBase64);
   const key = await crypto.subtle.importKey(
     'spki',
@@ -713,7 +886,7 @@ async function encryptForRunner(plaintext, spkiPubBase64) {
   const ct = await crypto.subtle.encrypt(
     { name: 'RSA-OAEP' },
     key,
-    new TextEncoder().encode(plaintext)
+    plainBytes
   );
   return bytesToB64(new Uint8Array(ct));
 }
@@ -758,12 +931,20 @@ async function transmitCiphertext(b64, sid, is12h = false) {
   }
 }
 
-// Biometric enrollment
+// Biometric enrollment. Returns the enrolment mode: 'prf' when the
+// authenticator returned PRF key material, 'legacy' when it did not.
+// PRF (WebAuthn Level 3, Chrome 116+ incl. Chrome on Android via Google
+// Password Manager): the AES-GCM key comes from the authenticator's PRF
+// output, so the stored enrolment cannot be decrypted offline from
+// localStorage alone. Legacy keeps the old public-constant PBKDF2 and is
+// only used when PRF is unavailable — the caller shows a LOUD on-page note
+// for it, never a silent fallback.
 async function enrollBiometric(password) {
   if (!window.PublicKeyCredential) {
     throw new Error('Biometrics not supported in this browser.');
   }
   const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const prfSalt = crypto.getRandomValues(new Uint8Array(32));
   const cred = await navigator.credentials.create({
     publicKey: {
       challenge: challenge,
@@ -778,54 +959,118 @@ async function enrollBiometric(password) {
         authenticatorAttachment: 'platform',
         userVerification: 'required'
       },
-      timeout: 60000
+      timeout: 60000,
+      extensions: { prf: { eval: { first: prfSalt } } }
     }
   });
 
+  const rawIdBytes = cred.rawId ? new Uint8Array(cred.rawId) : b64ToBytes(cred.id);
+
+  // PRF output first: some authenticators answer PRF at creation, others only
+  // at authentication — so a missing create-time result gets one more chance
+  // via a second (get) ceremony before falling back to legacy. The second
+  // ceremony costs one extra fingerprint prompt, once, at enrolment.
+  let prfOutput = getPrfFirst(cred);
+  if (!prfOutput) {
+    try {
+      const probe = await navigator.credentials.get({
+        publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)),
+          allowCredentials: [{ id: rawIdBytes, type: 'public-key' }],
+          userVerification: 'required',
+          timeout: 60000,
+          extensions: { prf: { evalByCredential: { [bytesToB64Url(rawIdBytes)]: { first: prfSalt } } } }
+        }
+      });
+      prfOutput = getPrfFirst(probe);
+    } catch {
+      prfOutput = null;
+    }
+  }
+
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const aesKey = await deriveLocalKey(salt);
+  let aesKey;
+  let mode;
+  if (prfOutput) {
+    aesKey = await deriveKeyFromPrf(prfOutput, prfSalt);
+    mode = 'prf';
+  } else {
+    aesKey = await deriveLocalKey(salt);
+    mode = 'legacy';
+  }
   const encrypted = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: iv },
     aesKey,
     new TextEncoder().encode(password)
   );
 
-  const rawIdBytes = cred.rawId ? new Uint8Array(cred.rawId) : b64ToBytes(cred.id);
   localStorage.setItem(STORE_KEY_CRED, bytesToB64(rawIdBytes));
   localStorage.setItem(STORE_KEY_SALT, bytesToB64(salt));
   localStorage.setItem(STORE_KEY_IV, bytesToB64(iv));
   localStorage.setItem(STORE_KEY_ENC, bytesToB64(new Uint8Array(encrypted)));
+  localStorage.setItem(STORE_KEY_MODE, mode);
+  if (mode === 'prf') {
+    localStorage.setItem(STORE_KEY_PRF_SALT, bytesToB64(prfSalt));
+  } else {
+    localStorage.removeItem(STORE_KEY_PRF_SALT);
+  }
+  return mode;
 }
 
-// Biometric unlock
+// Biometric unlock. Mode comes from localStorage: 'prf' enrolments unwrap the
+// key from the authenticator's PRF output (the fingerprint is a real
+// cryptographic factor there); enrolments with no stored mode predate the PRF
+// rework and keep using the legacy public-constant derivation exactly as
+// before, until the user re-enrols once by typing the password.
 async function approveWithBiometrics() {
   const credB64 = localStorage.getItem(STORE_KEY_CRED);
   const encB64 = localStorage.getItem(STORE_KEY_ENC);
   const saltB64 = localStorage.getItem(STORE_KEY_SALT);
   const ivB64 = localStorage.getItem(STORE_KEY_IV);
+  const mode = localStorage.getItem(STORE_KEY_MODE) || 'legacy';
+  const prfSaltB64 = localStorage.getItem(STORE_KEY_PRF_SALT);
 
-  if (!credB64 || !encB64 || !saltB64 || !ivB64) {
+  if (!credB64 || !encB64 || !ivB64) {
     throw new Error('No biometric credential enrolled.');
+  }
+  if (mode === 'prf' && !prfSaltB64) {
+    throw new Error('Biometric enrolment is incomplete (missing PRF salt). Clear the enrolment below and re-enrol with the password.');
+  }
+  if (mode !== 'prf' && !saltB64) {
+    throw new Error('Biometric enrolment is incomplete. Clear the enrolment below and re-enrol with the password.');
   }
 
   const credBytes = b64ToBytes(credB64);
   const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const requestOptions = {
+    challenge: challenge,
+    allowCredentials: [{ id: credBytes, type: 'public-key' }],
+    userVerification: 'required',
+    timeout: 60000
+  };
+  if (mode === 'prf') {
+    requestOptions.extensions = { prf: { evalByCredential: { [bytesToB64Url(credBytes)]: { first: b64ToBytes(prfSaltB64) } } } };
+  }
   const assertion = await navigator.credentials.get({
-    publicKey: {
-      challenge: challenge,
-      allowCredentials: [{ id: credBytes, type: 'public-key' }],
-      userVerification: 'required',
-      timeout: 60000
-    }
+    publicKey: requestOptions
   });
 
   if (!assertion) throw new Error('Biometric verification cancelled.');
+  await verifyAssertion(assertion, challenge);
 
-  const salt = b64ToBytes(saltB64);
   const iv = b64ToBytes(ivB64);
   const ct = b64ToBytes(encB64);
-  const aesKey = await deriveLocalKey(salt);
+  let aesKey;
+  if (mode === 'prf') {
+    const prfOutput = getPrfFirst(assertion);
+    if (!prfOutput) {
+      throw new Error('This enrolment needs PRF key material from the authenticator, but none was returned. Clear the enrolment below and re-enrol with the password.');
+    }
+    aesKey = await deriveKeyFromPrf(prfOutput, b64ToBytes(prfSaltB64));
+  } else {
+    aesKey = await deriveLocalKey(b64ToBytes(saltB64));
+  }
   const decryptedBuf = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: iv },
     aesKey,
@@ -839,14 +1084,42 @@ window.addEventListener('hashchange', () => {
 });
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const { k, sid, code, exp, srv, host, ctx, agent, model } = getParams();
-  if (srv) {
-    NTFY_BASE = srv;
+  const params = getParams();
+  const { k, sid, code, exp, srv, host, ctx, agent, model } = params;
+  // M10: no relay in the link means no approve UI — never fall back to
+  // public ntfy.sh.
+  if (!srv) {
+    show('No relay in this link (missing srv) — refusing to fall back to public ntfy.sh. Request a fresh link from the runner.', 'error');
+    document.getElementById('icon-container').className = 'icon-wrap error';
+    return;
   }
+  NTFY_BASE = srv;
   if (!k || k.length < 50) {
     show('Invalid or missing public key in URL link. Request a fresh link from runner.', 'error');
     document.getElementById('icon-container').className = 'icon-wrap error';
     return;
+  }
+
+  // C1: verify the runner's signature BEFORE any approve UI is shown.
+  // Warn-then-enforce: while ENFORCE_SIGNING is false, unsigned/invalid links
+  // show a red banner but still allow approval; flipping that one constant
+  // refuses them outright. A valid signature shows no banner.
+  const sigState = await verifyLinkSignature(params);
+  if (sigState === 'unsigned') {
+    if (ENFORCE_SIGNING) {
+      show('This link is not signed — refusing to approve. Request a fresh link from the runner.', 'error');
+      document.getElementById('icon-container').className = 'icon-wrap error';
+      return;
+    }
+    show('this link is not signed — approve only if you started this request yourself', 'error');
+  } else if (sigState === 'invalid') {
+    if (ENFORCE_SIGNING) {
+      show('Signature check FAILED — this link may be forged. Refusing to approve.', 'error');
+      document.getElementById('icon-container').className = 'icon-wrap error';
+      return;
+    }
+    show('signature check FAILED — this link may be forged. do not approve unless you are certain', 'error');
+    document.getElementById('icon-container').className = 'icon-wrap error';
   }
 
   if (code) {
@@ -910,6 +1183,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   const isEnrolled = !!localStorage.getItem(STORE_KEY_ENC);
+  // H3: a legacy enrolment (including every enrolment made before the PRF
+  // rework, which stores no mode) gets the loud note until re-enrolled.
+  if (isEnrolled && (localStorage.getItem(STORE_KEY_MODE) || 'legacy') !== 'prf') {
+    showLegacyNote();
+  }
   const bioSection = document.getElementById('bio-section');
   const formSection = document.getElementById('f');
   const clearBtn = document.getElementById('clear-bio');
@@ -944,6 +1222,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     localStorage.removeItem(STORE_KEY_SALT);
     localStorage.removeItem(STORE_KEY_IV);
     localStorage.removeItem(STORE_KEY_ENC);
+    localStorage.removeItem(STORE_KEY_MODE);
+    localStorage.removeItem(STORE_KEY_PRF_SALT);
+    hideLegacyNote();
     show('Biometric enrollment cleared. Enter master password below to re-enroll.', 'success');
     bioSection.style.display = 'none';
     formSection.style.display = 'block';
@@ -985,7 +1266,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       const shouldSave = document.getElementById('save-bio').checked;
       if (shouldSave && window.PublicKeyCredential) {
         try {
-          await enrollBiometric(pw);
+          const enrolledMode = await enrollBiometric(pw);
+          if (enrolledMode === 'legacy') {
+            // LOUD, never silent: this device did not return PRF material.
+            showLegacyNote();
+          } else {
+            hideLegacyNote();
+          }
         } catch (bioErr) {
           console.warn('Biometric enrollment skipped:', bioErr);
         }

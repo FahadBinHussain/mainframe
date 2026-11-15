@@ -14,7 +14,7 @@
          phone is NOT asked for anything.
       2. otherwise the master password is fetched with the 1-tap phone
          approval, exactly like the windows flow: an RSA-2048 keypair, a
-         2-digit code, an ntfy push, and the ciphertext comes back over the
+         4-digit code, an ntfy push, and the ciphertext comes back over the
          relay (or ntfy directly).
       3. on a machine where the bw CLI is logged out, the sealed email blob
          (bw-email.enc.json) is unsealed with that master password and the CLI
@@ -220,6 +220,11 @@ $email = ''
 if ($cached -and $status.status -ne 'unauthenticated') {
     Write-FlowLog "reusing the cached session (TTL $(Get-VaultSessionTtlMinutes) minutes) - no phone approval needed"
     $sessionReused = $true
+    # opportunistic heal (C1, flow-start-when-live): the session is live
+    # and no approval is needed at all - cache the shared approval signing
+    # key now if this machine lacks it, so the next approval is signed from
+    # the first tap. best-effort, never fails the flow.
+    try { $null = Sync-VaultApprovalSigningKeyFromVault -Session $cached.Trim() } catch {}
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $cached 2>$null | Out-String))
 } else {
     if ($cached -and $status.status -eq 'unauthenticated') {
@@ -256,16 +261,24 @@ if ($cached -and $status.status -ne 'unauthenticated') {
         Write-FlowLog 'bw logged in again'
     }
 
-    [System.Environment]::SetEnvironmentVariable('BW_PASSWORD', $password)
+    # the password travels via a 0600 temp file (--passwordfile), never the
+    # process environment (L13).
+    $pwFile = New-VaultPasswordFile -Password $password
     try {
-        $unlockOut = @(& $BwPath unlock --raw --passwordenv BW_PASSWORD 2>&1)
+        $unlockOut = @(& $BwPath unlock --raw --passwordfile $pwFile 2>&1)
     } finally {
-        Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+        Remove-VaultPasswordFile -Path $pwFile
         $password = $null
     }
     $session = $unlockOut | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z0-9+/=]{20,}$' } | Select-Object -Last 1
     if (-not $session) { throw "bw unlock did not return a session key: $($unlockOut -join ' ')" }
-    Set-VaultSessionKey -SessionKey $session | Out-Null
+    # -ScheduleExpiry registers the one-shot job that runs the full
+    # Expire-VaultSession at the TTL mark (time-based expiry, not lazy).
+    Set-VaultSessionKey -SessionKey $session -ScheduleExpiry | Out-Null
+    # self-heal (C1): the unlock just proved a live session - cache the
+    # shared approval signing key now if this machine lacks it, so the NEXT
+    # approval is signed. best-effort, never fails the flow.
+    try { $null = Sync-VaultApprovalSigningKeyFromVault -Session $session.Trim() } catch {}
     Write-FlowLog "vault session cached at $(Get-MainframeSessionKeyPath)"
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $session.Trim() 2>$null | Out-String))
 }

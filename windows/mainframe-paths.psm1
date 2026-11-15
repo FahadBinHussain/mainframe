@@ -91,10 +91,16 @@ function Get-MainframeConfigValue {
 
     .DESCRIPTION
         one config file drives both machines, so the lookup lives HERE and
-        every consumer asks this function. the candidates are the checkout,
-        the working directory and the profile root - all resolved through
-        this module, so linux never gets a windows-only path (a literal
-        '.config\mainframe' never matches on linux).
+        every consumer asks this function. the candidates are the checkout
+        and the profile root - all resolved through this module, so linux
+        never gets a windows-only path (a literal '.config\mainframe' never
+        matches on linux).
+
+        the working directory is deliberately NOT a candidate: a crafted
+        mainframe.config.json in a directory the runner happens to run from
+        could override ntfyServer/pagesBase/bwServer/ntfyTopic (M7), and a
+        malicious pagesBase points the approval link at an attacker-hosted
+        page copy. checkout + profile root suffice.
 
         returns $null when the key is absent or the file is unreadable.
     #>
@@ -104,7 +110,6 @@ function Get-MainframeConfigValue {
     )
     $candidates = @(
         (Join-Path $PSScriptRoot '..\mainframe.config.json')
-        (Join-Path (Get-Location) 'mainframe.config.json')
         (Join-Path (Get-MainframeProfileRoot) 'mainframe.config.json')
     )
     foreach ($candidate in $candidates) {
@@ -118,6 +123,72 @@ function Get-MainframeConfigValue {
         }
     }
     return $null
+}
+
+function Set-MainframeFileOwnerOnly {
+    <#
+    .SYNOPSIS
+        tighten a file to owner-only (0600) on posix; a no-op on windows,
+        where the file inherits the profile directory acl.
+    .DESCRIPTION
+        the one mode-tightening implementation: [IO.File]::SetUnixFileMode
+        where the runtime has it (.NET 7+), `chmod 600` where it does not
+        (older pwsh on linux). a failure warns loudly instead of passing
+        silently - a secret file left world-readable is a real finding
+        (L11/L12), not a cosmetic one.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+    if ($env:OS -eq 'Windows_NT') { return }
+    try {
+        $mode = [System.IO.UnixFileMode]::UserRead -bor [System.IO.UnixFileMode]::UserWrite
+        [System.IO.File]::SetUnixFileMode($Path, $mode)
+        return
+    } catch {}
+    try {
+        & chmod 600 $Path 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) { return }
+    } catch {}
+    Write-MainframeWarning "could not tighten the mode of $Path - it may be readable by other users"
+}
+
+function Write-MainframePrivateFile {
+    <#
+    .SYNOPSIS
+        write secret content to a file that is never world-readable, even
+        briefly: the bytes land in a 0600 temp file first and are then moved
+        over the target, so the target path only ever appears already 0600.
+    .DESCRIPTION
+        the target is created by a rename, not a truncate: a reader either
+        sees the old file or the new one, never a half-written one, and the
+        umask never gets a say. the temp file carries a random suffix, so a
+        local process cannot guess its name in the microsecond window before
+        the chmod lands.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Content
+    )
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        $null = New-Item -ItemType Directory -Force -Path $dir
+    }
+    $tmp = "$Path.$PID.$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    try {
+        [IO.File]::WriteAllText($tmp, $Content, (New-Object System.Text.UTF8Encoding($false)))
+        Set-MainframeFileOwnerOnly -Path $tmp
+        Move-Item -LiteralPath $tmp -Destination $Path -Force
+    } finally {
+        if ([IO.File]::Exists($tmp)) {
+            [IO.File]::Delete($tmp)
+        }
+    }
+    return $Path
 }
 
 function Write-MainframeWarning {
@@ -145,4 +216,6 @@ Export-ModuleMember -Function `
     Get-MainframeSessionKeyPath, `
     Get-MainframeCheckoutRoot, `
     Get-MainframeConfigValue, `
+    Set-MainframeFileOwnerOnly, `
+    Write-MainframePrivateFile, `
     Write-MainframeWarning

@@ -63,6 +63,12 @@ if ($env:OS -eq 'Windows_NT') {
         '  exit /b 1'
         ')'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
+    # fake schedulers: log the full command line, exit 0 - so the unlock
+    # in section 5 registers a scheduled expiry against the fakes, never
+    # a real schtasks task / systemd timer.
+    @('@echo off', "echo schtasks %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'schtasks.cmd') -Encoding ASCII
+    @('@echo off', "echo systemd-run %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemd-run.cmd') -Encoding ASCII
+    @('@echo off', "echo systemctl %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemctl.cmd') -Encoding ASCII
 } else {
     $bw = Join-Path $bin 'bw'
     @(
@@ -81,11 +87,31 @@ if ($env:OS -eq 'Windows_NT') {
         'esac'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
     & chmod 755 $bw
+    @(
+        '#!/bin/sh'
+        "echo `"schtasks `$*`" >> `"$root/sched-calls`""
+        'exit 0'
+    ) | Set-Content -LiteralPath (Join-Path $bin 'schtasks') -Encoding ASCII
+    @(
+        '#!/bin/sh'
+        "echo `"systemd-run `$*`" >> `"$root/sched-calls`""
+        'exit 0'
+    ) | Set-Content -LiteralPath (Join-Path $bin 'systemd-run') -Encoding ASCII
+    @(
+        '#!/bin/sh'
+        "echo `"systemctl `$*`" >> `"$root/sched-calls`""
+        'exit 0'
+    ) | Set-Content -LiteralPath (Join-Path $bin 'systemctl') -Encoding ASCII
+    & chmod 755 (Join-Path $bin 'schtasks')
+    & chmod 755 (Join-Path $bin 'systemd-run')
+    & chmod 755 (Join-Path $bin 'systemctl')
 }
 
 $sessionFile = Join-Path (Join-Path (Join-Path $profile 'accounts') 'bitwarden') 'session.key'
 $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
+$expiryFile = Join-Path (Join-Path (Join-Path $profile 'accounts') 'bitwarden') 'expiry.json'
 $callsFile = Join-Path $root 'calls'
+$schedCallsFile = Join-Path $root 'sched-calls'
 $stateFile = Join-Path $root 'state-unauth'
 
 function Reset-FakeBw {
@@ -98,11 +124,19 @@ function Reset-FakeBw {
     }
     Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $expiryFile -Force -ErrorAction SilentlyContinue
     Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
+    Remove-Item -Path 'Env:\MAINFRAME_VAULT_SESSION_STARTED_UNIX' -ErrorAction SilentlyContinue
     Remove-Item -Path 'Env:\MAINFRAME_VAULT_APPROVED_TTL' -ErrorAction SilentlyContinue
 }
 function Get-Calls {
     if (Test-Path -LiteralPath $callsFile) { return (Get-Content -LiteralPath $callsFile -Raw) } else { return '' }
+}
+function Reset-SchedLog {
+    if (Test-Path -LiteralPath $schedCallsFile) { Remove-Item -LiteralPath $schedCallsFile -Force }
+}
+function Get-SchedCalls {
+    if (Test-Path -LiteralPath $schedCallsFile) { return (Get-Content -LiteralPath $schedCallsFile -Raw) } else { return '' }
 }
 
 $savedPath = $env:PATH
@@ -181,6 +215,31 @@ try {
     Assert-Contains (Get-Calls) 'unlock' 'the login is followed by an unlock'
     Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key is cached after the login'
     Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI is logged in again after the login'
+    # 5b. the unlock registered the scheduled expiry (time-based, not
+    # lazy): expiry.json exists and the fake scheduler was called.
+    Assert-True (Test-Path -LiteralPath $expiryFile) 'the unlock registers a scheduled expiry (expiry.json exists)'
+    if ($env:OS -eq 'Windows_NT') {
+        Assert-Contains (Get-SchedCalls) '/Create' 'the unlock registration creates a schtasks task (fake schtasks)'
+    } else {
+        Assert-Contains (Get-SchedCalls) 'systemd-run --on-active=3600s' 'the unlock registration schedules 60 minutes out (fake systemd-run)'
+    }
+    $null = Unregister-VaultSessionExpiry
+    Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'unregister removes expiry.json after the unlock'
+
+    # 6. a manual lock cancels the pending scheduled expiry: re-register,
+    # lock, and the job is gone (fake scheduler log proves the removal).
+    Reset-SchedLog
+    $ok = Register-VaultSessionExpiry -TtlMinutes 60
+    Assert-True $ok 're-registration succeeds before the lock'
+    Assert-True (Test-Path -LiteralPath $expiryFile) 'expiry.json exists before the lock'
+    Reset-SchedLog
+    Lock-VaultSession
+    Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'a manual lock deletes expiry.json'
+    if ($env:OS -eq 'Windows_NT') {
+        Assert-Contains (Get-SchedCalls) '/Delete' 'a manual lock deletes the schtasks entry'
+    } else {
+        Assert-Contains (Get-SchedCalls) 'systemctl stop' 'a manual lock stops the systemd timer'
+    }
 } finally {
     $env:PATH = $savedPath
     $env:MAINFRAME_PROFILE_ROOT = $savedProfile

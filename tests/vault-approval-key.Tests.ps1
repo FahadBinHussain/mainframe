@@ -10,7 +10,9 @@
 #     password to the public half, the runner decrypts it with the private
 #     half - that is the only job the key still has
 #   - the link carries the approval facts (k, sid, code, host, ctx, agent,
-#     model, exp, srv) and NO signature
+#     model, exp, srv) and a signature only when a link-signing key is
+#     present (see vault-approval-signing.Tests.ps1 for the signed case -
+#     this file pins the UNSIGNED case: no key, no live session, no sig)
 #   - a configured-but-missing key fails LOUDLY instead of shipping a link
 #     the page cannot encrypt for, and a machine with no key at all mints
 #     its own pair and proceeds - no registration step, no stop
@@ -49,10 +51,13 @@ $publicKey = Get-VaultApprovalPublicKey
 Assert-True ($publicKey.Length -gt 300) 'the approval public key is a real SPKI'
 Assert-True ($publicKey -notmatch '[+/=]') 'the public key is base64url'
 
-# 3. the page carries no signing-key trust list any more
+# 3. the page carries no signing-key trust list any more (the old descriptor
+# design is gone; the page now verifies the ONE shared-key link signature
+# instead - C1, warn mode until the enforce flip)
 $pageSource = Get-Content -LiteralPath $page -Raw
 Assert-NotContains $pageSource 'APPROVAL_PUBLIC_KEYS_B64URL' 'the page must not carry a trusted signing key list'
-Assert-NotContains $pageSource 'verifyDescriptor' 'the page must not verify signatures'
+Assert-NotContains $pageSource 'verifyDescriptor' 'the page must not verify descriptor signatures (old design)'
+Assert-Contains $pageSource 'verifyLinkSignature' 'the page verifies the shared-key link signature'
 Assert-NotContains $pageSource 'APPROVAL_DESCRIPTOR_VERSION' 'the page must not build a descriptor'
 Assert-NotContains $pageSource 'X-MF-Sig' 'the page must not send a signature header'
 Assert-Contains $pageSource 'encryptForRunner' 'the page still encrypts the password to the runner key'
@@ -74,9 +79,36 @@ try {
     $signer.Dispose()
 }
 
-# 5. the link carries the approval facts and no signature
+# 5. the link carries the approval facts - and no signature when there is
+# no link-signing key and no live session to heal one from. the temp
+# profile + fake locked bw make the unsigned case deterministic: the real
+# profile on this machine HAS a key, so an ambient run would sign.
+$keyTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('mf-keylink-test-' + [Guid]::NewGuid().ToString('n'))
+$keyTestBin = Join-Path $keyTestRoot 'bin'
+$keyTestProfile = Join-Path $keyTestRoot 'profile'
+New-Item -ItemType Directory -Force -Path $keyTestBin, $keyTestProfile | Out-Null
+if ($env:OS -eq 'Windows_NT') {
+    $keyTestBw = Join-Path $keyTestBin 'bw.cmd'
+    @(
+        '@echo off'
+        'if "%1"=="status" (echo {"status":"locked","serverUrl":"https://example.invalid"}) else (echo fake bw: unknown command %1 1>&2 & exit /b 1)'
+    ) | Set-Content -LiteralPath $keyTestBw -Encoding ASCII
+} else {
+    $keyTestBw = Join-Path $keyTestBin 'bw'
+    @(
+        '#!/bin/sh'
+        'if [ "$1" = "status" ]; then echo ''{"status":"locked","serverUrl":"https://example.invalid"}''; else echo "fake bw: unknown command $1" >&2; exit 1; fi'
+    ) | Set-Content -LiteralPath $keyTestBw -Encoding ASCII
+    & chmod 755 $keyTestBw
+}
+$savedPath5 = $env:PATH
+$savedProfile5 = $env:MAINFRAME_PROFILE_ROOT
+$savedServer5 = $env:MAINFRAME_NTFY_SERVER
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 try {
+    $env:PATH = "$keyTestBin$([IO.Path]::PathSeparator)$savedPath5"
+    $env:MAINFRAME_PROFILE_ROOT = $keyTestProfile
+    Remove-Item Env:MAINFRAME_NTFY_SERVER -ErrorAction SilentlyContinue
     $session = Get-VaultApprovalUrl -Rsa $rsa -PromptContext 'vault access' -HostName 'LAPTOP-MAIN' `
         -Agent 'minimax-code' -Model 'MiniMax-M3.1-Flash' -ExpiresInSeconds 300 `
         -Server 'https://relay.example.test/ntfy'
@@ -84,18 +116,23 @@ try {
     $params = [System.Web.HttpUtility]::ParseQueryString($fragment)
     Assert-True ($params['k'].Length -gt 300) 'the link carries the runner public key'
     Assert-True ($params['sid'] -like 'mf-vault-*') 'the link carries the single-use topic'
-    Assert-True ($params['code'] -match '^[0-9]{2}$') 'the link carries the 2-digit code'
+    Assert-True ($params['code'] -match '^[0-9]{4}$') 'the link carries the 4-digit code'
     Assert-Equal 'LAPTOP-MAIN' $params['host'] 'the link carries the host'
     Assert-Equal 'vault access' $params['ctx'] 'the link carries the context'
     Assert-Equal 'minimax-code' $params['agent'] 'the link carries the agent'
     Assert-Equal 'MiniMax-M3.1-Flash' $params['model'] 'the link carries the model'
     Assert-True ($params['exp'] -match '^[0-9]+$') 'the link carries the expiry'
     Assert-Equal 'https://relay.example.test/ntfy' $params['srv'] 'the link carries the relay hint'
-    Assert-NotContains $session.Url '&sig=' 'the link carries no signature'
+    Assert-NotContains $session.Url '&sig=' 'the keyless link carries no signature'
     Assert-True ($session.PSObject.Properties.Name -notcontains 'Descriptor') 'the session carries no descriptor'
-    Assert-True ($session.PSObject.Properties.Name -notcontains 'Signature') 'the session carries no signature'
+    Assert-True ($session.PSObject.Properties.Name -contains 'Signature') 'the session carries a signature slot'
+    Assert-True ($null -eq $session.Signature) 'the keyless link leaves the signature slot empty'
 } finally {
     $rsa.Dispose()
+    $env:PATH = $savedPath5
+    if ($null -eq $savedProfile5) { Remove-Item Env:MAINFRAME_PROFILE_ROOT -ErrorAction SilentlyContinue } else { $env:MAINFRAME_PROFILE_ROOT = $savedProfile5 }
+    if ($null -eq $savedServer5) { Remove-Item Env:MAINFRAME_NTFY_SERVER -ErrorAction SilentlyContinue } else { $env:MAINFRAME_NTFY_SERVER = $savedServer5 }
+    Remove-Item -LiteralPath $keyTestRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # 6. a configured-but-missing key fails loudly - the page would have no

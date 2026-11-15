@@ -202,6 +202,9 @@ if ($bwStatus.status -eq 'unauthenticated') {
     }
     if (-not $bwEmail) {
         $blobCandidates = @()
+        # the profile copy is the live one (the repo copy was deleted - H2);
+        # the checkout copies below only help on machines that still have one.
+        $blobCandidates += Join-Path (Get-MainframeProfileRoot) 'bw-email.enc.json'
         if ($PSScriptRoot) { $blobCandidates += Join-Path $PSScriptRoot 'bw-email.enc.json' }
         $blobCandidates += Join-Path $MainframeDir 'bw-email.enc.json'
         $blobPath = $blobCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
@@ -238,13 +241,15 @@ if ($bwStatus.status -eq 'unauthenticated') {
     }
     $loginOk = $false
     if ($obtainedMasterPw) {
-        # Set via the .NET API (same store as $env:BW_PASSWORD)
-        [System.Environment]::SetEnvironmentVariable('BW' + '_PASSWORD', $obtainedMasterPw)
-        & bw login $bwEmail --passwordenv BW_PASSWORD
-        if ($LASTEXITCODE -eq 0) { $loginOk = $true }
-        else {
-            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
-            Write-Warning 'passwordenv login failed - falling back to the interactive login'
+        # the password travels in a 0600 temp file (L13), never in the
+        # environment where any same-user process can read it.
+        $pwFile = New-VaultPasswordFile -Password $obtainedMasterPw
+        try {
+            & bw login $bwEmail --passwordfile $pwFile
+            if ($LASTEXITCODE -eq 0) { $loginOk = $true }
+            else { Write-Warning 'password-file login failed - falling back to the interactive login' }
+        } finally {
+            Remove-VaultPasswordFile -Path $pwFile
         }
     }
     if (-not $loginOk) {
@@ -265,11 +270,13 @@ if ($bwStatus.status -ne 'unlocked') {
     $session = $null
 
     $invokeBwUnlock = {
-        param([switch]$UsePasswordEnv)
+        param([string]$PasswordFile)
         $savedEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            if ($UsePasswordEnv) { $unlockOutput = @(& bw unlock --raw --passwordenv BW_PASSWORD 2>&1) }
+            # --passwordfile keeps the password out of the process
+            # environment (L13); the file is 0600 and the caller deletes it.
+            if ($PasswordFile) { $unlockOutput = @(& bw unlock --raw --passwordfile $PasswordFile 2>&1) }
             else { $unlockOutput = @(& bw unlock --raw 2>&1) }
             $unlockExit = $LASTEXITCODE
         } finally {
@@ -282,11 +289,11 @@ if ($bwStatus.status -ne 'unlocked') {
     }
 
     if ($obtainedMasterPw) {
-        [System.Environment]::SetEnvironmentVariable('BW' + '_PASSWORD', $obtainedMasterPw)
+        $pwFile = New-VaultPasswordFile -Password $obtainedMasterPw
         try {
-            $session = & $invokeBwUnlock -UsePasswordEnv
+            $session = & $invokeBwUnlock -PasswordFile $pwFile
         } finally {
-            Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+            Remove-VaultPasswordFile -Path $pwFile
         }
         if ($session) {
             Write-Host 'vault unlocked successfully via 1-tap mobile approval' -ForegroundColor Green
@@ -294,7 +301,12 @@ if ($bwStatus.status -ne 'unlocked') {
     }
 
     if (-not $session -and -not [string]::IsNullOrWhiteSpace($env:BW_PASSWORD)) {
-        $session = & $invokeBwUnlock -UsePasswordEnv
+        $pwFile = New-VaultPasswordFile -Password $env:BW_PASSWORD
+        try {
+            $session = & $invokeBwUnlock -PasswordFile $pwFile
+        } finally {
+            Remove-VaultPasswordFile -Path $pwFile
+        }
         if (-not $session) {
             Write-Warning 'BW_PASSWORD was rejected. Falling back to interactive unlock.'
         }
@@ -308,14 +320,14 @@ if ($bwStatus.status -ne 'unlocked') {
             # Prompt here instead of relying on 'bw unlock' prompting: when the
             # unlock output is captured (as $invokeBwUnlock does), bw's own
             # interactive prompt never reaches the user. A secure prompt plus
-            # --passwordenv keeps the password env-scoped, in memory only, and
-            # never written to disk.
+            # --passwordfile keeps the password out of the environment and
+            # off the clipboard; the 0600 temp file is deleted after each try.
             $securePw = Read-Host "type your bitwarden MASTER PASSWORD (attempt $attempt of 3)" -AsSecureString
-            $env:BW_PASSWORD = [Net.NetworkCredential]::new('', $securePw).Password
+            $pwFile = New-VaultPasswordFile -Password ([Net.NetworkCredential]::new('', $securePw).Password)
             try {
-                $session = & $invokeBwUnlock -UsePasswordEnv
+                $session = & $invokeBwUnlock -PasswordFile $pwFile
             } finally {
-                Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
+                Remove-VaultPasswordFile -Path $pwFile
             }
             if (-not $session -and $attempt -lt 3) {
                 Write-Warning 'Bitwarden rejected that password. Please try again.'
@@ -328,10 +340,11 @@ if ($bwStatus.status -ne 'unlocked') {
     $env:BW_SESSION = $session
     Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
     $obtainedMasterPw = $null
-    # persist for the restore helpers that read session.key
-    $sk = Get-MainframeSessionKeyPath
-    New-Item -ItemType Directory -Force -Path (Split-Path $sk) | Out-Null
-    Set-Content -LiteralPath $sk -Value $session -Encoding UTF8
+    # persist for the restore helpers that read session.key - through the
+    # vault module, so the file is 0600 + atomic and a scheduled expiry
+    # runs at the default TTL even with no vault use after boot (the same
+    # mechanism as the approval flow).
+    Set-VaultSessionKey -SessionKey $session -ScheduleExpiry | Out-Null
 } else {
     Write-Host 'vault already unlocked'
 }
