@@ -2030,6 +2030,13 @@ than `Add-Content`, which writes platform CRLF.
 
 ## Headless vault unlock: mobile approval via ntfy relay (2026-10-26)
 
+(the transport below moved to the Cloudflare worker relay on 2026-11-11:
+push + poll go to `ntfyServer` in `mainframe.config.json` and the page is
+served from `pagesBase` — the ntfy.sh / github.io references are the old
+transport. the RSA key is also minted once per machine now, not per
+request — see "the topic is the only credential" (2026-11-15). the flow
+is otherwise unchanged.)
+
 - Headless restores on remote Linux boxes/containers without interactive tty cannot prompt via `getpass`.
 - `linux_real.py` uses mobile approval push: configured via `ntfyTopic` in `mainframe.config.json`, `MAINFRAME_NTFY_TOPIC` environment variable, or `--ntfy-topic <topic>`. since 2026-10-31 the topic is **required** -- there is no public default.
 - Remote runner generates an ephemeral RSA-2048 keypair (`vault-tab.key`) and single-use session topic (`mf-vault-<token>`).
@@ -2121,7 +2128,7 @@ and post garbage that killed a live approval.
   screenshot or a log -- and a reader of the topic sees the verification code,
   so they can also forge a request that MATCHES the number on the terminal.
   the number check only protects against someone who cannot read the requests.
-- **a PROTECTED topic is the actual lock.** `Get-VaultNtfyToken` resolves
+- **a PROTECTED topic is the actual lock. (REMOVED 2026-11-15 — see "the topic is the only credential" below; the credential is gone.)** `Get-VaultNtfyToken` resolves
   `-Token` -> `MAINFRAME_NTFY_TOKEN` -> `ntfyToken` in `mainframe.config.json`,
   and `Send-VaultApprovalNotification` sends it as `Authorization: Bearer` on
   the push. ntfy then refuses an anonymous read of the topic, so a leaked
@@ -2143,6 +2150,48 @@ and post garbage that killed a live approval.
   module resolver instead of duplicating env->hardcode. it also passes
   `-Agent`/`-Model` from the session to `Send-VaultApprovalNotification`; without
   them the push title dropped the caller and read like an attacker's.
+
+### the topic is the only credential (2026-11-15)
+
+the credential handover is GONE from the design, both sides, on the user's
+order: no per-machine credential, no registration, nothing to hand over when
+a new machine joins. what is left:
+
+- **the 32-char random topic name is the only credential.** the relay
+  (Cloudflare worker `mainframe-vault-relay`) checks nothing at all: no
+  header, no token, no list. anyone who knows the topic name can read the
+  requests and post to it, and anyone who does not know it cannot find it.
+- **the per-machine RSA key stays, as ENCRYPTION only.** the approval page
+  encrypts the master password with RSA-OAEP (SHA-256) to the runner's
+  public key `k`, and only the runner's private key decrypts it. the
+  signing-key REGISTRATION (public keys listed in `docs/vault-tab.html` +
+  the relay's `MF_APPROVAL_PUBLIC_KEY`, descriptor signatures on every
+  request) is deleted — a new machine mints its key silently on first use
+  and approvals just work. the key file is still named
+  `mainframe.approval-signing.key` (renaming it would break existing
+  machines for zero behavior gain); it signs nothing.
+- **the ntfy credential is deleted too.** `Get-VaultNtfyToken` and
+  `Get-VaultNtfyCredential` are gone from `vault-approval.psm1`; the
+  `-Token`/`-Auth`/`-NoToken` params are gone; the relay's `authorize()`
+  is gone. `ntfyAuth`/`ntfyToken` in `mainframe.config.json` are unread —
+  remove them if seen. the worker secrets `MF_RELAY_AUTH`, `MF_MAIN_TOPIC`
+  and `MF_APPROVAL_PUBLIC_KEY` were deleted from the worker 2026-11-15, and
+  the vault item holding the old Basic credential (`mainframe.ntfy.json`)
+  is in the vault trash.
+- **what still guards a fake request:** the RSA encryption (the relay and
+  any topic reader see only ciphertext) plus the human check on the
+  approval card — the 2-digit number must match the terminal, and the
+  host/agent/model/context tags must look right. a topic reader can forge
+  a request that matches the number, exactly as the 2026-10-31 section
+  says — that risk is unchanged and accepted; the topic name is the secret
+  that keeps readers out.
+- **the phone needs nothing.** its ntfy subscription may still carry the
+  old credential; the relay ignores `Authorization` headers now.
+- tests: `tests/vault-approval-topic.Tests.ps1` (was `-token-`) pins the
+  no-credential sends against a mocked `Invoke-RestMethod` — the Muse VM
+  egress proxy blocks even localhost TCP, so no listener harness.
+  `tests/vault-approval-key.Tests.ps1` pins mint-and-use + the OAEP
+  round-trip + the page carrying no trust list.
 - **qoder is detected before opencode.** qoder sets
   `OPENCODE_DISABLE_CHANNEL_DB=1` for compatibility, so an opencode-first check
   reported `opencode` with an empty model. `Get-CallerIdentity` tests
