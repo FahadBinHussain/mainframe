@@ -430,7 +430,8 @@ def stage_secrets(archive: Path, manifest: Path, password: str,
     tree.mkdir(parents=True, exist_ok=True)
 
     report = {"version": VERSION, "archive": str(archive),
-              "staged": [], "blocked": [], "missing": [], "members": len(members)}
+              "staged": [], "blocked": [], "missing": [], "skipped": [],
+              "members": len(members)}
     for item in plan:
         if item["status"] != "mapped":
             report["blocked"].append({"name": item["name"],
@@ -449,6 +450,14 @@ def stage_secrets(archive: Path, manifest: Path, password: str,
             record = members[name]
             destination, requested = _write_member(tree, relative, record["data"],
                                                    record["mode"])
+            if destination is None:
+                report["skipped"].append({
+                    "name": item["name"], "from": name,
+                    "target": relative,
+                    "reason": "empty directory entry for a directory that "
+                              "already stands",
+                })
+                continue
             report["staged"].append({
                 "name": item["name"], "from": name,
                 "target": str(destination.relative_to(tree)),
@@ -457,26 +466,70 @@ def stage_secrets(archive: Path, manifest: Path, password: str,
     return report
 
 
-def _write_member(root: Path, relative: str, data: bytes, mode: int | None) -> tuple[Path, int]:
+def _make_parent_dir(parent: Path, root: Path) -> None:
+    """mkdir -p `parent`, clearing empty placeholder files in the way.
+
+    The backup records a directory itself as a zero-byte member alongside
+    its children, so the member for the directory lands as an empty file
+    first and the first child's parent mkdir then trips over it. An empty
+    file there is that placeholder - drop it and carry on. A file with
+    content is real data, and the collision fails loudly instead of
+    deleting it.
+    """
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except (FileExistsError, NotADirectoryError):
+        # FileExistsError is the final component itself being a file;
+        # NotADirectoryError is a file further up the chain blocking the
+        # directory below it. either way the blocker is named by the walk.
+        current = root
+        for part in parent.relative_to(root).parts:
+            current = current / part
+            if current.is_file():
+                if current.stat().st_size == 0:
+                    current.unlink()
+                else:
+                    raise SecretsError(
+                        f"cannot create directory {str(current)!r}: a file "
+                        f"with content already sits there")
+        parent.mkdir(parents=True, exist_ok=True)
+
+
+def _write_member(root: Path, relative: str, data: bytes, mode: int | None) -> tuple[Path | None, int]:
     """Write one decrypted member under `root`, refusing traversal.
 
-    Returns (path, requested_mode). Everything in this archive is secret
-    material - ssh keys, an oauth token in a profile, provider api keys in
-    configs - so the group/world bits are ALWAYS stripped and 0600 is the floor.
-    A narrower mode from the archive (0400) is kept; a wider one (0644) is not,
-    because an ssh private key that lands world-readable is one openssh then
-    refuses to use, and nothing in here has any business being readable by
-    another user. The mode is reported rather than re-read because windows
-    rejects chmod beyond the read-only bit, so an on-disk check there would
-    measure the platform instead of this code.
+    Returns (path, requested_mode), or (None, requested_mode) when the
+    member is an empty directory entry for a directory that already
+    stands - the caller records that as skipped, not staged. Everything
+    in this archive is secret material - ssh keys, an oauth token in a
+    profile, provider api keys in configs - so the group/world bits are
+    ALWAYS stripped and 0600 is the floor. A narrower mode from the
+    archive (0400) is kept; a wider one (0644) is not, because an ssh
+    private key that lands world-readable is one openssh then refuses to
+    use, and nothing in here has any business being readable by another
+    user. The mode is reported rather than re-read because windows
+    rejects chmod beyond the read-only bit, so an on-disk check there
+    would measure the platform instead of this code.
     """
     parts = PurePosixPath(relative).parts
     if not parts or any(part in ("", ".", "..") for part in parts):
         raise SecretsError(f"refusing unsafe member path: {relative!r}")
     target = root.joinpath(*parts)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
     requested = ((mode or 0o600) & 0o600) or 0o600
+    if target.is_dir():
+        # the archive stored a directory entry as a zero-byte file member
+        # alongside its children. an empty member carries no data, so the
+        # directory stands and the member is skipped; a non-empty one is a
+        # real file/directory conflict, and it fails loudly instead of
+        # deleting either side.
+        if not data:
+            return None, requested
+        raise SecretsError(
+            f"member {relative!r} is a file but the staged tree already "
+            f"holds a directory there - refusing to overwrite a directory "
+            f"with a file")
+    _make_parent_dir(target.parent, root)
+    target.write_bytes(data)
     try:
         target.chmod(requested)
     except OSError:

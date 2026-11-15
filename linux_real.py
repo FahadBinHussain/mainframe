@@ -727,6 +727,7 @@ def activate(staging: Path, home: Path, work_root: Path,
     activated: list[str] = []
     backed_up: list[str] = []
     refused: list[str] = []
+    skipped: list[str] = []
     for source_root in (staging / "home-staging", staging / "secrets-staging"):
         if not source_root.is_dir():
             continue
@@ -740,6 +741,20 @@ def activate(staging: Path, home: Path, work_root: Path,
             if src.is_symlink():
                 refused.append(str(rel))
                 continue
+            if target.is_dir():
+                # a staged file cannot land on a live directory. an empty
+                # staged file is a directory-entry placeholder from the
+                # backup (the directory itself stored as a zero-byte
+                # member) - it carries no data, so the live directory
+                # stands and the file is skipped loudly. a non-empty file
+                # is a real conflict: never delete a live directory
+                # silently to make room for it.
+                if src.stat().st_size == 0:
+                    skipped.append(str(rel))
+                    continue
+                raise RuntimeError(
+                    f"cannot activate {rel}: staged file would overwrite "
+                    f"live directory {target}")
             if target.is_symlink():
                 (backup_root / "symlink-targets.txt").parent.mkdir(parents=True, exist_ok=True)
                 with open(backup_root / "symlink-targets.txt", "a") as fh:
@@ -750,7 +765,17 @@ def activate(staging: Path, home: Path, work_root: Path,
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, dest)
                 backed_up.append(str(rel))
-            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+            except (FileExistsError, NotADirectoryError):
+                # same collision one level up: a live file sits where the
+                # staged file needs a directory.
+                if src.stat().st_size == 0:
+                    skipped.append(str(rel))
+                    continue
+                raise RuntimeError(
+                    f"cannot activate {rel}: a live file blocks creating "
+                    f"directory {target.parent}")
             shutil.copy2(src, target)
             # a secret's recorded mode has to survive activation: an ssh private
             # key that lands world-readable is one openssh then refuses to use.
@@ -765,8 +790,12 @@ def activate(staging: Path, home: Path, work_root: Path,
     if refused:
         log(f"refused {len(refused)} symlink(s) in staging (never activated): "
             f"{', '.join(sorted(refused)[:5])}")
+    if skipped:
+        log(f"skipped {len(skipped)} empty staged file(s) colliding with a "
+            f"live directory: {', '.join(sorted(skipped)[:5])}")
     return {"activated": activated, "backed_up": backed_up,
             "refused_symlinks": refused,
+            "skipped_file_dir_conflicts": skipped,
             "backup_dir": str(backup_root) if backed_up else ""}
 
 
@@ -1011,6 +1040,8 @@ def run_restore(backup_root: Path, work_root: Path, yes: bool,
                 f"from the encrypted archive")
             for row in secrets_report.get("blocked", []):
                 log(f"secrets: kept out of HOME - {row['name']}: {row['reason']}")
+            for row in secrets_report.get("skipped", []):
+                log(f"secrets: skipped - {row['name']}: {row['reason']}")
             for row in secrets_report.get("missing", []):
                 log(f"secrets: item not present in the archive - {row['name']}")
         except Exception as exc:

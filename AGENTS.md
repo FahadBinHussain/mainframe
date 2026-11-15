@@ -2633,6 +2633,30 @@ symlink refusal and the byte-for-byte `AGENTS.md` check apply to secrets too,
 instead of growing a second copy path. `run_restore` logs the counts and any
 blocked/missing item by name.
 
+### a directory entry can collide with its own children (2026-11-15)
+
+the backup records a directory itself as a zero-byte member alongside its
+children (`AppData/Roaming/mainframe/accounts` in the real backup). that member
+lands as an empty FILE, then the first child's parent mkdir trips over it
+(`FileExistsError`), and activation trips over the live directory the same way
+(`IsADirectoryError`) - the vault flow creates `~/.config/mainframe/accounts`
+for its own session state, so the live path is a directory by the time the
+restore reaches it.
+
+the fix is in both halves, and the rule in both is the same: an empty file is
+a placeholder and may move; anything with content is real data and may not.
+
+- `linux_secrets._write_member`: an empty file blocking a parent directory is
+  unlinked and the mkdir retried; a non-empty one fails loudly. an empty
+  member for a directory that already stands is skipped (recorded in the
+  report's `skipped`, not `staged`); a non-empty one fails loudly.
+- `linux_real.activate`: an empty staged file colliding with a live directory
+  (or needing a directory a live file blocks) is skipped loudly and recorded
+  in `skipped_file_dir_conflicts`; a non-empty one raises instead of deleting
+  the live directory.
+- tests: `tests/test_linux_secrets.py` (`WriteMemberTests` + the staging tests)
+  and `tests/test_linux_real_activate.py`.
+
 ### the skill tree stages like any other config
 
 `.agents/skills` + `.agents/.skill-lock.json` used to be blocked as "retained,

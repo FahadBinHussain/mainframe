@@ -40,11 +40,12 @@ PAYLOAD = {
 }
 
 
-def build_blob(root: Path) -> Path:
+def build_blob(root: Path, payload: dict | None = None) -> Path:
     """A mainframe-secrets.zip exactly the way publish-backup.ps1 writes one."""
+    payload = PAYLOAD if payload is None else payload
     inner = root / "tool-secrets.zip"
     with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, data in PAYLOAD.items():
+        for name, data in payload.items():
             info = zipfile.ZipInfo(name)
             info.external_attr = ((0o600 if "id_ed25519" in name else 0o644) << 16)
             archive.writestr(info, data)
@@ -253,6 +254,80 @@ class SecretsStagingTests(unittest.TestCase):
                   for row in report["staged"]}
         self.assertIn(".ssh/id_ed25519", staged)
         self.assertIn(".wakatime.cfg", staged)
+
+    def test_directory_entry_beside_its_children_stages_the_children(self):
+        # the real backup records a directory itself as a zero-byte member
+        # alongside its children (AppData/Roaming/mainframe/accounts):
+        # staging died on the file/directory collision with FileExistsError.
+        # the children must land and the directory must stand.
+        payload = {
+            "AppData/Roaming/mainframe/accounts": b"",
+            "AppData/Roaming/mainframe/accounts/github/current.json":
+                b'{"email":"probe@x.y"}\n',
+            "UserProfile/.wakatime.cfg": b"[settings]\napi_key=probe\n",
+        }
+        blob = build_blob(self.root, payload)
+        home = self.root / "home"
+        home.mkdir()
+        report = ls.stage_secrets(blob, MANIFEST, PASSWORD,
+                                  self.root / "staging",
+                                  home=home, environment={})
+        tree = self.root / "staging" / "secrets-staging"
+        accounts = tree / ".config" / "mainframe" / "accounts"
+        self.assertTrue(accounts.is_dir())
+        self.assertEqual(
+            (accounts / "github" / "current.json").read_bytes(),
+            payload["AppData/Roaming/mainframe/accounts/github/current.json"])
+
+    def test_nonempty_file_blocking_a_directory_fails_loudly(self):
+        # same shape, but the blocking file carries real data: dropping it
+        # to make room for the directory would destroy that data, so the
+        # leg must name the collision and stop instead.
+        payload = {
+            "AppData/Roaming/mainframe/accounts": b"not a placeholder",
+            "AppData/Roaming/mainframe/accounts/github/current.json":
+                b'{"email":"probe@x.y"}\n',
+        }
+        blob = build_blob(self.root, payload)
+        home = self.root / "home"
+        home.mkdir()
+        with self.assertRaisesRegex(ls.SecretsError, "with content"):
+            ls.stage_secrets(blob, MANIFEST, PASSWORD,
+                             self.root / "staging",
+                             home=home, environment={})
+
+
+class WriteMemberTests(unittest.TestCase):
+    """_write_member on its own: no archive, no 7z, just the collision."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tree = Path(self._tmp.name) / "tree"
+        self.tree.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_empty_placeholder_file_blocking_a_parent_dir_is_cleared(self):
+        # the exact crash from the 2026-11-15 restore: the bare directory
+        # entry landed as an empty file, then the first child needed that
+        # path as a directory.
+        ls._write_member(self.tree, "accounts", b"", 0o600)
+        self.assertTrue((self.tree / "accounts").is_file())
+        ls._write_member(self.tree, "accounts/child", b"data", 0o600)
+        self.assertTrue((self.tree / "accounts").is_dir())
+        self.assertEqual((self.tree / "accounts" / "child").read_bytes(), b"data")
+
+    def test_empty_member_for_an_existing_directory_is_skipped(self):
+        (self.tree / "accounts").mkdir()
+        path, _ = ls._write_member(self.tree, "accounts", b"", 0o600)
+        self.assertIsNone(path)
+        self.assertTrue((self.tree / "accounts").is_dir())
+
+    def test_nonempty_member_for_an_existing_directory_fails_loudly(self):
+        (self.tree / "accounts").mkdir()
+        with self.assertRaisesRegex(ls.SecretsError, "directory"):
+            ls._write_member(self.tree, "accounts", b"data", 0o600)
 
 
 class QuickBlobTests(unittest.TestCase):
