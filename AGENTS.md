@@ -2973,3 +2973,14 @@ payload before believing it works -
 
 then feed the real `.gitconfig` / `user-env.reg` straight into the adapter and
 read `accepted_settings`. the number was 0 for both.
+
+### approval page: a control inside a toggled section is unreachable in the other view
+
+2026-11-16: the "Reset biometric enrollment" button lived inside the manual
+form `#f`, which is `display:none` while an enrolment exists — so in the
+enrolled state (exactly when the legacy note tells the user to clear it) the
+button was invisible and the user reported "no such button". the fix moved
+`#clear-bio` outside both `#bio-section` and `#f`, and the clear handler now
+hides the button too. rule: any control the user must reach in a given state
+must live outside every section that state hides — setting the control's own
+`display` is not enough when a parent is `display:none`.

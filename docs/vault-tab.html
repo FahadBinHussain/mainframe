@@ -480,6 +480,12 @@
     <button id="switch-manual" class="btn-secondary" type="button">Use master password manually</button>
   </div>
 
+  <!-- Reset lives OUTSIDE both toggleable sections on purpose (2026-11-16):
+       it used to sit inside #f, which is display:none while enrolled, so the
+       legacy note told the user to clear an enrolment with a button that was
+       unreachable. JS shows it whenever an enrolment exists. -->
+  <button id="clear-bio" class="btn-secondary" type="button" style="display:none">Reset biometric enrollment</button>
+
   <!-- Manual Entry & Enrollment Form -->
   <form id="f" style="display:none">
     <input id="pw" type="password" autocomplete="off" spellcheck="false"
@@ -489,7 +495,6 @@
       <span>Save for 1-tap fingerprint approval on this device</span>
     </label>
     <button id="go" type="submit">Send encrypted password</button>
-    <button id="clear-bio" class="btn-secondary" type="button" style="display:none">Reset biometric enrollment</button>
   </form>
 
   <div id="fb" style="display:none">
@@ -1225,6 +1230,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     localStorage.removeItem(STORE_KEY_MODE);
     localStorage.removeItem(STORE_KEY_PRF_SALT);
     hideLegacyNote();
+    clearBtn.style.display = 'none';
     show('Biometric enrollment cleared. Enter master password below to re-enroll.', 'success');
     bioSection.style.display = 'none';
     formSection.style.display = 'block';
