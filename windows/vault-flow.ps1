@@ -84,6 +84,7 @@ if ($BwPath -match '[\\/]') {
 }
 Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'vault-approval.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'vault-ntfy-server.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
 
 function Write-FlowLog {
@@ -235,6 +236,10 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     # vault-held one, so a rotation reaches this machine without anyone
     # touching it. best-effort, never fails the flow.
     try { $null = Sync-VaultNtfyTopicFromVault -Session $cached.Trim() } catch {}
+    # same moment, same rule: converge the local ntfy relay server to
+    # the vault-held one, so a relay move reaches this machine without
+    # anyone touching it. best-effort, never fails the flow.
+    try { $null = Sync-VaultNtfyServerFromVault -Session $cached.Trim() } catch {}
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $cached 2>$null | Out-String))
 } else {
     if ($cached -and $status.status -eq 'unauthenticated') {
@@ -293,6 +298,10 @@ if ($cached -and $status.status -ne 'unauthenticated') {
     # vault-held one, so the next approval goes to the current topic.
     # best-effort, never fails the flow.
     try { $null = Sync-VaultNtfyTopicFromVault -Session $session.Trim() } catch {}
+    # same moment, same rule: converge the local ntfy relay server to
+    # the vault-held one, so the next approval goes to the current
+    # relay. best-effort, never fails the flow.
+    try { $null = Sync-VaultNtfyServerFromVault -Session $session.Trim() } catch {}
     Write-FlowLog "vault session cached at $(Get-MainframeSessionKeyPath)"
     $items = @(ConvertFrom-JsonArray -Json (& $BwPath list items --session $session.Trim() 2>$null | Out-String))
 }

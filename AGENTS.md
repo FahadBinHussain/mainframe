@@ -120,6 +120,38 @@ notes — same shape as the signing-key item `... / approval-signing.key`).
   the phone drops the old subscription only after every machine has
   converged.
 
+### the ntfy relay server lives in the vault
+
+the relay moves the same way the topic does: vault item
+`github.com/FahadBinHussain/mainframe / mainframe.ntfy-server`
+(securenote, the full relay `/ntfy` url in the notes — same shape as
+the topic item).
+
+- whenever a vault flow runs with a live bw session, the runner reads
+  the server from the vault (`Sync-VaultNtfyServerFromVault` in
+  `windows/vault-ntfy-server.psm1`); if it differs from the local
+  config's `ntfyServer`, the local config is updated atomically (mode
+  0600) and the vault value is used. the convergence is logged LOUDLY,
+  naming the new relay in full — the server url is not a secret, the
+  topic is the credential.
+- the vault value must be an https url whose path is exactly `/ntfy`
+  (a trailing slash is trimmed). anything else is malformed: warned
+  about loudly, ignored, the local config unchanged.
+- session dead, no vault item, or a malformed value → the local config
+  is used (existing behavior). a config that carries no `ntfyServer`
+  at all is left alone — it keeps the `ntfy.sh` default.
+- there is no rotation script: the relay moves by editing the one
+  vault item, and every machine converges at its next vault flow — no
+  commands to send. the old relay stays live as the fallback, so a
+  machine that has not converged yet keeps working.
+- the sync lives in its own module instead of next to the topic sync
+  in `vault-approval.psm1` because that file was mid-edit when it
+  landed; moving it in is a clean-up for later. full note in
+  `docs/ntfy-server-convergence.md`.
+- tests: `tests/vault-approval-server-converge.Tests.ps1` (mock bw) +
+  `tests/test_linux_real_vault_server.py` (flow wiring — linux
+  converges through the same `vault-flow.ps1`).
+
 ### the checkout heals itself
 
 at vault-flow/engine start — BOTH `windows/vault-flow.ps1` and
