@@ -2984,3 +2984,20 @@ button was invisible and the user reported "no such button". the fix moved
 hides the button too. rule: any control the user must reach in a given state
 must live outside every section that state hides — setting the control's own
 `display` is not enough when a parent is `display:none`.
+
+
+## muse manager conventions — single source of truth (user, 2026-11-18)
+
+- `muse/CONVENTIONS.md` is the ONLY source for manager conventions across
+  all of Fahad's Muse accounts (10-12 accounts). per-account copies
+  (`~/workspace/manager/CONVENTIONS.md`, MEMORY.md bullets, in-thread
+  messages) are snapshots, never the source. if a copy disagrees with this
+  file, this file wins.
+- changing a convention: edit `muse/CONVENTIONS.md`, commit, push. every
+  agent that touches a convention does this — no per-account edits, no
+  re-typing the rules into each account (that is the bottleneck this file
+  exists to kill).
+- pulling: each account runs `muse/pull-conventions.sh` (copies the file
+  into `~/workspace/manager/CONVENTIONS.md`) at restore time and whenever
+  conventions change. the script fails loudly if the mainframe clone is
+  missing or the pull fails — no silent fallback.
