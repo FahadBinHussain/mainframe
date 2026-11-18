@@ -3009,10 +3009,13 @@ run together, in one script: `muse/restore.sh` (fetched with curl from
 the move-in message — mainframe is public, no auth needed).
 
 1. **muse files** — download the migration pack (Drive URL), verify
-   size + sha256, back up this account's files as `.pre-migration`,
-   unpack, restore this account's own name from the backup, verify
-   with the packed `verify-pack.py` (local mode, against the INNER
-   manifest that rides inside the pack).
+   size + sha256, DECRYPT it with the per-pack passphrase (the pack is
+   encrypted because the transfer link is public by necessity — the
+   destination has no auth, so the download must work with no login;
+   the passphrase travels only in the move-in message), back up this
+   account's files as `.pre-migration`, unpack, restore this account's
+   own name from the backup, verify with the packed `verify-pack.py`
+   (local mode, against the INNER manifest that rides inside the pack).
 2. **mainframe quick restore** — clone mainframe if missing, run
    `linux_real.py --skip-packages --yes --muse-skills`, then re-verify
    the unpack. quick path ONLY — never the full restore for a Muse.
