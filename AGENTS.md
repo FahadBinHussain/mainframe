@@ -3001,3 +3001,28 @@ must live outside every section that state hides — setting the control's own
   into `~/workspace/manager/CONVENTIONS.md`) at restore time and whenever
   conventions change. the script fails loudly if the mainframe clone is
   missing or the pull fails — no silent fallback.
+
+## muse restore — unified, always quick path (user, 2026-11-18)
+
+for Muse, the restore is ALWAYS the quick path, and three steps always
+run together, in one script: `muse/restore.sh` (fetched with curl from
+the move-in message — mainframe is public, no auth needed).
+
+1. **muse files** — download the migration pack (Drive URL), verify
+   size + sha256, back up this account's files as `.pre-migration`,
+   unpack, restore this account's own name from the backup, verify
+   with the packed `verify-pack.py` (local mode, against the INNER
+   manifest that rides inside the pack).
+2. **mainframe quick restore** — clone mainframe if missing, run
+   `linux_real.py --skip-packages --yes --muse-skills`, then re-verify
+   the unpack. quick path ONLY — never the full restore for a Muse.
+3. **manager conventions** — pull `muse/CONVENTIONS.md` (step 3 runs
+   `muse/pull-conventions.sh`).
+
+every step fails loudly (FATAL + exit 1) — no silent fallback. if any
+step fails, the destination stops and reports exactly what failed.
+crons are NOT part of the script: recreating them needs the Muse's own
+cron tools, so the destination restores them from `~/CRONS.md` after
+the script finishes, then reports. the migration workflow lives in
+automata-private `muse.ai/` (build-pack.py, the migration doc); this
+script is the destination-side half of it.
