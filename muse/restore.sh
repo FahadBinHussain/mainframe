@@ -4,9 +4,13 @@
 #
 # the three steps, in order:
 #   1. muse files: download the migration pack (Drive URL), verify size +
-#      sha256, back up this account's own files (.pre-migration), unpack,
-#      restore this account's own name, verify with the packed
-#      verify-pack.py (local mode).
+#      sha256, DECRYPT it with the per-pack passphrase (the pack is
+#      encrypted because the transfer link is public by necessity — the
+#      destination has no auth, so the download must work with no login;
+#      the link alone is useless without the passphrase, which travels
+#      only in the move-in message), back up this account's own files
+#      (.pre-migration), unpack, restore this account's own name, verify
+#      with the packed verify-pack.py (local mode).
 #   2. mainframe quick restore: clone mainframe if missing, run
 #      linux_real.py --skip-packages --yes --muse-skills (quick path only),
 #      then re-verify the pack (the restore must not have touched it).
@@ -15,11 +19,14 @@
 #
 # usage (from the move-in message — mainframe is public, no auth needed):
 #   curl -sSL https://raw.githubusercontent.com/FahadBinHussain/mainframe/main/muse/restore.sh \
-#     | bash -s -- --pack-url URL --sha256 SHA --pack-size BYTES
+#     | bash -s -- --pack-url URL --pack-name NAME.enc --sha256 SHA --pack-size BYTES --passphrase PASS
 # or from a mainframe checkout:
-#   ./muse/restore.sh --pack-url URL --sha256 SHA --pack-size BYTES
+#   ./muse/restore.sh --pack-url URL --sha256 SHA --pack-size BYTES --passphrase PASS
 # or with a pack file already on disk (skips the download):
-#   ./muse/restore.sh --pack-file PATH --sha256 SHA --pack-size BYTES
+#   ./muse/restore.sh --pack-file PATH --sha256 SHA --pack-size BYTES --passphrase PASS
+# the passphrase can also come from the MUSE_PACK_PASSPHRASE env var
+# (--passphrase wins when both are set). a pack file that does not end
+# in .enc is treated as plaintext (no decryption, no passphrase needed).
 #
 # every step fails loudly (FATAL + exit 1) — no silent fallback. if any step
 # fails, STOP and report exactly what failed.
@@ -35,6 +42,7 @@ PACK_FILE=""
 PACK_SHA256=""
 PACK_SIZE=""
 PACK_NAME=""
+PASSPHRASE="${MUSE_PACK_PASSPHRASE:-}"
 MAINFRAME_DIR="${HOME}/Downloads/mainframe"
 TEST_SKIP_MAINFRAME=0
 
@@ -47,6 +55,7 @@ while [ $# -gt 0 ]; do
     --sha256) PACK_SHA256="$2"; shift 2 ;;
     --pack-size) PACK_SIZE="$2"; shift 2 ;;
     --pack-name) PACK_NAME="$2"; shift 2 ;;
+    --passphrase) PASSPHRASE="$2"; shift 2 ;;
     --mainframe-dir) MAINFRAME_DIR="$2"; shift 2 ;;
     --test-skip-mainframe) TEST_SKIP_MAINFRAME=1; shift ;;
     *) die "unknown argument: $1" ;;
@@ -91,6 +100,25 @@ ACTUAL_SHA="$(sha256sum "$PACK_PATH" | awk '{print $1}')"
 [ "$ACTUAL_SHA" = "$PACK_SHA256" ] \
   || die "sha256 mismatch: got ${ACTUAL_SHA}, expected ${PACK_SHA256} — do not extract"
 echo "pack verified: ${PACK_SIZE} bytes, sha256 matches"
+
+# decrypt (encrypted packs end in .enc). a wrong passphrase or a
+# corrupted download fails here, loudly, before anything is extracted.
+case "$PACK_PATH" in
+  *.enc)
+    [ -n "$PASSPHRASE" ] \
+      || die "this pack is encrypted but no passphrase was given (--passphrase or MUSE_PACK_PASSPHRASE)"
+    PLAINTEXT_PATH="${PACK_PATH%.enc}"
+    openssl enc -d -aes-256-cbc -salt -pbkdf2 \
+      -in "$PACK_PATH" -out "$PLAINTEXT_PATH" \
+      -pass "pass:${PASSPHRASE}" \
+      || die "decryption failed — wrong passphrase or corrupted download; nothing was extracted"
+    echo "pack decrypted"
+    PACK_PATH="$PLAINTEXT_PATH"
+    ;;
+  *)
+    echo "plaintext pack (no .enc suffix) - no decryption"
+    ;;
+esac
 
 # back up this account's own files FIRST (never delete anything). a path
 # that already has a .pre-migration backup keeps the first one.
