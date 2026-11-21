@@ -1,11 +1,10 @@
 # No Pester dependency. Runs under windows powershell 5.1 AND pwsh 7.
 #
-# session expiry is REAL, not policy: a lapsed TTL logs the CLI out
-# (Expire-VaultSession: `bw logout` + purge), it does not just lock it.
-# `bw lock` leaves the CLI logged in and the local vault cache on disk, so
-# the old session key kept decrypting it for days after its TTL. this pins
-# the difference down: expiry calls logout, lock does not, and the first use
-# after an expiry is a full login, not an unlock.
+# session expiry LOCKS the CLI, it does not log it out (owner's rule,
+# 2026-11-21): a lapsed TTL runs `bw lock` + purge, so the CLI stays signed
+# in and the vault is merely locked - the panel shows a locked vault, not
+# "signed out". this pins the behaviour down: expiry calls lock, never
+# logout, and the first use after an expiry is an unlock, not a login.
 #
 # nothing here touches the network, the real vault or the phone: the bw CLI
 # is faked and the profile root is a temp directory.
@@ -151,19 +150,20 @@ try {
 
     Import-Module $secretModule -Force -DisableNameChecking
 
-    # 1. Expire-VaultSession logs out for real: `bw logout` runs, the files
-    # go, and the CLI ends up unauthenticated.
+    # 1. Expire-VaultSession LOCKS for real: `bw lock` runs, the files go,
+    # and the CLI stays signed in - expiry never logs the CLI out.
     Reset-FakeBw -State 'locked'
     Set-Content -LiteralPath $sessionFile -Value 'fakesessionkey0123456789abcdef' -NoNewline
     Set-Content -LiteralPath $ttlFile -Value '720' -NoNewline
     $env:BW_SESSION = 'fakesessionkey0123456789abcdef'
-    $loggedOut = Expire-VaultSession
-    Assert-True $loggedOut 'Expire-VaultSession reports the logout succeeded'
-    Assert-Contains (Get-Calls) 'logout' 'expiry calls bw logout'
+    $locked = Expire-VaultSession
+    Assert-True $locked 'Expire-VaultSession reports the lock succeeded'
+    Assert-Contains (Get-Calls) 'lock' 'expiry calls bw lock'
+    Assert-NotContains (Get-Calls) 'logout' 'expiry NEVER calls bw logout'
     Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'session.key is gone after expiry'
     Assert-True (-not (Test-Path -LiteralPath $ttlFile)) 'session.ttl is gone after expiry'
     Assert-True (-not $env:BW_SESSION) 'BW_SESSION is cleared after expiry'
-    Assert-True (Test-Path -LiteralPath $stateFile) 'the CLI is unauthenticated after expiry'
+    Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI stays signed in after expiry'
 
     # 2. Lock-VaultSession is NOT an expiry: it locks, it purges the files,
     # and it never calls logout - the CLI stays logged in.
@@ -176,7 +176,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'session.key is gone after lock'
     Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI stays logged in after a lock'
 
-    # 3. Get-VaultSession with a lapsed TTL expires the session (logout +
+    # 3. Get-VaultSession with a lapsed TTL expires the session (lock +
     # purge) and returns null - the old key is dead, not just unused.
     Reset-FakeBw -State 'locked'
     Set-Content -LiteralPath $sessionFile -Value 'fakesessionkey0123456789abcdef' -NoNewline
@@ -184,22 +184,23 @@ try {
     (Get-Item -LiteralPath $sessionFile).LastWriteTime = (Get-Date).AddMinutes(-800)
     $expired = Get-VaultSession
     Assert-True ([string]::IsNullOrWhiteSpace($expired)) 'an expired session returns null'
-    Assert-Contains (Get-Calls) 'logout' 'a lapsed TTL triggers bw logout'
+    Assert-Contains (Get-Calls) 'lock' 'a lapsed TTL triggers bw lock'
+    Assert-NotContains (Get-Calls) 'logout' 'a lapsed TTL never logs the CLI out'
     Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'the expired session.key is purged'
 
     # 4. Get-VaultSession with a fresh session returns the key and touches
-    # nothing - no logout, no purge.
+    # nothing - no lock, no logout, no purge.
     Reset-FakeBw -State 'locked'
     Set-Content -LiteralPath $sessionFile -Value 'fakesessionkey0123456789abcdef' -NoNewline
     Set-Content -LiteralPath $ttlFile -Value '720' -NoNewline
     $fresh = Get-VaultSession
     Assert-Equal 'fakesessionkey0123456789abcdef' $fresh 'a fresh session returns its key'
     Assert-NotContains (Get-Calls) 'logout' 'a fresh session never logs out'
+    Assert-NotContains (Get-Calls) 'lock' 'a fresh session never locks either'
 
-    # 5. the first use after an expiry is a full login: the CLI is logged
-    # out, so Ensure-VaultSession logs in (not just unlocks) after the
-    # phone approval hands over the password.
-    Reset-FakeBw -State 'unauthenticated'
+    # 5. the first use after an expiry is an UNLOCK, not a login: the expiry
+    # locked the cli and it stayed signed in.
+    Reset-FakeBw -State 'locked'
     $env:MAINFRAME_BW_EMAIL = 't@example.invalid'
     function global:Get-VaultMasterPassword {
         param([string]$PromptContext, [int]$TimeoutSeconds, [string]$Agent, [string]$Model, [DateTime]$StartTimeUtc)
@@ -211,10 +212,10 @@ try {
         Remove-Item Function:\Get-VaultMasterPassword -ErrorAction SilentlyContinue
     }
     Assert-True $ok 'Ensure-VaultSession succeeds after an expiry'
-    Assert-Contains (Get-Calls) 'login' 'an expired session logs in again, not just unlocks'
-    Assert-Contains (Get-Calls) 'unlock' 'the login is followed by an unlock'
-    Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key is cached after the login'
-    Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI is logged in again after the login'
+    Assert-Contains (Get-Calls) 'unlock' 'the expired session is unlocked again'
+    Assert-NotContains (Get-Calls) 'login' 'a signed-in cli does NOT need a login after an expiry'
+    Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key is cached after the unlock'
+    Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI is still signed in after the unlock'
     # 5b. the unlock registered the scheduled expiry (time-based, not
     # lazy): expiry.json exists and the fake scheduler was called.
     Assert-True (Test-Path -LiteralPath $expiryFile) 'the unlock registers a scheduled expiry (expiry.json exists)'

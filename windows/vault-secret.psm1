@@ -17,7 +17,7 @@
 # Expiry is TIME-based, not use-based: every unlock registers a one-shot
 # scheduled expiry (schtasks on Windows, a systemd transient timer on Linux,
 # a detached sleeper as fallback) that runs the full Expire-VaultSession
-# (bw logout + purge + verify) at the TTL mark with no vault use needed.
+# (bw lock + purge + verify) at the TTL mark with no vault use needed.
 # The lazy check in Get-VaultSession (file age vs TTL) remains the backstop
 # for the restart window - a reboot between unlock and TTL kills the
 # scheduled job, so the session file is still on disk until the next vault
@@ -252,25 +252,29 @@ function Lock-VaultSession {
 function Expire-VaultSession {
     <#
     .SYNOPSIS
-        really end the vault session: log the CLI out and purge the cache.
+        end the vault session: lock the CLI and purge the local session.
 
     .DESCRIPTION
-        lock is not expiry. `bw lock` leaves the CLI logged in, the local
-        vault cache on disk and the old session key able to decrypt it - so
-        a session that only "expired" by policy kept working for days after
-        its TTL (the muse container ran 7 days on one approval). expiry runs
-        `bw logout`: the server revokes the CLI's tokens and the CLI wipes
-        its local data, so the old session key has nothing left to decrypt
-        and the next vault use is a full login through the phone approval.
+        expiry means LOCK, not logout (owner's decision, 2026-11-21). the CLI
+        stays signed in, the vault is locked, and the local session files are
+        purged, so no helper can keep using the old key and the next vault use
+        is a phone approval + `bw unlock` - NOT a re-login. the panel shows a
+        locked vault instead of "signed out", which is what an expiry looks
+        like to the owner.
 
-        the local purge never depends on the server: session.key, session.ttl
-        and the env vars go even when logout fails (no network, no CLI). the
-        logout is verified with `bw status` afterwards - a CLI that is still
-        logged in is reported LOUDLY and locked as a fallback, never silently
-        left half-expired. one limit is inherent and cannot be fixed here: a
-        session key or token copied BEFORE the expiry stays a valid decryption
-        key for a copied vault cache - expiry kills the live session, not a
-        copy made earlier.
+        what this gives up: `bw logout` used to revoke the CLI's tokens
+        server-side and wipe its local data, so a copy of the session key
+        taken BEFORE the expiry had nothing left to decrypt. the CLI's local
+        encrypted cache now stays on disk, so such a copy can still decrypt
+        a copy of that cache. the live session is still dead - the session
+        key, the ttl, the env vars and the in-process caches are purged here.
+
+        the local purge never depends on the CLI: session.key, session.ttl
+        and the env vars go even when the lock fails (no network, no CLI).
+        the lock is verified with `bw status` afterwards - a CLI that is
+        still unlocked is reported LOUDLY and locked again, and a CLI that
+        is unauthenticated (it wiped its own state earlier) is reported
+        LOUDLY too, never silently left half-expired.
     #>
     param([string]$BwPath = 'bw')
     # a manual expire cancels the pending scheduled expiry first - the job
@@ -278,15 +282,15 @@ function Expire-VaultSession {
     # only one that can fire.
     try { Unregister-VaultSessionExpiry | Out-Null } catch {}
     $sessionFile = Get-MainframeSessionKeyPath
-    $loggedOut = $false
+    $locked = $false
     try {
-        $logoutOut = @(& $BwPath logout 2>&1)
-        $loggedOut = ($LASTEXITCODE -eq 0)
-        if (-not $loggedOut) {
-            Write-MainframeWarning "bw logout failed ($($logoutOut -join ' ')) - purging the local session anyway"
+        $lockOut = @(& $BwPath lock 2>&1)
+        $locked = ($LASTEXITCODE -eq 0)
+        if (-not $locked) {
+            Write-MainframeWarning "bw lock failed ($($lockOut -join ' ')) - purging the local session anyway"
         }
     } catch {
-        Write-MainframeWarning "bw logout could not run ($_) - purging the local session anyway"
+        Write-MainframeWarning "bw lock could not run ($_) - purging the local session anyway"
     }
     if (Test-Path -LiteralPath $sessionFile) {
         Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
@@ -302,15 +306,19 @@ function Expire-VaultSession {
     Clear-VaultItemsCache
     try {
         $status = & $BwPath status 2>$null | Out-String | ConvertFrom-Json
-        if ($status -and $status.status -ne 'unauthenticated') {
-            Write-MainframeWarning "the vault session did NOT expire - bw status is still '$($status.status)' after logout; locking the vault instead"
-            & $BwPath lock 2>$null | Out-Null
+        if ($status) {
+            if ($status.status -eq 'unlocked') {
+                Write-MainframeWarning "the vault session did NOT expire - bw status is still 'unlocked' after the lock; locking again"
+                & $BwPath lock 2>$null | Out-Null
+            } elseif ($status.status -eq 'unauthenticated') {
+                Write-MainframeWarning "the CLI is unauthenticated after the expiry (it wiped its own state earlier) - the vault is locked, but the next use needs a full login"
+            }
         }
     } catch {
-        Write-MainframeWarning "could not verify the logout with bw status ($_) - the local session is purged, the server side is unconfirmed"
+        Write-MainframeWarning "could not verify the lock with bw status ($_) - the local session is purged, the cli state is unconfirmed"
     }
-    Write-Host "vault session expired (logged out)." -ForegroundColor Green
-    return $loggedOut
+    Write-Host "vault session expired (locked - the cli stays signed in)." -ForegroundColor Green
+    return $locked
 }
 
 # --- scheduled expiry -------------------------------------------------------
@@ -442,7 +450,7 @@ function Register-VaultSessionExpiry {
         registers a one-shot job (schtasks on windows, a systemd transient
         timer on linux, a detached sleeper as fallback) that runs
         expire-vault-session.ps1 at unlock + TTL, which calls the full
-        Expire-VaultSession (bw logout + purge + verify). the job's state
+        Expire-VaultSession (bw lock + purge + verify). the job's state
         (expiry time, TTL, session key hash, session mtime, mechanism) is
         recorded 0600 in expiry.json next to session.key, so the wrapper
         can refuse to expire a session that was re-unlocked after the job
@@ -653,7 +661,7 @@ function Invoke-VaultSessionExpiryCheck {
                 $mtimeOk = ([DateTimeOffset]::new($fileInfo.LastWriteTimeUtc).ToUnixTimeSeconds() -eq [long]$state.sessionMtimeUnix)
             }
             if ($ttlMinutes -gt 0 -and $ageMinutes -ge $ttlMinutes -and $hashOk -and $mtimeOk) {
-                Write-Host "scheduled expiry: session is $([math]::Round($ageMinutes))m old (>= ${ttlMinutes}m TTL) - expiring it (logout + purge)."
+                Write-Host "scheduled expiry: session is $([math]::Round($ageMinutes))m old (>= ${ttlMinutes}m TTL) - expiring it (lock + purge)."
                 Expire-VaultSession -BwPath $BwPath | Out-Null
                 $outcome = 'expired'
             } else {
@@ -677,7 +685,7 @@ function Get-VaultSession {
         $age = (Get-Date) - $fileInfo.LastWriteTime
 
         if ($ttlMinutes -gt 0 -and $age.TotalMinutes -ge $ttlMinutes) {
-            Write-Host "vault session expired ($([math]::Round($age.TotalMinutes))m >= ${ttlMinutes}m TTL) - expiring it (logout + purge)" -ForegroundColor Yellow
+            Write-Host "vault session expired ($([math]::Round($age.TotalMinutes))m >= ${ttlMinutes}m TTL) - expiring it (lock + purge)" -ForegroundColor Yellow
             Expire-VaultSession | Out-Null
             return $null
         }
@@ -715,7 +723,7 @@ function Get-VaultSession {
         }
         $ageMinutes = ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - $startedUnix) / 60.0
         if ($ttlMinutes -gt 0 -and $ageMinutes -ge $ttlMinutes) {
-            Write-Host "vault session expired (env session age $([math]::Round($ageMinutes))m >= ${ttlMinutes}m TTL) - expiring it (logout + purge)" -ForegroundColor Yellow
+            Write-Host "vault session expired (env session age $([math]::Round($ageMinutes))m >= ${ttlMinutes}m TTL) - expiring it (lock + purge)" -ForegroundColor Yellow
             Expire-VaultSession | Out-Null
             return $null
         }
@@ -761,8 +769,9 @@ function Test-VaultSession {
 function Invoke-VaultLogin {
     <#
     .SYNOPSIS
-        log the bw CLI in with the master password - the first use after a
-        session expiry, when the CLI is logged out and unlock alone cannot work.
+        log the bw CLI in with the master password - only needed when the CLI
+        is unauthenticated (it wiped its own state). an expiry now LOCKS the
+        CLI, so unlock alone is enough after a normal expiry.
 
     .DESCRIPTION
         the one login implementation: the account email comes out of
@@ -828,16 +837,17 @@ function Ensure-VaultSession {
             return $true
         }
         if ($pw) {
-            # an expired session logs the CLI out, so the first use after an
-            # expiry is a full login, not an unlock - unlock alone fails on
-            # a logged-out CLI.
+            # an expiry LOCKS the cli (it stays signed in), so the first use
+            # after an expiry is an unlock, not a login. a full login is only
+            # needed when the cli is unauthenticated - it wiped its own state
+            # earlier (a dead refresh token), which unlock alone cannot fix.
             $statusVal = $null
             try {
                 $statusRaw = & bw status 2>$null | Out-String
                 if ($statusRaw) { $statusVal = ($statusRaw | ConvertFrom-Json).status }
             } catch {}
             if ($statusVal -eq 'unauthenticated') {
-                Write-Host 'bw is logged out after the session expiry - logging in again' -ForegroundColor Yellow
+                Write-Host 'bw is logged out (it wiped its own state) - logging in again' -ForegroundColor Yellow
                 Invoke-VaultLogin -Password $pw | Out-Null
             }
             # the password travels via a 0600 temp file (--passwordfile),

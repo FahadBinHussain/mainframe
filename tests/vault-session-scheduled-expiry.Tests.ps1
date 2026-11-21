@@ -2,7 +2,7 @@
 #
 # scheduled expiry is REAL and TIME-based: an unlock registers a one-shot
 # job (schtasks on windows, a systemd transient timer on linux, a detached
-# sleeper as fallback) that runs the full Expire-VaultSession (bw logout +
+# sleeper as fallback) that runs the full Expire-VaultSession (bw lock +
 # purge + verify) at the TTL mark with NO vault use in between. the lazy
 # check in Get-VaultSession is only the backstop for the restart window.
 #
@@ -12,7 +12,8 @@
 # records expiry.json; (c) re-unlock replaces the pending job (old job
 # cancelled first); (d) the wrapper stands down on a fresh/re-unlocked
 # session and expires a due one; (e) with a 1-minute TTL the session file
-# is gone and `bw status` reports unauthenticated after the mark with zero
+# is gone and `bw status` reports locked (the cli stays signed in) after the
+# mark with zero
 # vault use in between - proven end to end for the sleeper and (where the
 # system bus works) for the real systemd timer; (f) no orphaned task,
 # timer, or sleeper is left behind.
@@ -202,13 +203,14 @@ try {
     $trusted = Get-VaultSession
     Assert-Equal 'fakesessionkey0123456789abcdef' $trusted 'a fresh marked env session is trusted'
     # 2c. no file + BW_SESSION + stale marker (70m old, 60m default TTL)
-    # -> expired for real: logout runs, env cleared, null returned.
+    # -> expired for real: lock runs, env cleared, null returned.
     Reset-FakeBw
     $env:BW_SESSION = 'fakesessionkey0123456789abcdef'
     $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX = [string][DateTimeOffset]::UtcNow.AddMinutes(-70).ToUnixTimeSeconds()
     $stale = Get-VaultSession
     Assert-True ([string]::IsNullOrWhiteSpace($stale)) 'a stale marked env session returns null'
-    Assert-Contains (Get-Calls) 'logout' 'a stale env session triggers bw logout'
+    Assert-Contains (Get-Calls) 'lock' 'a stale env session triggers bw lock'
+    Assert-NotContains (Get-Calls) 'logout' 'a stale env session never logs the CLI out'
     Assert-True (-not $env:BW_SESSION) 'BW_SESSION is cleared after the env expiry'
     Assert-True (-not $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX) 'the start marker is cleared after the env expiry'
     # 2d. fresh file + unmarked BW_SESSION -> the file branch wins and
@@ -346,6 +348,7 @@ try {
     Assert-True (Test-Path -LiteralPath $sessionFile) 'the fresh session file survives a stale job'
     Assert-Equal 'fakesessionkeyFEDCBA9876543210' (Get-Content -LiteralPath $sessionFile -Raw) 'the fresh session key is untouched'
     Assert-NotContains (Get-Calls) 'logout' 'a stale job never logs out'
+    Assert-NotContains (Get-Calls) 'lock' 'a stale job never locks either'
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'the wrapper unregisters itself even when it stands down'
     # 4b. due session (old file, consistent state) -> the wrapper expires.
     Reset-FakeBw; Reset-SchedLog
@@ -356,7 +359,8 @@ try {
     Assert-Equal 0 $run.ExitCode 'the wrapper exits 0 when it expires'
     Assert-Contains $run.Output 'expiring it' 'the wrapper expires a due session'
     Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'the due session file is gone after the wrapper fires'
-    Assert-Contains (Get-Calls) 'logout' 'the wrapper expiry calls bw logout'
+    Assert-Contains (Get-Calls) 'lock' 'the wrapper expiry calls bw lock'
+    Assert-NotContains (Get-Calls) 'logout' 'the wrapper expiry never logs the CLI out'
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'the wrapper unregisters itself after expiring'
     # 4c. no state file at all + old session -> the wrapper falls back to
     # the lazy rule (file age vs TTL) and still expires.
@@ -367,7 +371,7 @@ try {
     Assert-Equal 0 $run.ExitCode 'the wrapper exits 0 on the no-state path'
     Assert-Contains $run.Output 'expiring it' 'the wrapper expires a due session even with no state file'
     Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'the due session file is gone on the no-state path'
-    Assert-Contains (Get-Calls) 'logout' 'the no-state expiry calls bw logout'
+    Assert-Contains (Get-Calls) 'lock' 'the no-state expiry calls bw lock'
     $env:PATH = $basePath
 
     # 5. replace-on-register kills the old SLEEPER (real processes, long
@@ -413,9 +417,9 @@ try {
     $gone = Wait-ForCondition -Test { -not (Test-Path -LiteralPath $sessionFile) } -TimeoutSeconds 110
     Assert-True $gone 'sleeper e2e: the session file is gone after the TTL mark (no vault use in between)'
     Assert-True (-not (Test-Path -LiteralPath $ttlFile)) 'sleeper e2e: session.ttl is gone too'
-    Assert-Contains (Get-Calls) 'logout' 'sleeper e2e: the expiry ran bw logout'
+    Assert-Contains (Get-Calls) 'lock' 'sleeper e2e: the expiry ran bw lock'
     $statusOut = (& $bw status | Out-String | ConvertFrom-Json)
-    Assert-Equal 'unauthenticated' $statusOut.status 'sleeper e2e: bw status reports unauthenticated after the TTL mark'
+    Assert-Equal 'locked' $statusOut.status 'sleeper e2e: bw status reports locked (the cli stays signed in) after the TTL mark'
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'sleeper e2e: expiry.json is cleaned up after firing'
     Assert-True (-not (Test-ProcessAlive $e2ePid)) 'sleeper e2e: no sleeper process is left behind'
 
@@ -442,9 +446,9 @@ try {
             Assert-True (Test-Path -LiteralPath $sessionFile) 'systemd e2e: the session file exists right after registration'
             $gone = Wait-ForCondition -Test { -not (Test-Path -LiteralPath $sessionFile) } -TimeoutSeconds 110
             Assert-True $gone 'systemd e2e: the session file is gone after the TTL mark (no vault use in between)'
-            Assert-Contains (Get-Calls) 'logout' 'systemd e2e: the expiry ran bw logout'
+            Assert-Contains (Get-Calls) 'lock' 'systemd e2e: the expiry ran bw lock'
             $statusOut = (& $bw status | Out-String | ConvertFrom-Json)
-            Assert-Equal 'unauthenticated' $statusOut.status 'systemd e2e: bw status reports unauthenticated after the TTL mark'
+            Assert-Equal 'locked' $statusOut.status 'systemd e2e: bw status reports locked (the cli stays signed in) after the TTL mark'
             Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'systemd e2e: expiry.json is cleaned up after firing'
             $timersLeft = (& systemctl list-timers mainframe-vault-expiry.timer --no-pager 2>$null | Out-String)
             Assert-NotContains $timersLeft 'mainframe-vault-expiry.timer' 'systemd e2e: no timer is left behind after firing'
