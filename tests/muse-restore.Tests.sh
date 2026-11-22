@@ -157,6 +157,11 @@ run_restore() {
 }
 
 # --- case A: fresh restore ----------------------------------------------
+# the destination vm exports TAR_OPTIONS=-k (keep-old-files), which makes
+# tar refuse to replace the standing files; the test env reproduces it so
+# a regression to a bare `tar -xzf` fails here instead of on a live
+# destination (maru 2026-11-22).
+export TAR_OPTIONS=-k
 home1="$root/home1"
 make_home "$home1"
 run_restore "$home1" || { cat "$root/output" >&2; fail "case A: restore exited non-zero"; }

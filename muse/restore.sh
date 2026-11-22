@@ -153,7 +153,11 @@ done
 touch "${HOME}/.pre-migration.complete"
 
 echo "extracting the pack ..."
-tar -xzf "$PACK_PATH" -C "$HOME" --no-same-owner \
+# clear TAR_OPTIONS and pass --overwrite: on the destination vm tar
+# refuses to replace the standing files ("Cannot open: File exists",
+# maru 2026-11-22) — the exact error TAR_OPTIONS=-k produces. the
+# backup step above already saved the originals, so overwriting is safe.
+TAR_OPTIONS= tar -xzf "$PACK_PATH" -C "$HOME" --no-same-owner --overwrite \
   || die "tar extract failed"
 
 # restore this account's OWN name: the packed IDENTITY.md has a blank Name
