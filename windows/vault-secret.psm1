@@ -223,7 +223,7 @@ function Get-VaultBwServer {
     if ($env:MAINFRAME_BW_SERVER) { return $env:MAINFRAME_BW_SERVER.TrimEnd('/') }
     $configured = Get-MainframeConfigValue -Key 'bwServer'
     if ($configured) { return $configured.TrimEnd('/') }
-    return 'https://vaultwardenn.onrender.com'
+    return 'https://vaultwardenn-5is6.onrender.com'
 }
 
 function Lock-VaultSession {

@@ -13,7 +13,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $Repo = 'FahadBinHussain/mainframe'
 $BackupRepo = 'FahadBinHussain/mainframe-production'
-$BwServer = 'https://vaultwardenn.onrender.com'
+$BwServer = 'https://vaultwardenn-5is6.onrender.com'
 $MainframeDir = Join-Path $HOME 'Downloads\mainframe'
 $script:BootTempDir = $null
 
