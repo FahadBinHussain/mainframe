@@ -4,7 +4,7 @@
 # It never touches the network, the vault or the phone. It only builds an RSA
 # key in memory and checks the bytes the approval page would import.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -41,17 +41,17 @@ function Read-DerElement {
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-approval.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
 # 2. the native export call is guarded. RSA.ExportSubjectPublicKeyInfo() is
 #    .NET Core only, so a bare call would break windows powershell 5.1.
-$source = Get-Content -LiteralPath $module -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 $bareCalls = [regex]::Matches($source, '\$Rsa\.ExportSubjectPublicKeyInfo\(\)')
 Assert-Equal 1 $bareCalls.Count 'the native SPKI export is called from exactly one place'
 Assert-True ($source -match "GetMethod\('ExportSubjectPublicKeyInfo'\)") 'the native call is guarded by a runtime check'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
 # 3. the hand rolled encoder and the public helper agree, and where the
 #    runtime has the native exporter the bytes are identical to it

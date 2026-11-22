@@ -25,12 +25,12 @@ with "n/a" in the windows column.
 
 ## vault and phone approval
 
-the core of the 1-tap flow. there is ONE implementation now - `windows/vault-flow.ps1`
+the core of the 1-tap flow. there is ONE implementation now - `windows/mainframe.ps1 vault unlock`
 and the two modules it uses - and both machines run it.
 
 | feature | windows | linux | verdict |
 |---|---|---|---|
-| 1-tap phone approval | `windows/vault-flow.ps1` → `windows/vault-approval.psm1` | `windows/vault-flow.ps1` → `windows/vault-approval.psm1` | ✅ |
+| 1-tap phone approval | `windows/mainframe.ps1 vault unlock` | `windows/mainframe.ps1 vault unlock` | ✅ |
 | 2-digit number matching | ✅ | ✅ (same module) | ✅ |
 | agent / model / host provenance | `Get-CallerIdentity` | same module | ✅ |
 | ADB auto-popup of the page | ✅ | ✅ (same module) | ✅ |
@@ -39,13 +39,13 @@ and the two modules it uses - and both machines run it.
 | 1-hour session cache | `%APPDATA%\mainframe\accounts\bitwarden\session.key` | `$XDG_CONFIG_HOME/mainframe/accounts/bitwarden/session.key` (mode 600) | ✅ |
 | TTL key + precedence | `vaultTtlMinutes` (env > config > 60) | same | ✅ |
 | expired session locks and purges | ✅ | ✅ (same module) | ✅ |
-| lock on demand | `windows/vault-lock.ps1` | `--lock-vault` → `windows/vault-flow.ps1 -Lock` | ✅ |
-| lock only when the session is stale | `windows/vault-lock.ps1` variant | `windows/vault-flow.ps1 -LockIfStale` | ✅ |
+| lock on demand | `windows/mainframe.ps1 vault lock` | `--lock-vault` → `windows/mainframe.ps1 vault unlock -Lock` | ✅ |
+| lock only when the session is stale | `windows/mainframe.ps1 vault unlock -LockIfStale` | `windows/mainframe.ps1 vault unlock -LockIfStale` | ✅ |
 | terminal password fallback | ✅ | ✅ (needs a tty) | ✅ |
 | **live-proven no-tap second run** | 1334 items read, no tap | 0 codes pushed, 0 asks, `failures: []` | ✅ |
-| one implementation of the flow | pwsh modules + `windows/vault-flow.ps1` | the same pwsh modules + the same cli | ✅ **one codebase.** the python copy is gone; linux shells out to `windows/vault-flow.ps1` and reads its json document |
+| one implementation of the flow | the god script `windows/mainframe.ps1` | the same script + the same cli | ✅ **one codebase.** the python copy is gone; linux shells out to `windows/mainframe.ps1 vault unlock` and reads its json document |
 | the powershell runtime | scoop | `linux/pwsh_linux.py` - official tarball, pinned to two published digests, installed in isolation | ✅ |
-| one contract fixture both sides pass | `tests/vault-flow.Tests.ps1` | `tests/test_linux_real_vault_relay.py` drives the same module through pwsh | ✅ |
+| one contract fixture both sides pass | `tests/vault-flow.Tests.ps1` | `tests/test_linux_real_vault_relay.py` drives the same script through pwsh | ✅ |
 
 ## backup (windows is the source)
 
@@ -88,15 +88,15 @@ and the two modules it uses - and both machines run it.
 
 | feature | windows | linux | verdict |
 |---|---|---|---|
-| 17 `*-account.ps1` helpers | ✅ | ✅ **after the profile-root change** - all of them resolve their profile through `windows/mainframe-paths.psm1` now | ✅ (the 12 helpers in `automata-private` still hardcode windows paths - see below) |
+| 17 `*-account.ps1` helpers | ✅ | ✅ **after the profile-root change** - all of them resolve their profile through `windows/mainframe.ps1` now | ✅ (the 12 helpers in `automata-private` still hardcode windows paths - see below) |
 | `accounts/account-contract.ps1` checker | ✅ | ✅ path-agnostic | ✅ |
-| the 12 helpers in `automata-private` | ✅ | ❌ they import `windows/vault-secret.psm1` from an absolute windows path | ❌ close: resolve the mainframe checkout through `Get-MainframeCheckoutRoot` instead of `C:\Users\Admin\Downloads\...` |
+| the 12 helpers in `automata-private` | ✅ | ❌ they dot-source `windows/mainframe.ps1` from an absolute windows path | ❌ close: resolve the mainframe checkout through `Get-MainframeCheckoutRoot` instead of `C:\Users\Admin\Downloads\...` |
 
 ## maintenance
 
 | feature | windows | linux | verdict |
 |---|---|---|---|
-| seal the bw email | `windows/seal-bw-email.ps1` | same file under pwsh | ✅ |
+| seal the bw email | `windows/mainframe.ps1 vault seal-email` | same script under pwsh | ✅ |
 | edge CDP profile sync | `windows/edge-cdp-profile-sync.ps1` | none | ❌ close: sync the profile directory out of the backup on linux |
 | coverage documentation | `docs/linux-restore-coverage.md` | same file | ✅ |
 | this parity table | `docs/windows-linux-parity.md` | same file | ✅ |

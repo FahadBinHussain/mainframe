@@ -1,7 +1,7 @@
 """The relay contract, driven against the ONE implementation.
 
 the topic, the relay, the page base, the poll, the rate-limit backoff and the
-expired marker all live in vault-approval.psm1. these tests drive THAT module
+expired marker all live in mainframe.ps1. these tests drive THAT script
 through pwsh - so windows and linux are checked against the same code, not
 against two copies that can drift.
 

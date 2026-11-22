@@ -14,8 +14,8 @@ if (-not (Test-Path -LiteralPath $edgeUserData -PathType Container)) {
 
 # mainframe agent-browser profile dir (email-keyed dir IS the chromium --user-data-dir for spawn mode)
 # the profile root is resolved by one shared module, so windows and linux
-# read the same place (see mainframe-paths.psm1).
-Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+# read the same place (see mainframe.ps1).
+. (Join-Path $PSScriptRoot 'mainframe.ps1')
 
 $accountRoot = Join-Path (Get-MainframeAccountsDir) 'agent-browser'
 $profilePath = Join-Path $accountRoot $Email.ToLowerInvariant()

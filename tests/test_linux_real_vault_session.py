@@ -1,6 +1,6 @@
 """The linux side of the ONE vault flow.
 
-The vault has exactly one implementation: vault-flow.ps1 (powershell). linux
+The vault has exactly one implementation: mainframe.ps1 vault unlock (powershell). linux
 shells out to it. these tests pin the CONTRACT between the two - the argv,
 the result document and the failure modes - so the two platforms cannot
 drift apart.
@@ -40,19 +40,19 @@ class PythonVaultDuplicateIsGoneTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(hasattr(lr, name),
                                  f"{name} is a second implementation of the vault flow - "
-                                 "it belongs in vault-flow.ps1")
+                                 "it belongs in mainframe.ps1")
 
     def test_the_powershell_cli_is_the_only_entry_point(self):
-        self.assertTrue((REPO / "windows" / "vault-flow.ps1").is_file())
+        self.assertTrue((REPO / "windows" / "mainframe.ps1").is_file())
         source = (REPO / "linux" / "linux_real.py").read_text(encoding="utf-8")
-        self.assertIn("vault-flow.ps1", source)
+        self.assertIn("mainframe.ps1", source)
         self.assertNotIn("secretsPassword =", source)
 
     def test_the_flow_never_logs_the_approval_topic(self):
         # the topic is the whole privacy of the approval channel: whoever holds
         # it can read requests and push fake cards. the flow's log line goes to
         # a screen someone may paste, so it names the relay and the page only.
-        source = (REPO / "windows" / "vault-flow.ps1").read_text(encoding="utf-8")
+        source = (REPO / "windows" / "mainframe.ps1").read_text(encoding="utf-8")
         self.assertNotIn("topic '$approvalTopic'", source)
         self.assertIn("relay '$approvalServer'", source)
 
@@ -62,7 +62,8 @@ class VaultFlowCommandTests(unittest.TestCase):
         cmd = lr.vault_flow_command(REPO, "/opt/pwsh", "/opt/bw")
         self.assertEqual(cmd[0], "/opt/pwsh")
         self.assertEqual(cmd[1:5], ["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
-        self.assertEqual(cmd[5], str(REPO / "windows" / "vault-flow.ps1"))
+        self.assertEqual(cmd[5], str(REPO / "windows" / "mainframe.ps1"))
+        self.assertEqual(cmd[6:8], ["vault", "unlock"])
         self.assertIn("-Json", cmd)
         self.assertIn("-Checkout", cmd)
         self.assertIn("-BwPath", cmd)

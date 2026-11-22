@@ -1,6 +1,6 @@
 """sync_checkout(): the linux engine heals its own checkout.
 
-The python twin of Sync-MainframeCheckout (windows/mainframe-sync.psm1):
+The python twin of Sync-MainframeCheckout (windows/mainframe.ps1):
 same algorithm, same contract. Real git in temp dirs, no network - the
 "origin" is a local bare repo, so every scenario runs offline on any
 machine with git on PATH. Skipped loudly when git is missing.

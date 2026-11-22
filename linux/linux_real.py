@@ -130,7 +130,7 @@ def sync_checkout(checkout: Path, *, timeout: float = 60.0) -> bool:
     its upstream tip, without ever asking a human to pull, reset, or relay
     a command to another machine.
 
-    The python twin of Sync-MainframeCheckout in windows/mainframe-sync.psm1
+    The python twin of Sync-MainframeCheckout in windows/mainframe.ps1
     - both implementations run the same algorithm, and both are called at
     their entry point BEFORE the repo modules load, so a machine that is
     behind, or sitting on rewritten history, heals itself on its next run
@@ -321,11 +321,11 @@ def ensure_bin_link(bin_dir: Path, target: Path, name: str) -> None:
 
 # ---------------------------------------------------------------- vault
 #
-# There is ONE vault flow now: vault-flow.ps1 (powershell). windows runs it
-# through the module, linux runs it through that cli. the approval, the
-# unseal, the session cache, the TTL and the item parsing all live in the
-# powershell implementation - there is no second python copy, so the two
-# platforms cannot drift apart.
+# There is ONE vault flow now: mainframe.ps1 vault unlock (powershell).
+# windows runs it through the script, linux runs it through that cli. the
+# approval, the unseal, the session cache, the TTL and the item parsing all
+# live in the powershell implementation - there is no second python copy,
+# so the two platforms cannot drift apart.
 #
 # what linux still owns: making sure a pwsh and a bw CLI exist, and handing
 # the flow its arguments.
@@ -406,10 +406,11 @@ def vault_flow_command(checkout: Path, pwsh: str, bw: str, *,
                        lock: bool = False,
                        lock_if_stale: bool = False) -> list[str]:
     """The argv that runs the ONE vault flow."""
-    flow = Path(checkout) / "windows" / "vault-flow.ps1"
+    flow = Path(checkout) / "windows" / "mainframe.ps1"
     if not flow.is_file():
         raise RuntimeError(f"the vault flow cli is missing: {flow}")
     cmd = [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(flow),
+           "vault", "unlock",
            "-Json", "-Checkout", str(checkout), "-BwPath", bw]
     if ntfy_topic:
         cmd += ["-NtfyTopic", ntfy_topic]
@@ -444,7 +445,7 @@ def vault_session(work_root: Path, checkout: Path,
     cmd = vault_flow_command(checkout, pwsh, bw, ntfy_topic=ntfy_topic,
                               ntfy_server=ntfy_server, pages_base=pages_base,
                               output_path=result_file)
-    log("running the vault flow (vault-flow.ps1) ...")
+    log("running the vault flow (mainframe.ps1 vault unlock) ...")
     run(cmd, timeout=VAULT_FLOW_TIMEOUT_SECONDS)
     if not result_file.is_file():
         raise RuntimeError("the vault flow produced no result document")
@@ -1290,7 +1291,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="skip vault login + release download")
     ap.add_argument("--lock-vault", action="store_true",
                     help="lock the vault and purge the cached session key, then exit "
-                         "(the linux twin of vault-lock.ps1). the next run asks the "
+                         "(the linux twin of mainframe.ps1 vault lock). the next run asks the "
                          "phone again")
     ap.add_argument("--backup-root", type=Path,
                     help="directory containing mainframe-quick.zip "
@@ -1351,7 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[str] = []
     report: dict = {"work_root": str(work_root)}
 
-    # --lock-vault: the linux twin of vault-lock.ps1. locks the cli and purges
+    # --lock-vault: the linux twin of mainframe.ps1 vault lock. locks the cli and purges
     # the cached session key, so the next run asks the phone again. the rule
     # lives in the ONE vault flow, so linux calls it instead of repeating it.
     if args.lock_vault:

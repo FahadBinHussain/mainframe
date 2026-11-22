@@ -102,26 +102,26 @@ when the value was generated offline (the preferred route), apply it
 with `-Topic` — this writes the vault item first, then the local
 config:
 
-    pwsh windows/rotate-ntfy-topic.ps1 -Topic <new-topic>
+    pwsh windows/mainframe.ps1 vault rotate-topic -Topic <new-topic>
 
 generating via the script instead: generates the new topic and shows it
 (your terminal only; the value will land in logs/transcripts if the
 output is captured). note this applies the new topic to that machine
 immediately:
 
-    pwsh windows/rotate-ntfy-topic.ps1 -ShowTopic
+    pwsh windows/mainframe.ps1 vault rotate-topic -ShowTopic
 
 on machines where pwsh is not on PATH (the muse VMs), use the full
 path:
 
-    ~/.local/share/mainframe/tools/pwsh/pwsh windows/rotate-ntfy-topic.ps1 -ShowTopic
-    ~/.local/share/mainframe/tools/pwsh/pwsh windows/rotate-ntfy-topic.ps1 -Topic <new-topic>
+    ~/.local/share/mainframe/tools/pwsh/pwsh windows/mainframe.ps1 vault rotate-topic -ShowTopic
+    ~/.local/share/mainframe/tools/pwsh/pwsh windows/mainframe.ps1 vault rotate-topic -Topic <new-topic>
 
 lost the value after a plain run? do NOT re-run plain — that rotates
 again and generates a different topic. show the value already in the
 config instead (changes nothing):
 
-    pwsh windows/rotate-ntfy-topic.ps1 -ShowCurrent
+    pwsh windows/mainframe.ps1 vault rotate-topic -ShowCurrent
 
 fallback — a machine that must switch NOW instead of waiting for its
 next vault flow, or whose convergence did not happen: apply the SAME
@@ -156,9 +156,9 @@ converges at its next live flow.
   `bootstrapToken` first, else the token in the vault bootstrap-link
   item), so the link serves the new topic. a failed push fails the run
   LOUDLY at the end (exit 1) with the exact recovery
-  (`windows/new-bootstrap-link.ps1 -PushOnly`) — the rotation itself
+  (`windows/mainframe.ps1 vault bootstrap-link -PushOnly`) — the rotation itself
   is never rolled back. if no link was ever created, the failure says
-  so and the recovery is creating one (`windows/new-bootstrap-link.ps1`
+  so and the recovery is creating one (`windows/mainframe.ps1 vault bootstrap-link`
   plain, once).
 - writes atomically (temp file + move), keeps mode 0600 on non-windows.
 - refuses loudly and writes nothing if the profile config is missing or

@@ -19,7 +19,7 @@ Select and run the Linux boot.sh bootstrap. --dry-run only reports the route.
 Use -- --restore ... or -- --packages ... from a reviewed checkout.
 Use -- --setup-tools for prerequisite setup only (not a restore).
 --bootstrap-link <url> downloads the config bundle from the relay
-(permanent link from new-bootstrap-link.ps1) and places it as
+(permanent link from mainframe.ps1 vault bootstrap-link) and places it as
 mainframe.config.json (0600) before the bootstrap runs. --config-only
 places the config and stops (no bootstrap dispatched).
 EOF
@@ -60,13 +60,13 @@ mainframe_bootstrap_config() {
     # truncated download (or an error page) before it becomes the config.
     if ! grep -q '"ntfyTopic"[[:space:]]*:[[:space:]]*"[a-z0-9]\{32\}"' "$temp_file"; then
         rm -f -- "$temp_file"
-        printf 'mainframe: the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run.\n' >&2
+        printf 'mainframe: the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/mainframe.ps1 vault bootstrap-link -PushOnly) and re-run.\n' >&2
         return 1
     fi
     if command -v python3 >/dev/null 2>&1; then
         if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$temp_file" 2>/dev/null; then
             rm -f -- "$temp_file"
-            printf 'mainframe: the downloaded bundle is not valid JSON. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run.\n' >&2
+            printf 'mainframe: the downloaded bundle is not valid JSON. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/mainframe.ps1 vault bootstrap-link -PushOnly) and re-run.\n' >&2
             return 1
         fi
     fi

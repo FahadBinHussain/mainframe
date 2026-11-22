@@ -1,10 +1,9 @@
 $ErrorActionPreference = 'Stop'
 
-Import-Module (Join-Path $PSScriptRoot '..\windows\vault-secret.psm1') -Force
+. (Join-Path $PSScriptRoot '..\windows\mainframe.ps1')
 
 # the profile root is resolved by one shared module, so windows and linux
-# read the same place (see mainframe-paths.psm1).
-Import-Module (Join-Path $PSScriptRoot '..\windows\mainframe-paths.psm1') -Force -DisableNameChecking
+# read the same place (see mainframe.ps1).
 
 $accountRoot = Join-Path (Get-MainframeAccountsDir) 'vercel'
 $currentFile = Join-Path $accountRoot 'current.json'

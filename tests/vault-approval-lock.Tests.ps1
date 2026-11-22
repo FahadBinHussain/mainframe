@@ -11,11 +11,11 @@
 #      lapses, so a queue can never wedge
 #
 # Nothing here touches the network, the real vault or the phone: the push, the
-# relay and the adb popup are replaced inside the module, and the profile root
+# relay and the adb popup are replaced inside the dot-sourced script, and the profile root
 # is a temp directory.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$module = Join-Path $repo 'windows\vault-approval.psm1'
+$godScript = Join-Path $repo 'windows\mainframe.ps1'
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -38,19 +38,19 @@ $sessionFile = Join-Path (Join-Path (Join-Path $profile 'accounts') 'bitwarden')
 $driver = Join-Path $root 'driver.ps1'
 @'
 param(
-    [string]$ModulePath,
+    [string]$GodScript,
     [string]$ProfileRoot,
     [int]$TimeoutSeconds,
     [string]$Tag
 )
 $ErrorActionPreference = 'Stop'
 $env:MAINFRAME_PROFILE_ROOT = $ProfileRoot
-Import-Module $ModulePath -Force -DisableNameChecking
+. $GodScript
 
-# replace the three side effects inside the module's own scope, so
+# replace the three side effects in this scope (the god script was
+# dot-sourced, so a redefinition here wins over the real one), so
 # Get-VaultMasterPassword uses them exactly as the real ones would be used.
-& (Get-Module vault-approval) {
-    function script:Send-VaultApprovalNotification {
+    function Send-VaultApprovalNotification {
         param([string]$Topic, [string]$Url, [string]$HostName, [string]$Code, [string]$PromptContext, [string]$Agent, [string]$Model, [string]$Server)
         $line = 'push|{0}|{1}|{2}' -f $env:MF_TAG, $Code, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
         for ($i = 0; $i -lt 50; $i++) {
@@ -58,15 +58,14 @@ Import-Module $ModulePath -Force -DisableNameChecking
         }
         return $true
     }
-    function script:Send-VaultRequestExpired {
+    function Send-VaultRequestExpired {
         param([string]$Sid, [string]$HostName, [string]$Code, [string]$Server)
         return $true
     }
-    function script:Open-VaultApprovalOnPhone {
+    function Open-VaultApprovalOnPhone {
         param([string]$Url)
         return $false
     }
-}
 
 $pw = Get-VaultMasterPassword -NtfyTopic 'lock-test-topic' -Server 'http://127.0.0.1:1' `
     -TimeoutSeconds $TimeoutSeconds -PromptContext "lock test" -Agent 'lock-test' -Model 'none'
@@ -96,9 +95,9 @@ try {
     #        next one only after the first went stale -----------------------
     $out1 = Join-Path $root 'first.out'
     $out2 = Join-Path $root 'second.out'
-    $first = Start-Process -FilePath $hostExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$driver`" -ModulePath `"$module`" -ProfileRoot `"$profile`" -TimeoutSeconds 6 -Tag first" -RedirectStandardOutput $out1 -RedirectStandardError (Join-Path $root 'first.err') -WindowStyle Hidden -PassThru
+    $first = Start-Process -FilePath $hostExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$driver`" -GodScript `"$godScript`" -ProfileRoot `"$profile`" -TimeoutSeconds 6 -Tag first" -RedirectStandardOutput $out1 -RedirectStandardError (Join-Path $root 'first.err') -WindowStyle Hidden -PassThru
     $env:MF_TAG = 'second'
-    $second = Start-Process -FilePath $hostExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$driver`" -ModulePath `"$module`" -ProfileRoot `"$profile`" -TimeoutSeconds 6 -Tag second" -RedirectStandardOutput $out2 -RedirectStandardError (Join-Path $root 'second.err') -WindowStyle Hidden -PassThru
+    $second = Start-Process -FilePath $hostExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$driver`" -GodScript `"$godScript`" -ProfileRoot `"$profile`" -TimeoutSeconds 6 -Tag second" -RedirectStandardOutput $out2 -RedirectStandardError (Join-Path $root 'second.err') -WindowStyle Hidden -PassThru
     $children = @($first, $second)
 
     $pushDeadline = (Get-Date).AddSeconds(5)
@@ -124,7 +123,7 @@ try {
     $children = @()
 
     # --- 2. a waiter never pushes when a session key appears -----------------
-    Import-Module $module -Force -DisableNameChecking
+    . $godScript
     Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
 
@@ -133,7 +132,7 @@ try {
     Assert-True $turn.Acquired 'the holder took the turn'
 
     $env:MF_TAG = 'waiter'
-    $waiter = Start-Process -FilePath $hostExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$driver`" -ModulePath `"$module`" -ProfileRoot `"$profile`" -TimeoutSeconds 20 -Tag waiter" -RedirectStandardOutput (Join-Path $root 'waiter.out') -RedirectStandardError (Join-Path $root 'waiter.err') -WindowStyle Hidden -PassThru
+    $waiter = Start-Process -FilePath $hostExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$driver`" -GodScript `"$godScript`" -ProfileRoot `"$profile`" -TimeoutSeconds 20 -Tag waiter" -RedirectStandardOutput (Join-Path $root 'waiter.out') -RedirectStandardError (Join-Path $root 'waiter.err') -WindowStyle Hidden -PassThru
     $children = @($waiter)
 
     Start-Sleep -Seconds 2

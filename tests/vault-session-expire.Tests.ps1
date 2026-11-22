@@ -10,7 +10,7 @@
 # is faked and the profile root is a temp directory.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$secretModule = Join-Path $repo 'windows\vault-secret.psm1'
+$godScript = Join-Path $repo 'windows\mainframe.ps1'
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -62,9 +62,9 @@ if ($env:OS -eq 'Windows_NT') {
         '  exit /b 1'
         ')'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
-    # fake schedulers: log the full command line, exit 0 - so the unlock
-    # in section 5 registers a scheduled expiry against the fakes, never
-    # a real schtasks task / systemd timer.
+    # fake schedulers: log the full command line, exit 0 - so the
+    # opt-in unlock in section 5c registers a scheduled expiry against
+    # the fakes, never a real schtasks task / systemd timer.
     @('@echo off', "echo schtasks %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'schtasks.cmd') -Encoding ASCII
     @('@echo off', "echo systemd-run %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemd-run.cmd') -Encoding ASCII
     @('@echo off', "echo systemctl %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemctl.cmd') -Encoding ASCII
@@ -148,7 +148,7 @@ try {
     $env:VAULT_TEST_ROOT = $root
     Remove-Item -Path 'Env:\MAINFRAME_BW_EMAIL' -ErrorAction SilentlyContinue
 
-    Import-Module $secretModule -Force -DisableNameChecking
+. $godScript
 
     # 1. Expire-VaultSession LOCKS for real: `bw lock` runs, the files go,
     # and the CLI stays signed in - expiry never logs the CLI out.
@@ -201,6 +201,10 @@ try {
     # 5. the first use after an expiry is an UNLOCK, not a login: the expiry
     # locked the cli and it stayed signed in.
     Reset-FakeBw -State 'locked'
+    # sections 1-4 already wrote to the sched log (every expiry/lock
+    # unregisters the pending job) - reset it so 5b measures only this
+    # unlock's own scheduler activity.
+    Reset-SchedLog
     $env:MAINFRAME_BW_EMAIL = 't@example.invalid'
     function global:Get-VaultMasterPassword {
         param([string]$PromptContext, [int]$TimeoutSeconds, [string]$Agent, [string]$Model, [DateTime]$StartTimeUtc)
@@ -216,13 +220,31 @@ try {
     Assert-NotContains (Get-Calls) 'login' 'a signed-in cli does NOT need a login after an expiry'
     Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key is cached after the unlock'
     Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI is still signed in after the unlock'
-    # 5b. the unlock registered the scheduled expiry (time-based, not
-    # lazy): expiry.json exists and the fake scheduler was called.
-    Assert-True (Test-Path -LiteralPath $expiryFile) 'the unlock registers a scheduled expiry (expiry.json exists)'
+    # 5b. expiry registration is OPT-IN (user order 2026-11-22 - the
+    # MainframeVaultExpiry task was deleted): a plain unlock registers
+    # nothing - no expiry.json, no scheduler call.
+    Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'a plain unlock registers no scheduled expiry (no expiry.json)'
+    Assert-True ([string]::IsNullOrWhiteSpace((Get-SchedCalls))) 'a plain unlock calls no scheduler'
+    # 5c. -ScheduleExpiry opts back in: the unlock registers the
+    # scheduled expiry (time-based, not lazy): expiry.json exists and
+    # the fake scheduler was called.
+    Reset-FakeBw -State 'locked'
+    Reset-SchedLog
+    function global:Get-VaultMasterPassword {
+        param([string]$PromptContext, [int]$TimeoutSeconds, [string]$Agent, [string]$Model, [DateTime]$StartTimeUtc)
+        return 'TestPassword123!'
+    }
+    try {
+        $ok = Ensure-VaultSession -TimeoutSeconds 5 -ScheduleExpiry
+    } finally {
+        Remove-Item Function:\Get-VaultMasterPassword -ErrorAction SilentlyContinue
+    }
+    Assert-True $ok 'Ensure-VaultSession -ScheduleExpiry succeeds'
+    Assert-True (Test-Path -LiteralPath $expiryFile) 'the opt-in unlock registers a scheduled expiry (expiry.json exists)'
     if ($env:OS -eq 'Windows_NT') {
-        Assert-Contains (Get-SchedCalls) '/Create' 'the unlock registration creates a schtasks task (fake schtasks)'
+        Assert-Contains (Get-SchedCalls) '/Create' 'the opt-in unlock registration creates a schtasks task (fake schtasks)'
     } else {
-        Assert-Contains (Get-SchedCalls) 'systemd-run --on-active=3600s' 'the unlock registration schedules 60 minutes out (fake systemd-run)'
+        Assert-Contains (Get-SchedCalls) 'systemd-run --on-active=3600s' 'the opt-in unlock registration schedules 60 minutes out (fake systemd-run)'
     }
     $null = Unregister-VaultSessionExpiry
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'unregister removes expiry.json after the unlock'

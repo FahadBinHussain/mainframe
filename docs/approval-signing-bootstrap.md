@@ -6,7 +6,7 @@ re-adds it without knowing why it went away.
 ## what it was
 
 every machine minted its own RSA-2048 approval signing key on first
-use (`Get-VaultApprovalSigningKey` in `windows/vault-approval.psm1`). the runner
+use (`Get-VaultApprovalSigningKey` in `windows/mainframe.ps1`). the runner
 signed each approval link's descriptor
 (`New-VaultApprovalDescriptorSignature`), and two lists decided which
 machines the phone and the relay trusted:
@@ -64,7 +64,7 @@ after it is gone.
 
 ## what was removed, for the record
 
-- `windows/vault-approval.psm1`: `Get-VaultApprovalDescriptor`,
+- `windows/mainframe.ps1`: `Get-VaultApprovalDescriptor`,
   `New-VaultApprovalDescriptorSignature`, the descriptor/signature
   params and `X-MF-Desc`/`X-MF-Sig` headers on the publish/poll
   functions, the mint-and-stop throw, the `signed2` page version

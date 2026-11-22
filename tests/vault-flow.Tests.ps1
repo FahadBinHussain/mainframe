@@ -1,14 +1,15 @@
 # No Pester dependency. Runs under windows powershell 5.1 AND pwsh 7.
 #
-# vault-flow.ps1 is the ONE vault implementation. this checks its contract:
-# a fresh cached session means NO phone approval and NO master password, and
-# the JSON it prints is machine-readable and never carries the password.
+# mainframe.ps1 vault unlock is the ONE vault implementation. this checks
+# its contract: a fresh cached session means NO phone approval and NO
+# master password, and the JSON it prints is machine-readable and never
+# carries the password.
 #
 # nothing here touches the network, the real vault or the phone: the bw CLI
 # is faked and the profile root is a temp directory.
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$flow = Join-Path $repo 'windows\vault-flow.ps1'
+$flow = Join-Path $repo 'windows\mainframe.ps1'
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -23,7 +24,7 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 # 1. the cli parses
 $parseErrors = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($flow, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-flow.ps1 parses'
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
 # 2. the fake bw cli. status answers from $MF_BW_STATUS (locked|unlocked);
 # `list` with --search serves the signing-key items file (or [] when there
@@ -87,7 +88,7 @@ try {
     # powershell 5.1. its log lines go straight to stderr (not the error
     # stream), so stdout stays a clean JSON document.
     try {
-        $output = & $flow -Json
+        $output = & $flow vault unlock -Json
     } catch {
         throw "FAIL: the flow did not complete: $_"
     }
@@ -118,7 +119,7 @@ try {
             $env:MF_BW_STATUS = 'unlocked'
             $env:MF_BW_SIGNING_ITEMS = $signingItemsFile
             try {
-                $output2 = & $flow -Json
+                $output2 = & $flow vault unlock -Json
             } catch {
                 throw "FAIL: the flow did not complete on the live session: $_"
             }
@@ -143,4 +144,4 @@ try {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "vault-flow checks: $script:checks passed"
+Write-Host "vault unlock checks: $script:checks passed"

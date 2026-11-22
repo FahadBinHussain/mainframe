@@ -16,7 +16,7 @@
 # local config exactly as it is (existing behavior). The full topic value
 # never appears in output - only the 4-char fingerprint (H1).
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -34,28 +34,27 @@ $script:vaultItemName = 'github.com/FahadBinHussain/mainframe / mainframe.ntfy-t
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-approval.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-$source = Get-Content -LiteralPath $module -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 
 # 2. the convergence machinery exists, and the vault item name matches the
 #    signing-key item's shape (same repo prefix, value in notes).
 Assert-True ($source -match 'function Sync-VaultNtfyTopicFromVault') 'Sync-VaultNtfyTopicFromVault exists'
 Assert-True ($source -match 'function Get-VaultNtfyTopicFromVault') 'Get-VaultNtfyTopicFromVault exists'
 Assert-True ($source -match [regex]::Escape($script:vaultItemName)) 'the vault item name is the symmetric secure-note name'
-Assert-True ($source -match 'Sync-VaultNtfyTopicFromVault,') 'the sync function is exported'
+Assert-True ($source -match '(?m)^function Sync-VaultNtfyTopicFromVault') 'the sync function is top-level (dot-sourcing exposes it)'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
-# 3. mock Invoke-BwApprovalCommand inside the module's own scope. env vars
-#    carry the scenario in because the mock runs in the module's session
-#    state, not this script's. MF_BW_SCENARIO: live | locked | noitem |
-#    malformed. MF_BW_VAULT_TOPIC is the notes value for the live case.
+# 3. mock Invoke-BwApprovalCommand in this script's scope - the god
+#    script is dot-sourced here, so its functions resolve the mock.
+#    MF_BW_SCENARIO: live | locked | noitem | malformed. MF_BW_VAULT_TOPIC
+#    is the notes value for the live case.
 $env:MF_BW_SCENARIO = 'live'
 $env:MF_BW_VAULT_TOPIC = $script:vaultTopic
-& (Get-Module vault-approval) {
-    function script:Invoke-BwApprovalCommand {
+function Invoke-BwApprovalCommand {
         param([string[]]$Arguments, [int]$TimeoutSeconds = 10)
         if ($Arguments -contains 'status') {
             if ($env:MF_BW_SCENARIO -eq 'locked') { return '{"status":"locked"}' }
@@ -73,7 +72,6 @@ $env:MF_BW_VAULT_TOPIC = $script:vaultTopic
         }
         return $null
     }
-}
 
 function New-TestConfig {
     param([string]$Dir, [string]$Topic)

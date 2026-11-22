@@ -24,8 +24,7 @@
 # timer on this VM (transient, self-cleaning, temp profile, fake bw).
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$secretModule = Join-Path $repo 'windows\vault-secret.psm1'
-$wrapperScript = Join-Path $repo 'windows\expire-vault-session.ps1'
+$godScript = Join-Path $repo 'windows\mainframe.ps1'
 $pwshExe = (Get-Process -Id $PID).Path
 
 $script:checks = 0
@@ -170,7 +169,7 @@ function Wait-ForCondition {
     return $false
 }
 function Invoke-Wrapper {
-    $out = @(& $pwshExe -NoProfile -NonInteractive -File $wrapperScript -ProfileRoot $profile -BwPath $bw 2>&1)
+    $out = @(& $pwshExe -NoProfile -NonInteractive -File $godScript vault expire -ProfileRoot $profile -BwPath $bw 2>&1)
     return @{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
 }
 
@@ -182,12 +181,12 @@ try {
     $env:PATH = $basePath
     $env:MAINFRAME_PROFILE_ROOT = $profile
 
-    Import-Module $secretModule -Force -DisableNameChecking
+    . $godScript
 
     # 1. -AllowExpired is gone: no callers, no parameter, no source trace.
     Assert-True ((Get-Command Get-VaultSession).Parameters.Keys -notcontains 'AllowExpired') 'Get-VaultSession has no -AllowExpired parameter'
-    $secretSource = Get-Content -LiteralPath (Join-Path $repo 'windows\vault-secret.psm1') -Raw
-    Assert-NotContains $secretSource 'AllowExpired' 'vault-secret.psm1 has no AllowExpired trace left'
+    $secretSource = Get-Content -LiteralPath $godScript -Raw
+    Assert-NotContains $secretSource 'AllowExpired' 'mainframe.ps1 has no AllowExpired trace left'
 
     # 2. env-only sessions are age-gated by the start marker.
     # 2a. no file + BW_SESSION + no marker -> refused, env cleared.
@@ -238,7 +237,8 @@ try {
     Assert-Contains $schedLog 'MainframeVaultExpiry' 'schtasks uses the fixed task name'
     Assert-Contains $schedLog '/SC ONCE' 'schtasks creates a one-shot task'
     Assert-Contains $schedLog '/F' 'schtasks creation forces overwrite'
-    Assert-Contains $schedLog $wrapperScript 'schtasks /TR invokes the expiry wrapper'
+    Assert-Contains $schedLog $godScript 'schtasks /TR invokes the god script'
+    Assert-Contains $schedLog 'vault expire' 'schtasks /TR runs the vault expire action'
     Assert-Contains $schedLog $pwshExe 'schtasks /TR uses the full pwsh path, never bare pwsh'
     $state = Get-ExpiryState
     Assert-True ($null -ne $state) 'registration writes expiry.json'
@@ -260,7 +260,8 @@ try {
     Assert-Contains $schedLog '--on-active=7200s' 'systemd-run gets the TTL in seconds'
     Assert-Contains $schedLog '--unit=mainframe-vault-expiry' 'systemd-run uses the fixed unit name'
     Assert-Contains $schedLog '--setenv=HOME=' 'systemd-run passes HOME (services run with an empty HOME)'
-    Assert-Contains $schedLog $wrapperScript 'systemd-run invokes the expiry wrapper'
+    Assert-Contains $schedLog $godScript 'systemd-run invokes the god script'
+    Assert-Contains $schedLog 'vault expire' 'systemd-run runs the vault expire action'
     $state = Get-ExpiryState
     Assert-Equal 'systemd' $state.mechanism 'expiry.json records the systemd mechanism'
     # 3c. replace-on-register: the old entry is cancelled BEFORE the new

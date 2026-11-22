@@ -34,7 +34,7 @@ function Assert-NotContains($Haystack, [string]$Needle, [string]$Message) {
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$target = Join-Path $repoRoot 'windows/new-bootstrap-link.ps1'
+$target = Join-Path $repoRoot 'windows/mainframe.ps1'
 $harness = Join-Path $PSScriptRoot 'mock-rest-harness.ps1'
 $mockBwSource = Join-Path $PSScriptRoot 'mock-bw.py'
 $linkItemName = 'github.com/FahadBinHussain/mainframe / mainframe.bootstrap-link'
@@ -48,7 +48,7 @@ $script:relayBase = 'https://relay.example.invalid'
 # FALSE clean - $tokens/$errs are initialized first).
 $tokens = $null; $errs = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($target, [ref]$tokens, [ref]$errs)
-Assert-True ($errs.Count -eq 0) 'new-bootstrap-link.ps1 parses'
+Assert-True ($errs.Count -eq 0) 'mainframe.ps1 parses'
 $tokens = $null; $errs = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($harness, [ref]$tokens, [ref]$errs)
 Assert-True ($errs.Count -eq 0) 'mock-rest-harness.ps1 parses'
@@ -113,7 +113,7 @@ function Get-RestCalls {
 function Invoke-Target {
     param([hashtable]$TargetArgs = @{})
     $env:MF_HARNESS_ARGS = (ConvertTo-Json -InputObject $TargetArgs -Compress)
-    $outLines = & $pwshExe -NoProfile -File $harness -Target $target 2>&1 6>&1
+    $outLines = & $pwshExe -NoProfile -File $harness -Target $target -Action Invoke-NewBootstrapLink 2>&1 6>&1
     $code = $LASTEXITCODE
     return [pscustomobject]@{ Code = $code; Output = ($outLines | Out-String) }
 }

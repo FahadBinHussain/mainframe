@@ -5,7 +5,7 @@ local relay; these pin the thing the phone actually talks to: a genuine
 RSA-2048 OAEP-SHA256 ciphertext posted to a real relay topic, decrypted by
 the same module the runner uses.
 
-the module under test is vault-approval.psm1 - the ONE implementation.
+the script under test is mainframe.ps1 - the ONE implementation.
 
 needs network access. skipped unless MAINFRAME_LIVE_RELAY=1.
 
@@ -63,7 +63,7 @@ class LiveRelayTests(unittest.TestCase):
         path = self.modules / "live-driver.ps1"
         path.write_text(
             "$ErrorActionPreference = 'Stop'\n"
-            f"Import-Module '{self.modules / 'vault-approval.psm1'}' -Force -DisableNameChecking\n"
+            f". '{self.modules / 'windows/mainframe.ps1'}\n"
             f"{body}\n", encoding="utf-8")
         return path
 

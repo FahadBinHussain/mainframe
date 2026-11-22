@@ -1,10 +1,10 @@
 """The linux side of ntfy server convergence.
 
 There is no python copy of the vault flow (see
-test_linux_real_vault_session.py): linux shells out to vault-flow.ps1,
+test_linux_real_vault_session.py): linux shells out to mainframe.ps1 vault unlock,
 so the server convergence lives there too, next to the topic
-convergence. these tests pin the WIRING - the module exists, the flow
-imports it and calls the sync on both live-session paths - so a
+convergence. these tests pin the WIRING - the sync functions live in
+the god script and the flow calls them on both live-session paths - so a
 refactor cannot silently drop the linux half of the convergence. the
 sync behavior itself is covered by
 tests/vault-approval-server-converge.Tests.ps1.
@@ -17,13 +17,13 @@ REPO = Path(__file__).parents[1]
 sys.path.insert(0, str(REPO))
 from linux import linux_real as lr  # noqa: E402
 
-MODULE = REPO / "windows" / "vault-ntfy-server.psm1"
-FLOW = REPO / "windows" / "vault-flow.ps1"
+MODULE = REPO / "windows" / "mainframe.ps1"  # the sync now lives in the god script
+FLOW = REPO / "windows" / "mainframe.ps1"
 ITEM_NAME = "github.com/FahadBinHussain/mainframe / mainframe.ntfy-server"
 
 
 class ServerConvergenceModuleTests(unittest.TestCase):
-    """The sync module exists and mirrors the topic sync's shape."""
+    """The sync lives in the god script and mirrors the topic sync's shape."""
 
     def test_the_module_exists(self):
         self.assertTrue(MODULE.is_file())
@@ -37,10 +37,13 @@ class ServerConvergenceModuleTests(unittest.TestCase):
         source = MODULE.read_text(encoding="utf-8")
         self.assertIn(ITEM_NAME, source)
 
-    def test_the_sync_functions_are_exported(self):
+    def test_the_sync_functions_are_top_level(self):
+        # no module boundary anymore: the functions must be defined at the
+        # top level of the god script, so dot-sourcing it exposes them.
         source = MODULE.read_text(encoding="utf-8")
-        self.assertIn("Get-VaultNtfyServerFromVault, `", source)
-        self.assertIn("Sync-VaultNtfyServerFromVault", source)
+        for name in ("Sync-VaultNtfyServerFromVault", "Get-VaultNtfyServerFromVault"):
+            self.assertTrue(any(line.startswith(f"function {name}") for line in source.splitlines()),
+                            f"{name} is not a top-level function in mainframe.ps1")
 
     def test_validation_requires_https_and_the_ntfy_path(self):
         source = MODULE.read_text(encoding="utf-8")
@@ -49,11 +52,12 @@ class ServerConvergenceModuleTests(unittest.TestCase):
 
 
 class VaultFlowWiringTests(unittest.TestCase):
-    """vault-flow.ps1 - the ONE flow, linux included - runs the sync."""
+    """mainframe.ps1 vault unlock - the ONE flow, linux included - runs the sync."""
 
-    def test_the_flow_imports_the_server_module(self):
+    def test_the_sync_lives_in_the_flow_itself(self):
+        # no import anymore: the flow and the sync are the same file now.
         source = FLOW.read_text(encoding="utf-8")
-        self.assertIn("vault-ntfy-server.psm1", source)
+        self.assertIn("function Sync-VaultNtfyServerFromVault", source)
 
     def test_the_sync_runs_on_both_live_session_paths(self):
         # cached session AND fresh unlock: the two places the topic sync
@@ -83,9 +87,9 @@ class VaultFlowWiringTests(unittest.TestCase):
 class LinuxEntryPointTests(unittest.TestCase):
     """Linux reaches the same flow, so it converges the same way."""
 
-    def test_linux_still_runs_vault_flow_ps1(self):
+    def test_linux_still_runs_the_god_script(self):
         cmd = lr.vault_flow_command(REPO, "/opt/pwsh", "/opt/bw")
-        self.assertIn(str(REPO / "windows" / "vault-flow.ps1"), cmd)
+        self.assertIn(str(REPO / "windows" / "mainframe.ps1"), cmd)
 
 
 if __name__ == "__main__":

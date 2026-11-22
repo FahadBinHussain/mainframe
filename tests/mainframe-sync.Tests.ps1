@@ -13,7 +13,7 @@
 # says so loudly. A checkout that cannot sync (not a repo, no origin, no
 # upstream) warns loudly and the caller proceeds with local code.
 $ErrorActionPreference = 'Stop'
-$syncModule = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe-sync.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -26,10 +26,10 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($syncModule, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'mainframe-sync.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-$source = Get-Content -LiteralPath $syncModule -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 
 # 2. the contract, in source: untracked files are never touched, a failed
 #    pop never drops the stash, and the function never throws.
@@ -43,7 +43,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     return
 }
 
-Import-Module $syncModule -Force -DisableNameChecking
+. $godScript
 
 function Invoke-TestGit {
     param([string]$Dir, [string[]]$Arguments)

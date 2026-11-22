@@ -1,9 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 # the profile root is resolved by one shared module, so windows and linux
-# read the same place (see mainframe-paths.psm1).
-Import-Module (Join-Path $PSScriptRoot '..\windows\mainframe-paths.psm1') -Force -DisableNameChecking
-Import-Module (Join-Path $PSScriptRoot '..\windows\mainframe-json.psm1') -Force -DisableNameChecking
+# read the same place (see mainframe.ps1).
+. (Join-Path $PSScriptRoot '..\windows\mainframe.ps1')
 
 $accountRoot = Join-Path (Get-MainframeAccountsDir) 'agent-browser'
 $currentFile = Join-Path $accountRoot 'current.json'

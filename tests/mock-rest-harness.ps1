@@ -1,13 +1,15 @@
 #Requires -Version 7
 # Child-process harness for the bootstrap/rotate script tests. Mocks
-# Invoke-RestMethod in this scope, then invokes the target script with
-# the args carried in $env:MF_HARNESS_ARGS (a JSON OBJECT, splatted as
+# Invoke-RestMethod in this scope, then dot-sources the god script
+# (windows/mainframe.ps1) and invokes the action function named by
+# -Action (Invoke-NewBootstrapLink / Invoke-RotateNtfyTopic) with the
+# args carried in $env:MF_HARNESS_ARGS (a JSON OBJECT, splatted as
 # a hashtable - an array of strings cannot carry switches, because a
 # splatted '-DryRun' binds as a positional string value, not a switch).
 #
-# The target runs via & in a child scope, so its $PSScriptRoot is its
-# own directory (windows/) and the mock stays visible through normal
-# scope inheritance.
+# The god script is dot-sourced, so the action functions' $PSScriptRoot
+# is still windows/ and the mock stays visible through normal scope
+# inheritance.
 #
 # CONTRACT: targets under this harness must fail with `throw`, never
 # `exit 1` - measured 2026-11-15, an exit inside a script invoked with
@@ -28,7 +30,7 @@
 #   delete-fail      every DELETE throws
 #   delete-fail-once the first DELETE throws, later ones succeed (the
 #                    counter lives in $env:MF_REST_STATE/delete-count.txt)
-param([string]$Target)
+param([string]$Target, [string]$Action)
 
 $ErrorActionPreference = 'Stop'
 
@@ -74,7 +76,15 @@ if ($env:MF_HARNESS_ARGS -and $env:MF_HARNESS_ARGS.Trim() -ne '' -and $env:MF_HA
     foreach ($prop in $parsed.PSObject.Properties) { $targetArgs[$prop.Name] = $prop.Value }
 }
 try {
-    & $Target @targetArgs
+    # capture the action name BEFORE dot-sourcing: mainframe.ps1 has a
+    # top-level param block ($Group, $Action, $Rest) and dot-sourcing it
+    # binds those params in THIS scope, clobbering $Action with $null.
+    $harnessAction = $Action
+    . $Target
+    if (-not (Get-Command $harnessAction -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "harness: action '$harnessAction' not found after dot-sourcing $Target"
+    }
+    & $harnessAction @targetArgs
 } catch {
     Write-Host "HARNESS-THREW: $($_.Exception.Message)"
     exit 1

@@ -81,7 +81,7 @@ try {
     # locked when the secrets step touches the vault, minutes into the run (2026-10-29
     # 09:05 run died there after a 120s mobile-approval timeout, 1.9 GB of zips wasted).
     # validate up front and give the 1-tap approval a wide window while nothing heavy ran.
-    Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force -DisableNameChecking
+    . (Join-Path $PSScriptRoot 'mainframe.ps1')
     $vaultOk = Ensure-VaultSession -TimeoutSeconds 600 -PromptContext 'daily mainframe backup publish' -Agent 'mainframe-daily' -Model 'scheduled task'
     if (-not $vaultOk) { throw 'vault locked - 1-tap mobile approval not completed within 600s; backup not started' }
     & .\windows\backup.ps1 -ExcludeSecrets -Publish 2>&1 | ForEach-Object { Log "  $_" }

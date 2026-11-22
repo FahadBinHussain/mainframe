@@ -58,7 +58,7 @@ with a key derived from the master password (PBKDF2-HMAC-SHA256, 600k
 iterations, AES-256-CBC + HMAC-SHA256), ciphertext only, nothing plaintext.
 `boot.ps1` unseals it with the master password setup asks for anyway, so a
 fresh machine never has to type the email. Seal once via publish, or any
-time with `windows/seal-bw-email.ps1`; delete the blob and re-run to re-seal.
+time with `windows/mainframe.ps1 vault seal-email`; delete the blob and re-run to re-seal.
 
 #### Phone approval notification for headless restore
 
@@ -87,7 +87,7 @@ make Windows and Linux behave identically on a machine whose egress proxy denies
   relay is not `ntfy.sh`, so the page posts the ciphertext back to the same
   relay the runner reads.
 
-Both Windows (`windows/vault-approval.psm1`) and Linux (`linux/linux_real.py`) read the same
+Both Windows (`windows/mainframe.ps1`) and Linux (`linux/linux_real.py`) read the same
 `mainframe.config.json`, so one file drives both machines.
 
 **One phone tap per hour, not per run.** Windows has always cached the vault
@@ -100,7 +100,7 @@ the phone. Linux now does the same at
 for the tap, every run inside the hour reuses the session silently, and an
 expired session is locked and purged so the phone is asked again. Lock it by
 hand at any time with `python3 -m linux.linux_real --lock-vault` — the Linux twin of
-`windows/vault-lock.ps1`.
+`windows/mainframe.ps1 vault lock`.
 
 ### Linux: Bash (no PowerShell dependency)
 
@@ -475,7 +475,7 @@ The existing `da.gd/f85Bj` short link remains Windows-only and unchanged.
 - `windows/restore.ps1` restores Scoop, persisted settings, buckets, apps, native app exceptions, and encrypted secrets from `mainframe-backup.zip`
 - `windows/backup-secrets.ps1` creates standalone `tool-secrets.zip` from the paths in `manifests/tool-secrets.manifest.json` (used by `windows/restore-secrets.ps1`)
 - `windows/restore-secrets.ps1` restores `tool-secrets.zip` and backs up overwritten targets first
-- `windows/vault-secret.psm1` shared module: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata-private\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
+- `windows/mainframe.ps1` god script: vault-native secrets for the account helpers (neon, supabase, vercel, hf, render, cloudflare, cronjob, github, notion, uptimerobot) — reads/writes per-profile tokens in the Bitwarden vault via `Read-VaultSecret` / `Write-VaultSecretToExisting`; requires an unlocked BW session (session.key from `automata-private\bitwarden.com\unlock.ps1` or `$env:BW_SESSION`)
 - `accounts/account-contract.ps1` checks that every `*-account.ps1` helper keeps the shared mainframe account command contract
 - `manifests/scoop-allowed.json`, `manifests/pnpm-allowed.json`, `manifests/uv-allowed.json`, `manifests/go-allowed.json`, and `manifests/winget-allowed.json` are required desired tool allowlists; backup and restore both require them, restore installs every listed item and fails if an allowed install is missing, and `scoopfile.json` metadata is used only for Scoop apps that were in the backup snapshot. The automatic frozen pip snapshot is retired: backup no longer creates `pip-freeze.txt`, and Windows Full no longer installs it. A legacy `pip-freeze.txt` remains restore control metadata only, excluded from user data and ignored by the Linux planner. Explicit repository-only `requirements.txt`/`requirements-linux.txt` files remain available for planning, but generic Python execution is blocked pending preflight; `Lib\site-packages` is not shipped.
 - `accounts/vercel-account.ps1` manages separate token-only Vercel CLI profiles by email

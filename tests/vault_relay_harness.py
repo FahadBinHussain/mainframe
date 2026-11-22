@@ -1,10 +1,10 @@
 """Shared harness for the relay contract tests.
 
 The relay - topic, server, page base, poll, backoff, expired marker - lives
-in vault-approval.psm1. the tests drive THAT module through pwsh, so both
+in mainframe.ps1 (the god script). the tests drive THAT script through pwsh, so both
 platforms are checked against one implementation instead of two copies.
 
-the module is copied into a temporary directory before it is imported: the
+the god script is copied into a temporary directory before it is dot-sourced: the
 lookup for mainframe.config.json starts in the module's own folder, and the
 checkout's own config file would otherwise shadow the test's profile root.
 """
@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-MODULES = ("windows/vault-approval.psm1", "windows/vault-secret.psm1", "windows/mainframe-paths.psm1", "windows/mainframe-json.psm1")
+MODULES = ("windows/mainframe.ps1",)
 
 
 def pwsh_executable() -> str | None:
@@ -39,7 +39,7 @@ PWSH = pwsh_executable()
 
 
 def module_dir() -> Path:
-    """A temporary copy of the modules, without the checkout's config file."""
+    """A temporary copy of the god script, without the checkout's config file."""
     target = Path(tempfile.mkdtemp(prefix="mainframe-relay-modules-"))
     for name in MODULES:
         shutil.copy2(REPO / name, target / name)
@@ -48,14 +48,14 @@ def module_dir() -> Path:
 
 def run_pwsh(script: str, *, env: dict[str, str] | None = None,
              timeout: float = 120, modules: Path | None = None) -> subprocess.CompletedProcess:
-    """Run a pwsh script that imports the approval module and prints one JSON line."""
+    """Run a pwsh script that dot-sources the god script and prints one JSON line."""
     if PWSH is None:
         raise unittest.SkipTest("pwsh is not available on this machine")
     folder = modules or module_dir()
     body = f"""
 $ErrorActionPreference = 'Stop'
 $InformationPreference = 'SilentlyContinue'
-Import-Module '{folder / 'vault-approval.psm1'}' -Force -DisableNameChecking
+. '{folder / 'windows/mainframe.ps1'}'
 {script}
 """
     script_path = folder / "driver.ps1"

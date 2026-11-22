@@ -10,9 +10,9 @@ the server lives in the vault (item
 secure note, the full relay `/ntfy` url in the notes — same shape as
 the topic item `... / mainframe.ntfy-topic`). the sync mirrors the
 topic convergence exactly (`Sync-VaultNtfyTopicFromVault` in
-`windows/vault-approval.psm1`); the server version is
-`Sync-VaultNtfyServerFromVault` in `windows/vault-ntfy-server.psm1`,
-called from `windows/vault-flow.ps1` on both live-session paths
+`windows/mainframe.ps1`); the server version is
+`Sync-VaultNtfyServerFromVault` in `windows/mainframe.ps1`,
+called from `windows/mainframe.ps1 vault unlock` on both live-session paths
 (cached session + fresh unlock). linux converges through the same
 flow — there is no second, python copy.
 
@@ -54,7 +54,7 @@ flow — there is no second, python copy.
   converges fine and the next approval fails loudly there. check the
   new relay answers before editing the item.
 - the sync lives in its own module instead of next to the topic sync
-  in `vault-approval.psm1` because that file was mid-edit when it
+  in `mainframe.ps1` because that file was mid-edit when it
   landed; moving it in beside the topic sync is a clean-up for later,
   the behavior is identical either way.
 

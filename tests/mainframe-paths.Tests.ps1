@@ -5,7 +5,7 @@
 # branch - which is exercised here by clearing $env:OS, the flag the module
 # uses to tell windows from linux.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe-paths.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -18,10 +18,10 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'mainframe-paths.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
 # keep the environment exactly as we found it
 $saved = @{}
@@ -87,7 +87,7 @@ try {
     try {
         [Environment]::SetEnvironmentVariable('USERPROFILE', $null)
         $expectedCheckout = Join-Path $HOME 'Downloads/mainframe'
-        if (Test-Path (Join-Path $expectedCheckout 'windows\vault-secret.psm1')) {
+        if (Test-Path (Join-Path $expectedCheckout 'windows\mainframe.ps1')) {
             Assert-Equal $expectedCheckout (Get-MainframeCheckoutRoot) `
                 'checkout root resolves through $HOME with no USERPROFILE'
         } else {

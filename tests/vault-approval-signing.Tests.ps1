@@ -25,7 +25,7 @@
 # The ciphertext picker is tested directly (it is pure), never through the
 # polling loop.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -60,10 +60,10 @@ function Get-FileModeOctal {
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-approval.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-$source = Get-Content -LiteralPath $module -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 
 # L19 + H1, structural: the URL and the topic must never reach the terminal
 # through Write-Host, whatever the runtime does.
@@ -73,7 +73,7 @@ Assert-True ($source -match 'function Get-VaultMasterPassword \{\s*\[CmdletBindi
 Assert-True ($source -notmatch 'push notification sent to ntfy topic: \$NtfyTopic') 'the push line never prints the full topic'
 Assert-True ($source -notmatch "to topic '\$Topic'") 'the push warnings never print the full topic'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
 # --- isolation: temp profile root + fake bw ---
 $rootLeaf = "vault-signing-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8)

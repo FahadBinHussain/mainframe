@@ -73,9 +73,9 @@ function Seal-BwEmail {
 }
 
 # --- vault session (must be unlocked) ---
-# the profile root is resolved by one shared module, so windows and linux
-# read the same place (see mainframe-paths.psm1).
-Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+# the profile root is resolved by one shared script, so windows and linux
+# read the same place (see mainframe.ps1).
+. (Join-Path $PSScriptRoot 'mainframe.ps1')
 
 $sessionKeyFile = Get-MainframeSessionKeyPath
 if (-not (Test-Path -LiteralPath $sessionKeyFile)) {
@@ -95,8 +95,7 @@ if ($bwEmail -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
 }
 
 # --- github token from vault ---
-Import-Module (Join-Path $PSScriptRoot 'vault-secret.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'mainframe-json.psm1') -Force -DisableNameChecking
+# (mainframe.ps1 already dot-sourced above)
 $githubAccountRoot = Join-Path (Get-MainframeAccountsDir) 'github'
 $currentProfileFile = Join-Path $githubAccountRoot 'current.json'
 if (-not (Test-Path -LiteralPath $currentProfileFile)) {
@@ -237,7 +236,7 @@ Write-Host "done: $Repo now holds $([Math]::Min($mine.Count, $Keep)) releases fo
 # the vault is unlocked (the gh token comes FROM the vault). The sealed
 # blob is the pre-vault carrier: public ciphertext, openable only with the
 # master password. Seal once; re-seal after an email change by deleting
-# bw-email.enc.json and re-running publish (or run seal-bw-email.ps1).
+# bw-email.enc.json and re-running publish (or run mainframe.ps1 vault seal-email).
 $blobPath = Join-Path $PSScriptRoot '..\bw-email.enc.json'
 if ($bwEmail) {
     if (Test-Path -LiteralPath $blobPath) {

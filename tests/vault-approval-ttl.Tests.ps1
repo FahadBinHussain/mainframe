@@ -12,11 +12,9 @@
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = $PSScriptRoot
-$approvalModule = [IO.Path]::GetFullPath((Join-Path $scriptDir '..\windows\vault-approval.psm1'))
-$secretModule = [IO.Path]::GetFullPath((Join-Path $scriptDir '..\windows\vault-secret.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $scriptDir '..\windows\mainframe.ps1'))
 
-Import-Module $approvalModule -Force -DisableNameChecking
-Import-Module $secretModule -Force -DisableNameChecking
+. $godScript
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {

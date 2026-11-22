@@ -180,7 +180,7 @@ class ConfigAndTimeoutTests(unittest.TestCase):
     """Two defects the live container run exposed: a powershell-written config
     carries a UTF-8 BOM, and a hung apt-get blocked the whole flow.
 
-    the config lookup itself now lives in mainframe-paths.psm1, so these drive
+    the config lookup itself now lives in mainframe.ps1, so these drive
     THAT through pwsh - the same code both machines run - instead of a python
     copy that no longer exists.
     """
@@ -192,10 +192,9 @@ class ConfigAndTimeoutTests(unittest.TestCase):
         (root / "accounts" / "bitwarden").mkdir(parents=True, exist_ok=True)
         (root / "mainframe.config.json").write_bytes(config_bytes)
         modules = module_dir()
-        # the config lookup lives in mainframe-paths.psm1, which vault-approval
-        # imports for its own use but does not re-export - import it directly.
+        # the config lookup lives in mainframe.ps1 - dot-source it directly.
         result = run_pwsh_json(
-            f"Import-Module '{modules / 'mainframe-paths.psm1'}' -Force -DisableNameChecking; "
+            f". '{modules / 'windows/mainframe.ps1'}'; "
             f"[ordered]@{{ v = Get-MainframeConfigValue -Key '{key}' }} | ConvertTo-Json -Compress",
             env={"MAINFRAME_PROFILE_ROOT": str(root)}, modules=modules)
         return result["v"]

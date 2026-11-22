@@ -18,7 +18,7 @@
 # server url is not a secret (the topic is the credential), so the
 # convergence log names the new relay in full.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-ntfy-server.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -36,30 +36,29 @@ $script:vaultItemName = 'github.com/FahadBinHussain/mainframe / mainframe.ntfy-s
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-ntfy-server.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-$source = Get-Content -LiteralPath $module -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 
 # 2. the convergence machinery exists, and the vault item name matches the
 #    topic item's shape (same repo prefix, value in notes).
 Assert-True ($source -match 'function Sync-VaultNtfyServerFromVault') 'Sync-VaultNtfyServerFromVault exists'
 Assert-True ($source -match 'function Get-VaultNtfyServerFromVault') 'Get-VaultNtfyServerFromVault exists'
 Assert-True ($source -match [regex]::Escape($script:vaultItemName)) 'the vault item name is the symmetric secure-note name'
-Assert-True ($source -match 'Sync-VaultNtfyServerFromVault') 'the sync function is exported'
+Assert-True ($source -match '(?m)^function Sync-VaultNtfyServerFromVault') 'the sync function is top-level (dot-sourcing exposes it)'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
-# 3. mock Invoke-VaultServerBwCommand inside the module's own scope. env
-#    vars carry the scenario in because the mock runs in the module's
-#    session state, not this script's. MF_BW_SCENARIO: live | locked |
+# 3. mock Invoke-VaultServerBwCommand in this script's scope - the god
+#    script is dot-sourced here, so its functions resolve the mock.
+#    MF_BW_SCENARIO: live | locked |
 #    noitem. MF_BW_VAULT_SERVER is the notes value for the live case -
 #    including the malformed values, which are just live answers that
 #    fail validation.
 $env:MF_BW_SCENARIO = 'live'
 $env:MF_BW_VAULT_SERVER = $script:vaultServer
-& (Get-Module vault-ntfy-server) {
-    function script:Invoke-VaultServerBwCommand {
+function Invoke-VaultServerBwCommand {
         param([string[]]$Arguments, [int]$TimeoutSeconds = 10)
         if ($Arguments -contains 'status') {
             if ($env:MF_BW_SCENARIO -eq 'locked') { return '{"status":"locked"}' }
@@ -72,7 +71,6 @@ $env:MF_BW_VAULT_SERVER = $script:vaultServer
         }
         return $null
     }
-}
 
 function New-TestConfig {
     param([string]$Dir, [string]$Server)

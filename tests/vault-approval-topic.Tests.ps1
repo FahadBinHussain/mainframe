@@ -12,7 +12,7 @@
 # is the only credential, no header or token is ever sent, and a refused
 # push must say so instead of dying quietly.
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 
 $script:checks = 0
 function Assert-True($Condition, [string]$Message) {
@@ -25,10 +25,10 @@ function Assert-Equal($Expected, $Actual, [string]$Message) {
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-approval.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-$source = Get-Content -LiteralPath $module -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 
 # 2. there is NO credential in the design any more - no resolver, no config
 #    key, no environment variable. a regression here is how a new machine
@@ -40,31 +40,29 @@ Assert-True ($source -notmatch 'MAINFRAME_NTFY_AUTH') 'there is no ntfy auth env
 Assert-True ($source -notmatch "'ntfyToken'") 'the config carries no ntfy token key'
 Assert-True ($source -notmatch "'ntfyAuth'") 'the config carries no ntfy auth key'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
-# 3. mock Invoke-RestMethod inside the module's own scope. the mock records
+# 3. mock Invoke-RestMethod in this script's scope - the god script is
+#    dot-sourced here, so its functions resolve the mock. the mock records
 #    the uri + headers of every call in a capture file, and throws a
-#    403-shaped exception when MF_REFUSE=1. env vars carry the control in
-#    because the mock runs in the module's session state, not this script's.
+#    403-shaped exception when MF_REFUSE=1.
 $captureFile = [IO.Path]::GetTempFileName()
 Set-Content -LiteralPath $captureFile -Value '' -Encoding UTF8
 $env:MF_CAPTURE = $captureFile
 $env:MF_REFUSE = '0'
 try {
-    & (Get-Module vault-approval) {
-        function script:Invoke-RestMethod {
-            [CmdletBinding()]
-            param($Uri, $Method, $Headers, $Body, $TimeoutSec)
-            $capture = [PSCustomObject]@{ uri = "$Uri"; headers = $Headers } | ConvertTo-Json -Compress
-            Add-Content -LiteralPath $env:MF_CAPTURE -Encoding UTF8 -Value $capture
-            if ($env:MF_REFUSE -eq '1') {
-                $resp = [PSCustomObject]@{ StatusCode = 403 }
-                $ex = New-Object System.Exception('403 Forbidden')
-                $ex | Add-Member -NotePropertyName Response -NotePropertyValue $resp
-                throw $ex
-            }
-            return $null
+    function Invoke-RestMethod {
+        [CmdletBinding()]
+        param($Uri, $Method, $Headers, $Body, $TimeoutSec)
+        $capture = [PSCustomObject]@{ uri = "$Uri"; headers = $Headers } | ConvertTo-Json -Compress
+        Add-Content -LiteralPath $env:MF_CAPTURE -Encoding UTF8 -Value $capture
+        if ($env:MF_REFUSE -eq '1') {
+            $resp = [PSCustomObject]@{ StatusCode = 403 }
+            $ex = New-Object System.Exception('403 Forbidden')
+            $ex | Add-Member -NotePropertyName Response -NotePropertyValue $resp
+            throw $ex
         }
+        return $null
     }
 
     function Read-LastCapture {

@@ -69,7 +69,7 @@ the root used to hold 86 files flat. now it holds entry points only; everything 
 - `manifests/` — the allowlists (`scoop-allowed.json`, `winget-allowed.json`, `pnpm-allowed.json`, `uv-allowed.json`, `go-allowed.json`) + `tool-secrets.manifest.json`
 - `tests/`, `docs/`, `patches/wacli/`, `wacli-vss-client/`, `workers/`, `bucket/` — unchanged
 
-path rules that follow from the layout: a script inside `accounts/` or `windows/` reaches the repo root with `(Split-Path $PSScriptRoot -Parent)`, never `$PSScriptRoot` alone. `restore.ps1`, `restore-secrets.ps1` and `wipe.ps1` are the exception — they are copied INTO the backup, so their `$PSScriptRoot` means the backup dir at runtime and their sibling references stay as-is. `linux_packages.build_plan(repo)` takes the checkout root and reads the allowlists from `repo/manifests/`; test fixtures write theirs to `<tmpdir>/manifests/`. `Get-MainframeCheckoutRoot` finds the checkout by probing for `windows/vault-secret.psm1` (or the old root-level one on a pre-restructure clone) — the probe went blind in the restructure when the modules moved, and the key test caught it (2026-11-15).
+path rules that follow from the layout: a script inside `accounts/` or `windows/` reaches the repo root with `(Split-Path $PSScriptRoot -Parent)`, never `$PSScriptRoot` alone. `restore.ps1`, `restore-secrets.ps1` and `wipe.ps1` are the exception — they are copied INTO the backup, so their `$PSScriptRoot` means the backup dir at runtime and their sibling references stay as-is. `linux_packages.build_plan(repo)` takes the checkout root and reads the allowlists from `repo/manifests/`; test fixtures write theirs to `<tmpdir>/manifests/`. `Get-MainframeCheckoutRoot` finds the checkout by probing for `windows/mainframe.ps1` (falling back to the old `windows/vault-secret.psm1` on a checkout that has not pulled the god-script merge yet, or the root-level one on a pre-restructure clone) — the probe went blind in the restructure when the modules moved, and the key test caught it (2026-11-15).
 
 ## running the tests
 
@@ -81,7 +81,7 @@ a test that touches session or profile state MUST run isolated: a temp profile r
 
 mainframe maintains itself on every machine — linux, windows, muse VMs,
 any checkout. nobody sends commands to a machine to keep it current:
-the machine converges on its own at vault-flow time. the two pieces:
+the machine converges on its own at vault-unlock time. the two pieces:
 
 ### the ntfy topic lives in the vault
 
@@ -92,7 +92,7 @@ notes — same shape as the signing-key item `... / approval-signing.key`).
 
 - whenever a vault flow runs with a live bw session, the runner reads
   the topic from the vault (`Sync-VaultNtfyTopicFromVault` in
-  `windows/vault-approval.psm1`); if it differs from the local config's
+  `windows/mainframe.ps1`); if it differs from the local config's
   `ntfyTopic`, the local config is updated atomically (mode 0600) and
   the vault value is used. the convergence is logged LOUDLY, 4-char
   fingerprint only, never the value.
@@ -106,7 +106,7 @@ notes — same shape as the signing-key item `... / approval-signing.key`).
   instead of any file copy. the pack still carries the topic for muse
   VMs. the signing key needs no copy on any platform — it self-heals
   from the vault after the first unlock.
-- rotation: `windows/rotate-ntfy-topic.ps1` writes the vault item
+- rotation: `windows/mainframe.ps1 vault rotate-topic` writes the vault item
   FIRST (fails LOUDLY if the session is dead, touching nothing), then
   the local config. every other machine converges at its next vault
   flow — no commands to send. full procedure in
@@ -129,7 +129,7 @@ the topic item).
 
 - whenever a vault flow runs with a live bw session, the runner reads
   the server from the vault (`Sync-VaultNtfyServerFromVault` in
-  `windows/vault-ntfy-server.psm1`); if it differs from the local
+  `windows/mainframe.ps1`); if it differs from the local
   config's `ntfyServer`, the local config is updated atomically (mode
   0600) and the vault value is used. the convergence is logged LOUDLY,
   naming the new relay in full — the server url is not a secret, the
@@ -145,18 +145,18 @@ the topic item).
   commands to send. the old relay stays live as the fallback, so a
   machine that has not converged yet keeps working.
 - the sync lives in its own module instead of next to the topic sync
-  in `vault-approval.psm1` because that file was mid-edit when it
+  in `mainframe.ps1` because that file was mid-edit when it
   landed; moving it in is a clean-up for later. full note in
   `docs/ntfy-server-convergence.md`.
 - tests: `tests/vault-approval-server-converge.Tests.ps1` (mock bw) +
   `tests/test_linux_real_vault_server.py` (flow wiring — linux
-  converges through the same `vault-flow.ps1`).
+  converges through the same `mainframe.ps1 vault unlock`).
 
 ### the checkout heals itself
 
-at vault-flow/engine start — BOTH `windows/vault-flow.ps1` and
+at vault-unlock/engine start — BOTH `windows/mainframe.ps1 vault unlock` and
 `linux/linux_real.py`, before repo modules load — the checkout syncs
-itself (`Sync-MainframeCheckout` in `windows/mainframe-sync.psm1`,
+itself (`Sync-MainframeCheckout` in `windows/mainframe.ps1`,
 `sync_checkout()` in `linux/linux_real.py`; two implementations, same
 algorithm, because pwsh may not exist yet when the linux engine
 starts):
@@ -185,7 +185,7 @@ PERMANENT: one link, created once, serves the current config (GET is
 repeatable, it never expires, a failed download is just re-run).
 
 - generate, on any existing machine, from the repo root:
-  `pwsh windows/new-bootstrap-link.ps1` (on the muse VMs pwsh is not
+  `pwsh windows/mainframe.ps1 vault bootstrap-link` (on the muse VMs pwsh is not
   on PATH — use the full path). it generates a 128-bit token locally,
   writes the link into the vault item
   `github.com/FahadBinHussain/mainframe / mainframe.bootstrap-link`
@@ -220,7 +220,7 @@ repeatable, it never expires, a failed download is just re-run).
 - a dry run downloads nothing (`--dry-run` / `-DryRun`).
   `--config-only` / `-ConfigOnly` places the config and stops (no
   bootstrap dispatched).
-- rotation re-pushes the bundle: `windows/rotate-ntfy-topic.ps1` PUTs
+- rotation re-pushes the bundle: `windows/mainframe.ps1 vault rotate-topic` PUTs
   the updated config under the same token after rotating, so the link
   always serves the current topic. a failed push fails the run LOUDLY
   at the end (exit 1) with the `-PushOnly` recovery — the rotation
@@ -246,9 +246,9 @@ every `*-account.ps1` helper implements the same contract (`login`, `use`, `curr
 
 - profiles are keyed by account email only; if email cannot be detected after auth, fail or ask — never save a username/label/workspace fallback.
 - **invoking the helpers on this box (2026-10-10)**: the default powershell execution policy blocks `& <helper>.ps1 ...` with `UnauthorizedAccess` — call them as `pwsh -NoProfile -ExecutionPolicy Bypass -File <repo>\<tool>-account.ps1 ...` instead. `run` takes the target tool's raw subcommand args with the binary name OMITTED and an optional `<email>` first: `<helper> run auth status` / `<helper> run <email> repo view <owner>/<repo> --json name,visibility` — passing `gh`/`hf`/etc. as the first arg fails loud with `unknown command "gh" for "gh"` (the helper already invokes the binary). also note `gh auth logout` REFUSES to run while `GH_TOKEN` is in the environment (*"first clear the value from the environment"*, exit 1) — to forget a stored host entry run it with only `GH_CONFIG_DIR` set (`Remove-Item Env:GH_TOKEN` first), then re-check via the helper. fixed a stale invalid `default`-style user entry in the github profile's `hosts.yml` this way on 2026-10-10 — it made `run auth status` exit 1 (*"X Failed to log in ... The token in default is invalid"*) while the GH_TOKEN profile was fine all along. **and run `accounts/account-contract.ps1` under pwsh, never `powershell`**: under 5.1 it aborts on `accounts/agent-browser-account.ps1` with *"17 error(s)"* (first: `Unexpected token 'usually'`) because these helpers use PS7 syntax, so the alphabetically-earlier file dies before minimax is ever reached and the whole run is meaningless; `[Parser]::ParseFile` agrees — 0 errors under pwsh 7.6, 17 under 5.1.
-- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the shared module `windows/vault-secret.psm1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata-private\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `windows/publish-backup.ps1` and `accounts/github-account.ps1` match that pattern.
+- **secrets are vault-native (2026-08-22)**: api keys / tokens live in the Bitwarden vault as LOGIN items named by the bare platform domain (e.g. `console.neon.tech`, `vercel.com`, `dash.cloudflare.com`, `www.notion.so`, `uptimerobot.com`, `github.com - <handle>`), with the secret value in the item's notes under a platform header (e.g. `[api keys]`, `[tokens]`, `[API Tokens]`, `User Access Tokens`, `Access Tokens`, `[token]`, `[api key]`, `[refresh token]`, `Auth keys`) followed by the value. helpers read/write them via the god script `windows/mainframe.ps1` (`Read-VaultSecret` / `Write-VaultSecretToExisting`). **no secrets are stored in the profile dir anymore** — `%APPDATA%\mainframe\accounts\<tool>\<email>\` holds only `profile.json`/`current.json` metadata and tool CLI config state (render cli.yaml, cloudflare account-id, notion workspace-id, wrangler oauth state). unlock the vault first (`automata-private\bitwarden.com\unlock.ps1` writes `%APPDATA%\mainframe\accounts\bitwarden\session.key`, or set `$env:BW_SESSION`); if locked, helpers throw a clear "unlock first" message. token format per tool (used as the vault-value regex): neon `napi_`, supabase `sbp_v0_`, vercel `vcp_`, hf `hf_`, render `rnd_`, cloudflare `cfut_`, github `ghp_`/`github_pat_`, notion `ntn_`/`secret_`, uptimerobot `u<digits>-<hex>`, cron-job.org base64, tailscale `tskey-auth-`, microsoft `[A-Za-z0-9._$*!-]{50,}` (refresh token). some vault items are keyed by github handle or a different email than the profile — the lookup falls back to matching the profile email line in the item notes. **naming rule (2026-10)**: the item name is the bare domain only. two accounts on one domain are told apart by `login.username`/URI, never by a name suffix — the old `[2]` bracket suffix and ` - <user>` suffix are gone (0 bracketed items in the vault as of 2026-10-03). `github.com - <handle>` is the sole exception, kept because `windows/publish-backup.ps1` and `accounts/github-account.ps1` match that pattern.
 - **github: a bare-handle `login.username` makes a valid token look missing (2026-10-06)**: `Find-VaultItemByEmail` matches `login.username == profile email` first, then falls back to a notes line equal to the email. a `github.com - <handle>` item with `login.username = <handle>` satisfies neither, so `Read-ProfileToken` returns null — `status-all` prints `HasToken=False / TokenStatus=missing` and `run <email> gh ...` fails with *"populate the GH_TOKEN environment variable"* (exit 4) — while the `ghp_` in the notes is perfectly valid. **diagnose first**: read the item and probe the token directly (`Authorization: Bearer <token>` against `api.github.com/user`, check `x-oauth-scopes`) before believing it expired. **fix**: set `login.username` to the profile email. bw 2026.5.0 has no `bw item edit` command and no `--username` flag — use `bw edit item <id> <base64-of-full-item-json>` (get the item, mutate `login.username`, re-encode; posting the whole item back is the only safe form). same class of bug as the huggingface trap below.
-- **vault cache (2026-09-01)**: `windows/vault-secret.psm1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles. **unwrap gotcha (2026-10-08)**: the function returns the whole 1256-item collection as ONE wrapped object — piping it straight into `Where-Object` runs the predicate ONCE against the array (member-enumerated `.name` contains the needle → truthy → everything passes), so a naive filter silently selects ALL items; a write loop using that pattern clobbered 10 unrelated items' `DATABASE_URL` before being caught (all 10 restored same day from local clones + `vercel env pull`). ALWAYS unwrap first — `$items = @(@(Get-VaultItems)[0])` — and assert the filtered match count is what you expect (usually 1) BEFORE any write.
+- **vault cache (2026-09-01)**: `windows/mainframe.ps1` `Get-VaultItems` now caches `bw list items` per session so the vault is queried at most once per process. Write operations (Update-VaultItemNotes, New-VaultItem, Write-VaultSecretToExisting) invalidate the cache. Call `Clear-VaultItemsCache` to force a re-read. This fixes `status-all` timeout (was ~20× `bw list items` per profile, now 1×) and speeds up every helper that iterates profiles. **unwrap gotcha (2026-10-08)**: the function returns the whole 1256-item collection as ONE wrapped object — piping it straight into `Where-Object` runs the predicate ONCE against the array (member-enumerated `.name` contains the needle → truthy → everything passes), so a naive filter silently selects ALL items; a write loop using that pattern clobbered 10 unrelated items' `DATABASE_URL` before being caught (all 10 restored same day from local clones + `vercel env pull`). ALWAYS unwrap first — `$items = @(@(Get-VaultItems)[0])` — and assert the filtered match count is what you expect (usually 1) BEFORE any write.
 - **`Read-VaultSecret` needs `-ValueRegex` or it silently returns null (2026-10-08)**: `Get-SecretFromNotes` returns null when `ValueRegex` is blank (no default), so `Read-VaultSecret -NamePattern 'github.com - *'` — no `-ValueRegex`, no `-Email` — always comes back null and reads like "vault broken / token missing" when it is a call-shape error. `-Email` also matters: `Find-VaultItemByEmail` with an empty email falls back to matching a BLANK line in the notes, so item selection becomes non-deterministic. for a token read that cannot go wrong use the `boot.ps1` recipe: `bw list items --search 'github.com' --raw` → exact `name -eq 'github.com - <owner>'` item → notes regex `(gh[pousr]_[A-Za-z0-9_]{30,})`; in a fresh shell set `$env:BW_SESSION` from `%APPDATA%\mainframe\accounts\bitwarden\session.key` first (or run via the module, which reads that file itself).
 - before using a service, check the active account first (`status-all`/`current`); if the task targets a specific project/repo/space, verify which account owns it and switch before proceeding.
 
@@ -2219,7 +2219,7 @@ is otherwise unchanged.)
 - **Single-unlock lifecycle**: A single 1-tap biometric approval provides the Bitwarden master password, unsealing `bw-email.enc.json` (resolving account email without typing), authenticating `bw login` via `--passwordenv`, and minting the session key via `bw unlock --raw --passwordenv`. The user never has to unlock multiple times.
 - **Google-prompt full-screen approval via ADB**: When an Android device is attached via USB or Wi-Fi (`adb devices`), the runner automatically wakes the display (`adb shell input keyevent KEYCODE_WAKEUP`) and immediately launches the approval prompt full-screen (`adb shell "am start -a android.intent.action.VIEW -d '<url>'"`). This eliminates having to swipe down or interact with the notification shade.
 - **Stale hash fragment / tab reuse gotcha**: Android Chrome reuses existing activity tabs on intent delivery. Because the session public key and relay ID live in the URL fragment (`#k=...&sid=...`), `docs/vault-tab.html` listens to `hashchange` and triggers `location.reload()`, ensuring fresh sessions instantly update instead of showing "Missing public key".
-- **PowerShell shared module (`windows/vault-approval.psm1`)**: Provides .NET native RSA-2048 keypair generation (`ExportSubjectPublicKeyInfo`), RSA-OAEP SHA-256 decryption, ntfy push dispatch, ADB auto-popup, and relay long-polling with zero external dependencies.
+- **PowerShell god script (`windows/mainframe.ps1`)**: Provides .NET native RSA-2048 keypair generation (`ExportSubjectPublicKeyInfo`), RSA-OAEP SHA-256 decryption, ntfy push dispatch, ADB auto-popup, and relay long-polling with zero external dependencies.
 - **`ExportSubjectPublicKeyInfo` does not exist on windows powershell 5.1 (2026-11-01)**: `RSA.ExportSubjectPublicKeyInfo()` is .NET Core only. windows powershell 5.1 (.NET framework) has no such method and no `RSAExtensions` type either, and `RSA.Create()` there returns an `RSACng` - so the call dies with *"does not contain a method named 'ExportSubjectPublicKeyInfo'"*. that breaks the whole 1-tap unlock for every helper invoked through `powershell -File` (`accounts/vercel-account.ps1`, the `*-account.ps1` family, ...), because the unlock flow runs inside windows powershell - the failure looks like a broken vault, not a broken runtime. `windows/vault-approval.psm1` now builds the SubjectPublicKeyInfo DER by hand when the runtime has no native method (`ConvertTo-SubjectPublicKeyInfoManual`), and the hand rolled bytes are byte for byte identical to the native ones - `tests/vault-approval-spki.Tests.ps1` checks that under BOTH runtimes. if you add crypto to this module, check it under `powershell` (5.1) as well as `pwsh` (7).
 - **Fail-loud manual fallback (Rule 8)**: If 1-tap mobile approval times out or fails, runners display a visible warning naming the failure and fallback mechanism loudly before prompting for manual password entry.
 - **1-hour session TTL & on-demand 1-tap re-approval (2026-10-27)**: Bitwarden CLI has no default auto-lock TTL for CLI sessions, which previously allowed `session.key` to remain valid on disk indefinitely. `windows/vault-secret.psm1` now enforces a 60-minute TTL (configurable via `MAINFRAME_VAULT_TTL_MINUTES` or `vaultTtlMinutes` in `mainframe.config.json`). When `session.key` is older than 60 minutes, `Get-VaultSession` expires the session (`Expire-VaultSession`: `bw lock` + purge - see "session expiry locks the cli" below). `Ensure-VaultSession` triggers 1-tap mobile approval on demand (`Get-VaultMasterPassword`), auto-launching the prompt on the attached phone or sending ntfy push, obtaining a fresh 1-hour session token seamlessly without typing passwords. `windows/vault-lock.ps1` locks the vault immediately on demand.
@@ -2722,12 +2722,12 @@ the python copy of the vault flow is GONE. `linux/linux_real.py` no longer has
 `obtain_master_password`, `unseal_email`, `generate_tab_key`,
 `wait_for_tab_password`, `read_cached_session`, `session_key_path`,
 `extract_vault_secrets`, `dispatch_ntfy_unlock` or `detect_caller_identity`.
-everything lives in `windows/vault-secret.psm1` + `windows/vault-approval.psm1`, and both
-machines drive it through `windows/vault-flow.ps1`:
+everything lives in `windows/mainframe.ps1`, and both
+machines drive it through `windows/mainframe.ps1 vault unlock`:
 
-    pwsh -NoProfile -File windows/vault-flow.ps1 -Json [-Checkout DIR] [-BwPath PATH]
+    pwsh -NoProfile -File windows/mainframe.ps1 vault unlock -Json [-Checkout DIR] [-BwPath PATH]
          [-NtfyTopic T] [-Server URL] [-PagesBase URL] [-OutputPath FILE]
-         [-Lock | -LockIfStale]
+         [-Lock | -LockIfStale] [-ScheduleExpiry]
 
 - `-Json` prints the result document on stdout and logs to stderr. the master
   password is NEVER in the output.
@@ -2755,13 +2755,13 @@ install and a failure to start is a loud error, never a silent skip.
 
 - **`Write-Warning` lands on STDOUT in pwsh 7 when the output is redirected.**
   that corrupts a machine-readable stdout. the vault modules therefore warn
-  through `Write-MainframeWarning` (in `windows/mainframe-paths.psm1`), which writes to
+  through `Write-MainframeWarning` (in `windows/mainframe.ps1`), which writes to
   stderr. never use `Write-Warning` in a module that a cli reads stdout from.
 - **`Write-Host` is the information stream, not the success stream.** a cli
   that prints its result document must use `Write-Output`, or a caller that
   captures stdout gets nothing.
 - **a literal `'.config\mainframe'` never matches on linux.** the profile root
-  has to be resolved through `windows/mainframe-paths.psm1` (`Get-MainframeProfileRoot`,
+  has to be resolved through `windows/mainframe.ps1` (`Get-MainframeProfileRoot`,
   `Get-MainframeConfigValue`). the same goes for `Join-Path $HOME "Downloads\$file"`
   - on linux that looks for a file NAMED `Downloads\file` inside `$HOME`. use
   two joins.
@@ -2769,7 +2769,7 @@ install and a failure to start is a loud error, never a silent skip.
   copies the modules into a temporary directory keeps the checkout's own
   `mainframe.config.json` from shadowing the test's profile root.
 - **`ConvertFrom-Json` on a JSON array returns ONE object in Windows
-  PowerShell 5.1** and many in pwsh 7. `windows/mainframe-json.psm1`
+  PowerShell 5.1** and many in pwsh 7. `windows/mainframe.ps1`
   (`ConvertFrom-JsonArray`) is the one place that difference is handled.
 - **the config lookup does NOT check the working directory any more**
   (superseded 2026-11-15, M7): a crafted `mainframe.config.json` in a
@@ -2781,7 +2781,7 @@ install and a failure to start is a loud error, never a silent skip.
   leak down process trees to long-running services (like the automata monitor).
   When a web dashboard spawns a helper to request vault approval, relying on inherited
   environment variables misidentifies the browser request as coming from the agent that
-  spawned the server. `Get-CallerIdentity` in `windows/vault-approval.psm1` checks prompt context
+  spawned the server. `Get-CallerIdentity` in `windows/mainframe.ps1` checks prompt context
   and process ancestry (e.g. `node.exe` running `monitor`/`server.ts`) first, guaranteeing
   that browser/dashboard triggers are tagged as `browser` with `Model = $null` and an
   appropriate browser icon (`🌐`) rather than an AI agent.
@@ -2856,7 +2856,7 @@ central one's differ).
 loose inside quick, so a file restored from the encrypted blob and the same file
 restored from the quick tree land in exactly ONE place. the single translation
 is `AppData/Roaming/mainframe/accounts` -> the profile root, which is the rule
-`windows/mainframe-paths.psm1` already encodes (`$XDG_CONFIG_HOME/mainframe` on linux).
+`windows/mainframe.ps1` already encodes (`$XDG_CONFIG_HOME/mainframe` on linux).
 
 - an `XDG_CONFIG_HOME` pointing OUTSIDE `$HOME` is **refused**, not ignored:
   activation copies staging INTO the live home, so the profiles would otherwise
@@ -3029,3 +3029,34 @@ cron tools, so the destination restores them from `~/CRONS.md` after
 the script finishes, then reports. the migration workflow lives in
 automata-private `muse.ai/` (build-pack.py, the migration doc); this
 script is the destination-side half of it.
+
+## god script: vault merged into windows/mainframe.ps1 (2026-11-22)
+
+user order (the god-script rule): no more tiny scattered scripts - one
+script does everything. vault was the first group merged: the 6 entry
+points (vault-flow, vault-lock, expire-vault-session, seal-bw-email,
+new-bootstrap-link, rotate-ntfy-topic) + the 6 modules they used
+(vault-secret, vault-approval, vault-ntfy-server, mainframe-paths,
+mainframe-json, mainframe-sync) all live in `windows/mainframe.ps1`
+now, as `vault unlock|lock|status|expire|seal-email|bootstrap-link|
+rotate-topic`. the old files are deleted. every caller dotsources the
+god script instead of Import-Module, and the linux side shells out to
+`mainframe.ps1 vault unlock`. expiry registration is OPT-IN now:
+`vault unlock` no longer registers the MainframeVaultExpiry task
+unless -ScheduleExpiry is passed (the user deleted that task the same
+day). merge tooling (AST extractor + assembler + caller updaters) is
+saved in the muse workspace under mainframe-god-script/ for the next
+groups (backup, restore).
+
+two traps the merge proved, both module-vs-dot-source differences:
+1. dot-sourcing a script with a top-level param block BINDS ITS PARAMS
+   IN YOUR SCOPE. mainframe.ps1 declares $Group/$Action/$Rest, so the
+   mock-rest harness lost its $Action (clobbered to $null) the moment
+   it dot-sourced the god script. capture what you need BEFORE the
+   dot-source (the harness keeps $harnessAction).
+2. $isWindows = ... is legal inside a module but THROWS in a
+   dot-sourced script: variable names are case-insensitive, $IsWindows
+   is a read-only automatic variable, and a module's session state was
+   the only thing letting the assignment shadow it. renamed to
+   $onWindows. sweep for assignments to automatic-variable names
+   ($isWindows/$isLinux/$isMacOS/...) before merging any more modules.

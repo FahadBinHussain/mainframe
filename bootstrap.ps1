@@ -1,7 +1,7 @@
 #Requires -Version 7
 # Native Windows launcher; boot.ps1 owns all machine changes.
 # -BootstrapLink <url> downloads the config bundle from the relay
-# (permanent link from windows/new-bootstrap-link.ps1) and places it as
+# (permanent link from windows/mainframe.ps1 vault bootstrap-link) and places it as
 # mainframe.config.json before the bootstrap runs. -ConfigOnly places the
 # config and stops (no bootstrap dispatched).
 [CmdletBinding()]
@@ -61,7 +61,7 @@ function Invoke-MainframeNativeBootstrap {
 
 function Get-MainframeBootstrapProfileRoot {
     # standalone: this launcher runs on a fresh machine where the repo is
-    # not cloned yet, so it cannot import mainframe-paths.psm1. the
+    # not cloned yet, so it cannot dot-source mainframe.ps1. the
     # profile root is %APPDATA%\mainframe on windows; MAINFRAME_PROFILE_ROOT
     # overrides it (tests + the test runner's isolation).
     if ($env:MAINFRAME_PROFILE_ROOT) { return $env:MAINFRAME_PROFILE_ROOT }
@@ -113,10 +113,10 @@ function Install-MainframeBootstrapConfig {
         try {
             $config = $raw | ConvertFrom-Json -ErrorAction Stop
         } catch {
-            throw "the downloaded bundle is not valid JSON. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run. ($($_.Exception.Message))"
+            throw "the downloaded bundle is not valid JSON. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/mainframe.ps1 vault bootstrap-link -PushOnly) and re-run. ($($_.Exception.Message))"
         }
         if (-not $config.ntfyTopic -or ($config.ntfyTopic -notmatch '^[a-z0-9]{32}$')) {
-            throw 'the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/new-bootstrap-link.ps1 -PushOnly) and re-run.'
+            throw 'the downloaded bundle has no valid ntfyTopic - it is corrupt or not a config. re-run to retry the download; if it persists, the bundle itself is bad - re-push it from an existing machine (windows/mainframe.ps1 vault bootstrap-link -PushOnly) and re-run.'
         }
         Move-Item -LiteralPath $tempFile -Destination $configPath -Force
         return $configPath

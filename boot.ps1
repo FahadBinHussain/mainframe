@@ -111,25 +111,18 @@ if (Test-Path $MainframeDir) { Set-Location $MainframeDir; git pull --rebase 2>$
 else { git clone "https://github.com/$Repo.git" $MainframeDir | Out-Null; if ($LASTEXITCODE -ne 0) { Die "git clone failed (no network? github blocked?)" } }
 Set-Location $MainframeDir
 
-$approvalModule = Join-Path $MainframeDir 'windows\vault-approval.psm1'
-if (Test-Path -LiteralPath $approvalModule) {
-    Import-Module $approvalModule -Force -DisableNameChecking
-}
-$pathsModule = Join-Path $MainframeDir 'windows\mainframe-paths.psm1'
-if (-not (Test-Path -LiteralPath $pathsModule)) { Die "mainframe-paths.psm1 is missing from $MainframeDir - the profile-root rules live there. Pull the newest mainframe and re-run." }
-Import-Module $pathsModule -Force -DisableNameChecking
-$vaultModule = Join-Path $MainframeDir 'windows\vault-secret.psm1'
-if (-not (Test-Path -LiteralPath $vaultModule)) { Die "vault-secret.psm1 is missing from $MainframeDir - the vault rules live there. Pull the newest mainframe and re-run." }
-Import-Module $vaultModule -Force -DisableNameChecking
+$godScript = Join-Path $MainframeDir 'windows\mainframe.ps1'
+if (-not (Test-Path -LiteralPath $godScript)) { Die "mainframe.ps1 is missing from $MainframeDir - the vault rules live there. Pull the newest mainframe and re-run." }
+. $godScript
 
 # --- sealed bw email (bw-email.enc.json) ---
-# publish-backup.ps1 / seal-bw-email.ps1 seal the vault account email with a
+# publish-backup.ps1 / mainframe.ps1 vault seal-email seal the vault account email with a
 # key derived from the master password (PBKDF2-HMAC-SHA256, 600k iterations,
 # AES-256-CBC, HMAC-SHA256 over salt|iv|ciphertext). The blob committed to
 # this (public) repo is ciphertext only: useless without the master
 # password, which setup asks for anyway. Unsealing it means a fresh machine
 # never has to type the email address.
-# The unseal itself lives in vault-secret.psm1 (Unseal-BwEmail) - windows and
+# The unseal itself lives in mainframe.ps1 (Unseal-BwEmail) - windows and
 # linux must unseal it the same way, so there is exactly one implementation.
 
 # --- 2. bitwarden unlock (1-tap mobile approval or master password) ---

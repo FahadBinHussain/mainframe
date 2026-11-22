@@ -38,7 +38,7 @@ function Assert-NotContains($Haystack, [string]$Needle, [string]$Message) {
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$target = Join-Path $repoRoot 'windows/rotate-ntfy-topic.ps1'
+$target = Join-Path $repoRoot 'windows/mainframe.ps1'
 $harness = Join-Path $PSScriptRoot 'mock-rest-harness.ps1'
 $mockBwSource = Join-Path $PSScriptRoot 'mock-bw.py'
 $topicItemName = 'github.com/FahadBinHussain/mainframe / mainframe.ntfy-topic'
@@ -59,7 +59,7 @@ if (Test-Path -LiteralPath $checkoutConfig) {
 # $tokens/$errs are initialized first).
 $tokens = $null; $errs = $null
 [void][System.Management.Automation.Language.Parser]::ParseFile($target, [ref]$tokens, [ref]$errs)
-Assert-True ($errs.Count -eq 0) 'rotate-ntfy-topic.ps1 parses'
+Assert-True ($errs.Count -eq 0) 'mainframe.ps1 parses'
 
 $python = Get-Command python3 -ErrorAction SilentlyContinue
 if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
@@ -124,7 +124,7 @@ function Get-RestCalls {
 function Invoke-Target {
     param([hashtable]$TargetArgs = @{})
     $env:MF_HARNESS_ARGS = (ConvertTo-Json -InputObject $TargetArgs -Compress)
-    $outLines = & $pwshExe -NoProfile -File $harness -Target $target 2>&1 6>&1
+    $outLines = & $pwshExe -NoProfile -File $harness -Target $target -Action Invoke-RotateNtfyTopic 2>&1 6>&1
     $code = $LASTEXITCODE
     return [pscustomobject]@{ Code = $code; Output = ($outLines | Out-String) }
 }
@@ -222,7 +222,7 @@ try {
     Assert-Contains $run.Output 'bootstrap bundle: NOT pushed' 'rotation without a link reports the failed push'
     Assert-Contains $run.Output 'was ever created' 'rotation without a link names the cause'
     Assert-Contains $run.Output 'BOOTSTRAP BUNDLE PUSH FAILED' 'rotation without a link fails loudly at the end'
-    Assert-Contains $run.Output 'new-bootstrap-link.ps1' 'rotation without a link gives the recovery'
+    Assert-Contains $run.Output 'mainframe.ps1 vault bootstrap-link' 'rotation without a link gives the recovery'
     Assert-Equal $script:fakeNewTopic (Get-VaultItemByName $topicItemName).notes 'the vault rotation still happened'
     Assert-Equal $script:fakeNewTopic (Get-TestConfig).ntfyTopic 'the local rotation still happened'
     Assert-Equal 0 (Get-RestCalls).Count 'rotation without a link makes no relay call'
@@ -235,7 +235,7 @@ try {
     $run = Invoke-Target -TargetArgs @{ Topic = $script:fakeNewTopic }
     Assert-Equal 1 $run.Code 'rotation with a refused PUT exits 1'
     Assert-Contains $run.Output 'BOOTSTRAP BUNDLE PUSH FAILED' 'a refused PUT fails loudly at the end'
-    Assert-Contains $run.Output 'new-bootstrap-link.ps1 -PushOnly' 'a refused PUT gives the exact recovery'
+    Assert-Contains $run.Output 'mainframe.ps1 vault bootstrap-link -PushOnly' 'a refused PUT gives the exact recovery'
     Assert-Contains $run.Output 'NOT rolled back' 'a refused PUT says the rotation stands'
     Assert-Equal $script:fakeNewTopic (Get-VaultItemByName $topicItemName).notes 'the vault rotation still happened'
     Assert-Equal $script:fakeNewTopic (Get-TestConfig).ntfyTopic 'the local rotation still happened'
@@ -250,7 +250,7 @@ try {
     Assert-Equal 1 $run.Code 'rotation with a bad relay base exits 1'
     Assert-Contains $run.Output 'does not end in /ntfy' 'a bad relay base names itself'
     Assert-Contains $run.Output 'fix ntfyServer' 'a bad relay base gives the fix'
-    Assert-Contains $run.Output 'new-bootstrap-link.ps1 -PushOnly' 'a bad relay base gives the re-push recovery'
+    Assert-Contains $run.Output 'mainframe.ps1 vault bootstrap-link -PushOnly' 'a bad relay base gives the re-push recovery'
     Assert-Equal $script:fakeNewTopic (Get-TestConfig).ntfyTopic 'the local rotation still happened'
     Assert-Equal 0 (Get-RestCalls).Count 'a bad relay base makes no relay call'
 

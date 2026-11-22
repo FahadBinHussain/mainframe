@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fake `bw` for the bootstrap/rotate tests (mock-bw.py).
 
-Implements only the subcommands windows/new-bootstrap-link.ps1 and
-windows/rotate-ntfy-topic.ps1 use, against a JSON file in
+Implements only the subcommands windows/mainframe.ps1 vault bootstrap-link and
+vault rotate-topic use, against a JSON file in
 MF_MOCK_BW_STATE. No network, no real vault, obvious fake values only.
 
 State: $MF_MOCK_BW_STATE/items.json (a JSON array of vault items).

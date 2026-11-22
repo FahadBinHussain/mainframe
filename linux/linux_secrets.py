@@ -25,7 +25,7 @@ four things and refuses to improvise anything the manifest does not name:
 The mapping is deliberately narrow. A Windows profile path is not a Linux path,
 so `{AppData}\\mainframe\\accounts` cannot become `~/.config/mainframe/accounts`
 by substitution: this module maps only the items whose Linux destination is
-already the documented one (`mainframe-paths.psm1`), and reports every other
+already the documented one (`mainframe.ps1`), and reports every other
 item as blocked with the reason. That is the same contract the rest of the
 linux flow follows - unproven state is preserved, never silently activated.
 """
@@ -150,7 +150,7 @@ def _aes_extra(extra: bytes) -> tuple[int | None, int | None]:
 def _password_lines(password: str) -> list[str]:
     """One candidate per non-empty line, in order.
 
-    vault-flow hands over the mainframe-production notes verbatim, and the
+    vault unlock hands over the mainframe-production notes verbatim, and the
     notes are two lines - the `[secrets archive password]` header, then the
     password. a single-line password is the normal case and behaves exactly
     as before; a multi-line one is tried line by line, so the notes layout
@@ -297,7 +297,7 @@ def safe_archive_path(value: str) -> str:
 # loose inside mainframe-quick.zip, so a file restored from the encrypted blob
 # and the same file restored from the quick tree land in exactly one place.
 # `AppData/Roaming/mainframe/accounts` is the one exception, and it is the rule
-# `mainframe-paths.psm1` already encodes: the profile root is
+# `mainframe.ps1` already encodes: the profile root is
 # `%APPDATA%\mainframe` on windows and `$XDG_CONFIG_HOME/mainframe` on linux.
 USERPROFILE_PREFIX = "UserProfile/"
 APPDATA_PROFILE_ITEM = "AppData/Roaming/mainframe/accounts"
@@ -342,7 +342,7 @@ def linux_target(archive_path: str, *, home: Path,
     if path == APPDATA_PROFILE_ITEM:
         relative = f"{_profile_relative(home, environment)}/{LINUX_PROFILE_SUFFIX}"
         return relative, ("the shared profile root both platforms resolve through "
-                          "mainframe-paths.psm1; the vault session itself is not in "
+                          "mainframe.ps1; the vault session itself is not in "
                           "the archive (bitwarden is excluded), so nothing here is a "
                           "live credential store")
     if path.startswith(USERPROFILE_PREFIX):

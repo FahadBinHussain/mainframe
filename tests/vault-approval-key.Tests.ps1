@@ -18,7 +18,7 @@
 #     its own pair and proceeds - no registration step, no stop
 #   - the credential resolver picks the right shape
 $ErrorActionPreference = 'Stop'
-$module = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\vault-approval.psm1'))
+$godScript = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\windows\mainframe.ps1'))
 $page = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../docs/vault-tab.html'))
 
 $script:checks = 0
@@ -41,10 +41,10 @@ function Assert-NotContains($Haystack, [string]$Needle, [string]$Message) {
 
 # 1. the module parses
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($module, [ref]$null, [ref]$parseErrors)
-Assert-True ($parseErrors.Count -eq 0) 'vault-approval.psm1 parses'
+[void][System.Management.Automation.Language.Parser]::ParseFile($godScript, [ref]$null, [ref]$parseErrors)
+Assert-True ($parseErrors.Count -eq 0) 'mainframe.ps1 parses'
 
-Import-Module $module -Force -DisableNameChecking
+. $godScript
 
 # 2. the key loads and its public half is a real SPKI
 $publicKey = Get-VaultApprovalPublicKey
@@ -158,7 +158,7 @@ try {
 
 # 7. there is no credential resolver any more - topic-only auth means no
 #    header or token is ever resolved, sent, or read from the config
-$source = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\windows\vault-approval.psm1') -Raw
+$source = Get-Content -LiteralPath $godScript -Raw
 Assert-True ($source -notmatch 'function Get-VaultNtfyCredential') 'there is no credential resolver'
 Assert-True ($source -notmatch 'MAINFRAME_NTFY_AUTH') 'there is no ntfy auth environment variable'
 Assert-True ($source -notmatch "'ntfyAuth'") 'the config carries no ntfy auth key'

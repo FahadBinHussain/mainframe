@@ -188,8 +188,8 @@ try {
 
         $verifiedSourceRoot = $null
 # the profile root is resolved by one shared module, so windows and linux
-# read the same place (see mainframe-paths.psm1).
-Import-Module (Join-Path $PSScriptRoot 'mainframe-paths.psm1') -Force -DisableNameChecking
+# read the same place (see mainframe.ps1).
+. (Join-Path $PSScriptRoot 'mainframe.ps1')
 
         $accountsRoot = Get-MainframeAccountsDir
         if ($verifiedWacliRoot -and [string]::Equals([System.IO.Path]::GetFullPath($source).TrimEnd([char[]]@('\', '/')),
