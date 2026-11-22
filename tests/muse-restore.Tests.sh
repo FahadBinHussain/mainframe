@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# muse/restore.sh backup step: --no-preserve=ownership + completion marker.
-# regression test for the maru 2026-11-22 failure: plain `cp -a` died on
-# the root-owned memory dir ("failed to preserve ownership: Operation not
-# permitted") because the destination vm's mount refuses chown even as
-# root, and set -e aborted the restore before extracting anything.
+# muse/restore.sh backup + extract steps: --no-preserve=ownership +
+# completion marker, and -m + --overwrite + the IDENTITY.md stdout step.
+# regression tests for the maru 2026-11-22 failures:
+#   1. plain `cp -a` died on the root-owned memory dir ("failed to preserve
+#      ownership: Operation not permitted") because the destination vm's
+#      mount refuses chown even as root, and set -e aborted the restore
+#      before extracting anything.
+#   2. plain `tar -xzf` died on the pre-existing root-owned files: the
+#      sticky home dir gives "Cannot open: File exists", and with
+#      --overwrite the metadata restore gives "Cannot utime / Cannot change
+#      mode: Operation not permitted" (tar is not the owner). -m skips the
+#      utime, tar skips a chmod whose mode already matches, and IDENTITY.md
+#      (0644 in the pack vs 0660 on disk) rides through stdout instead.
 #
 # the mock cp below reproduces that vm: plain `cp -a` fails, and only
-# --no-preserve=ownership passes through to the real cp. if restore.sh
-# ever regresses to plain `cp -a`, case A fails here instead of on a
-# live destination.
+# --no-preserve=ownership passes through to the real cp. case D runs the
+# whole restore as nobody:nogroup against a sticky home of root-owned
+# files — the full squash reproduction.
 #
 # the verify-pack.py in the test pack is a small double of
 # muse.ai/verify-pack.py's local mode (same checks over the same manifest
@@ -40,14 +48,16 @@ if [ "\$has_a" -eq 1 ] && [ "\$has_no_preserve" -eq 0 ]; then
 fi
 exec "$REAL_CP" "\$@"
 EOF
-chmod +x "$root/bin/cp"
+chmod 0755 "$root/bin/cp"
 # mock git: pull-conventions.sh runs `git pull --ff-only`; the test clone
 # is already current, so a no-op success is the honest double.
 cat > "$root/bin/git" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$root/bin/git"
+chmod 0755 "$root/bin/git"
+# 0755, not +x: this shell's umask is 007, so +x leaves 771 — case D runs
+# as nobody, and a script needs world READ to execute, not just +x.
 export PATH="$root/bin:$PATH"
 
 # prove the mock cp is wired: plain -a must fail through it.
@@ -83,6 +93,11 @@ mkdir -p "$pack_src/workspace/goals/g1" "$pack_src/workspace/custom-skills/s1" \
 printf '# MEMORY.md (packed)\npacked memory\n' > "$pack_src/MEMORY.md"
 printf '# AGENTS.md (packed)\npacked agents\n' > "$pack_src/AGENTS.md"
 printf -- '- **Name:** \n' > "$pack_src/IDENTITY.md"
+# modes faithful to the real 20261122 pack: standing files 0660, but the
+# rewritten IDENTITY.md lands at 0644 (build-pack.py hardcoded it before
+# the mode-preserve fix) — the mismatch restore.sh works around.
+chmod 0660 "$pack_src/MEMORY.md" "$pack_src/AGENTS.md"
+chmod 0644 "$pack_src/IDENTITY.md"
 printf 'goal\n' > "$pack_src/workspace/goals/g1/.keep"
 printf 'skill\n' > "$pack_src/workspace/custom-skills/s1/.keep"
 cat > "$pack_src/workspace/muse-migration/tools/verify-pack.py" <<'PYEOF'
@@ -157,10 +172,11 @@ run_restore() {
 }
 
 # --- case A: fresh restore ----------------------------------------------
-# the destination vm exports TAR_OPTIONS=-k (keep-old-files), which makes
-# tar refuse to replace the standing files; the test env reproduces it so
-# a regression to a bare `tar -xzf` fails here instead of on a live
-# destination (maru 2026-11-22).
+# TAR_OPTIONS=-k would make tar refuse to replace the standing files; the
+# test env sets it so a regression to a bare `tar -xzf` fails here instead
+# of on a live destination. (maru 2026-11-22: its TAR_OPTIONS was actually
+# unset — the "File exists" came from the sticky home dir, covered by
+# case D below; the clear in restore.sh stays as defence.)
 export TAR_OPTIONS=-k
 home1="$root/home1"
 make_home "$home1"
@@ -199,5 +215,49 @@ pass
 pass
 grep -Fq "# MEMORY.md (original)" "$home2/MEMORY.md.pre-migration" || fail "case C: stale MEMORY.md backup was kept, not redone"
 pass
+
+# --- case D: maru-like squashed mount -------------------------------------
+# the destination vm's shell is root in-namespace but its home mount maps
+# root to an unprivileged uid: chown fails, home is sticky (plain tar gets
+# "File exists"), and tar restoring mtime/mode on the pre-existing
+# root-owned files fails "Operation not permitted". reproduce it by
+# running the restore as nobody:nogroup against a sticky home holding
+# root-owned 0660 files. needs root + setpriv, so it skips on CI.
+if [ "$(id -u)" -eq 0 ] && command -v setpriv >/dev/null 2>&1; then
+  home4="$root/home4"
+  make_home "$home4"
+  chown -R root:nogroup "$home4"
+  chmod 0660 "$home4"/*.md "$home4/config/skills.yaml"
+  chmod 1777 "$home4"
+  chmod 0711 "$root"
+  chmod 0644 "$root/test-pack.tar.gz"
+  chmod 0755 "$root/bin"
+  # the repo clone is 770 root:root, unreadable to nobody — stage the
+  # script + conventions into the temp tree (copied fresh, so it is the
+  # current script under test) with world-readable modes.
+  mkdir -p "$root/mf/muse" "$root/mf/.git"
+  cp "$repo/muse/restore.sh" "$root/mf/muse/restore.sh"
+  cp "$repo/muse/pull-conventions.sh" "$root/mf/muse/pull-conventions.sh"
+  cp "$repo/muse/CONVENTIONS.md" "$root/mf/muse/CONVENTIONS.md"
+  chmod 0755 "$root/mf" "$root/mf/muse" "$root/mf/.git"
+  chmod 0644 "$root/mf/muse/restore.sh" "$root/mf/muse/CONVENTIONS.md"
+  chmod 0755 "$root/mf/muse/pull-conventions.sh"
+  HOME="$home4" PATH="$root/bin:$PATH" TAR_OPTIONS=-k \
+    setpriv --reuid=nobody --regid=nogroup --clear-groups \
+    bash "$root/mf/muse/restore.sh" --pack-file "$root/test-pack.tar.gz" \
+    --sha256 "$pack_sha" --pack-size "$pack_size" \
+    --test-skip-mainframe --mainframe-dir "$root/mf" > "$root/output" 2>&1 \
+    || { cat "$root/output" >&2; fail "case D: restore exited non-zero on the squashed mount"; }
+  grep -Fq "RESTORE DONE" "$root/output" || { cat "$root/output" >&2; fail "case D: no RESTORE DONE"; }
+  pass
+  grep -Fq "# MEMORY.md (packed)" "$home4/MEMORY.md" || fail "case D: MEMORY.md not replaced by the pack"
+  pass
+  grep -Fq -- "- **Name:** Maru" "$home4/IDENTITY.md" || fail "case D: own name not restored into IDENTITY.md"
+  pass
+  [ -f "$home4/.pre-migration.complete" ] || fail "case D: completion marker missing"
+  pass
+else
+  echo "SKIP: case D (maru-like squash) needs root + setpriv"
+fi
 
 echo "muse-restore: $checks checks passed"

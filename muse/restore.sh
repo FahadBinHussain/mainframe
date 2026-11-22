@@ -153,12 +153,26 @@ done
 touch "${HOME}/.pre-migration.complete"
 
 echo "extracting the pack ..."
-# clear TAR_OPTIONS and pass --overwrite: on the destination vm tar
-# refuses to replace the standing files ("Cannot open: File exists",
-# maru 2026-11-22) — the exact error TAR_OPTIONS=-k produces. the
-# backup step above already saved the originals, so overwriting is safe.
-TAR_OPTIONS= tar -xzf "$PACK_PATH" -C "$HOME" --no-same-owner --overwrite \
+# the destination vm's shell is root in-namespace but its home mount maps
+# root to an unprivileged uid (maru 2026-11-22, proven by reproduction):
+#   - home is sticky, so plain tar refuses existing files with
+#     "Cannot open: File exists" -> --overwrite (unlinks first, then the
+#     group-write open succeeds; the mapped uid is in nogroup).
+#   - tar restoring mtime/mode on the pre-existing root-owned files fails
+#     "Operation not permitted" (not the owner) -> -m skips the utime, and
+#     tar skips a chmod whose mode already matches.
+#   - IDENTITY.md is the one mode mismatch: build-pack.py rewrote it at
+#     0644 while the destination's copy is 0660, so it rides separately
+#     through stdout — a plain shell redirect writes bytes only, no
+#     metadata. (build-pack.py now preserves the source mode, so future
+#     packs match; the separate step stays as defence for older packs.)
+# TAR_OPTIONS is cleared as defence (it was unset on maru — the "File
+# exists" came from the sticky dir, not from -k).
+TAR_OPTIONS= tar -xzf "$PACK_PATH" -C "$HOME" --no-same-owner --overwrite -m \
+  --exclude='IDENTITY.md' \
   || die "tar extract failed"
+TAR_OPTIONS= tar -xOzf "$PACK_PATH" IDENTITY.md > "${HOME}/IDENTITY.md" \
+  || die "IDENTITY.md extract failed"
 
 # restore this account's OWN name: the packed IDENTITY.md has a blank Name
 # (the source account's name never rides in a pack). copy the Name line
