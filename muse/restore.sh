@@ -121,18 +121,36 @@ case "$PACK_PATH" in
 esac
 
 # back up this account's own files FIRST (never delete anything). a path
-# that already has a .pre-migration backup keeps the first one.
+# that already has a .pre-migration backup keeps the first one — but only
+# if the backup run that made it COMPLETED. a failed run leaves partial
+# backups behind; they are removed and redone, which is safe only when no
+# extraction has happened yet — the marker proves the loop completed, and
+# pack-manifest.json (carried near the front of the tar) proves a previous
+# extraction, so a completed older restore (no marker — it predates the
+# marker) still keeps its backups. without either signal the sources are
+# untouched, because extraction runs after this loop.
+# --no-preserve=ownership: the destination vm's memory dir is root-owned
+# and its mount refuses chown even as root (cp -a died there with
+# "failed to preserve ownership: Operation not permitted", maru 2026-11-22);
+# ownership is meaningless for a backup the same user reads back. the
+# extract step already uses --no-same-owner for the same reason.
 BACKUP_PATHS="MEMORY.md SOUL.md AGENTS.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md PROACTIVE_PREFERENCES.md config/skills.yaml .config/mainframe/mainframe.config.json .config/mainframe/approval-signing.key .config/mainframe/bw-email.enc.json memory dreams/alignment workspace/goals workspace/custom-skills workspace/custom-connectors workspace/your_files workspace/user workspace/cron.d"
+if [ ! -e "${HOME}/.pre-migration.complete" ] && [ ! -e "${HOME}/pack-manifest.json" ]; then
+  for rel in $BACKUP_PATHS; do
+    rm -rf "${HOME}/${rel}.pre-migration"
+  done
+fi
 for rel in $BACKUP_PATHS; do
   if [ -e "${HOME}/${rel}" ]; then
     if [ -e "${HOME}/${rel}.pre-migration" ]; then
       echo "KEEP (already backed up): ${rel}.pre-migration"
     else
-      cp -a "${HOME}/${rel}" "${HOME}/${rel}.pre-migration"
+      cp -a --no-preserve=ownership "${HOME}/${rel}" "${HOME}/${rel}.pre-migration"
       echo "backed up: ${rel} -> ${rel}.pre-migration"
     fi
   fi
 done
+touch "${HOME}/.pre-migration.complete"
 
 echo "extracting the pack ..."
 tar -xzf "$PACK_PATH" -C "$HOME" --no-same-owner \
