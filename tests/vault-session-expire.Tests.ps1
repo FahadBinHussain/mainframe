@@ -63,7 +63,7 @@ if ($env:OS -eq 'Windows_NT') {
         ')'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
     # fake schedulers: log the full command line, exit 0 - so the
-    # opt-in unlock in section 5c registers a scheduled expiry against
+    # unlock in section 5b registers a scheduled expiry against
     # the fakes, never a real schtasks task / systemd timer.
     @('@echo off', "echo schtasks %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'schtasks.cmd') -Encoding ASCII
     @('@echo off', "echo systemd-run %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemd-run.cmd') -Encoding ASCII
@@ -220,31 +220,16 @@ try {
     Assert-NotContains (Get-Calls) 'login' 'a signed-in cli does NOT need a login after an expiry'
     Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key is cached after the unlock'
     Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI is still signed in after the unlock'
-    # 5b. expiry registration is OPT-IN (user order 2026-11-22 - the
-    # MainframeVaultExpiry task was deleted): a plain unlock registers
-    # nothing - no expiry.json, no scheduler call.
-    Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'a plain unlock registers no scheduled expiry (no expiry.json)'
-    Assert-True ([string]::IsNullOrWhiteSpace((Get-SchedCalls))) 'a plain unlock calls no scheduler'
-    # 5c. -ScheduleExpiry opts back in: the unlock registers the
-    # scheduled expiry (time-based, not lazy): expiry.json exists and
-    # the fake scheduler was called.
-    Reset-FakeBw -State 'locked'
-    Reset-SchedLog
-    function global:Get-VaultMasterPassword {
-        param([string]$PromptContext, [int]$TimeoutSeconds, [string]$Agent, [string]$Model, [DateTime]$StartTimeUtc)
-        return 'TestPassword123!'
-    }
-    try {
-        $ok = Ensure-VaultSession -TimeoutSeconds 5 -ScheduleExpiry
-    } finally {
-        Remove-Item Function:\Get-VaultMasterPassword -ErrorAction SilentlyContinue
-    }
-    Assert-True $ok 'Ensure-VaultSession -ScheduleExpiry succeeds'
-    Assert-True (Test-Path -LiteralPath $expiryFile) 'the opt-in unlock registers a scheduled expiry (expiry.json exists)'
+    # 5b. expiry is ENFORCED (user order 2026-11-22): the plain unlock
+    # registers the scheduled expiry (time-based, not lazy): expiry.json
+    # exists and the fake scheduler was called, 12 hours out (the 720
+    # minute default - the mock approval sends no TTL, so the default
+    # applies).
+    Assert-True (Test-Path -LiteralPath $expiryFile) 'the unlock registers a scheduled expiry (expiry.json exists)'
     if ($env:OS -eq 'Windows_NT') {
-        Assert-Contains (Get-SchedCalls) '/Create' 'the opt-in unlock registration creates a schtasks task (fake schtasks)'
+        Assert-Contains (Get-SchedCalls) '/Create' 'the unlock registration creates a schtasks task (fake schtasks)'
     } else {
-        Assert-Contains (Get-SchedCalls) 'systemd-run --on-active=3600s' 'the opt-in unlock registration schedules 60 minutes out (fake systemd-run)'
+        Assert-Contains (Get-SchedCalls) 'systemd-run --on-active=43200s' 'the unlock registration schedules 12 hours out (fake systemd-run)'
     }
     $null = Unregister-VaultSessionExpiry
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'unregister removes expiry.json after the unlock'

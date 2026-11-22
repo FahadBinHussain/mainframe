@@ -201,11 +201,11 @@ try {
     $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX = [string][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $trusted = Get-VaultSession
     Assert-Equal 'fakesessionkey0123456789abcdef' $trusted 'a fresh marked env session is trusted'
-    # 2c. no file + BW_SESSION + stale marker (70m old, 60m default TTL)
+    # 2c. no file + BW_SESSION + stale marker (730m old, 720m default TTL)
     # -> expired for real: lock runs, env cleared, null returned.
     Reset-FakeBw
     $env:BW_SESSION = 'fakesessionkey0123456789abcdef'
-    $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX = [string][DateTimeOffset]::UtcNow.AddMinutes(-70).ToUnixTimeSeconds()
+    $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX = [string][DateTimeOffset]::UtcNow.AddMinutes(-730).ToUnixTimeSeconds()
     $stale = Get-VaultSession
     Assert-True ([string]::IsNullOrWhiteSpace($stale)) 'a stale marked env session returns null'
     Assert-Contains (Get-Calls) 'lock' 'a stale env session triggers bw lock'
@@ -299,10 +299,11 @@ try {
         Assert-True (-not (Test-ProcessAlive ([int]$state.sleeperPid))) 'unregister kills the sleeper'
         Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'unregister deletes expiry.json after killing the sleeper'
     }
-    # 3f. Set-VaultSessionKey -ScheduleExpiry wires unlock to registration.
+    # 3f. Set-VaultSessionKey wires unlock to registration (expiry is
+    # enforced: every unlock registers, no flag needed).
     Reset-FakeBw; Reset-SchedLog
-    Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' -TtlMinutes 60 -ScheduleExpiry | Out-Null
-    Assert-True ($null -ne (Get-ExpiryState)) 'Set-VaultSessionKey -ScheduleExpiry registers the expiry'
+    Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' -TtlMinutes 60 | Out-Null
+    Assert-True ($null -ne (Get-ExpiryState)) 'Set-VaultSessionKey registers the expiry'
     if ($env:OS -eq 'Windows_NT') {
         Assert-Contains (Get-SchedCalls) '/Create' 'the unlock registration creates a schtasks task (fake schtasks)'
     } else {
@@ -367,7 +368,11 @@ try {
     # the lazy rule (file age vs TTL) and still expires.
     Reset-FakeBw; Reset-SchedLog
     Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' | Out-Null
-    (Get-Item -LiteralPath $sessionFile).LastWriteTime = (Get-Date).AddMinutes(-70)
+    # Set-VaultSessionKey registers the expiry now (enforced) - remove
+    # the state file so this section really tests the no-state fallback.
+    Remove-Item -LiteralPath $expiryFile -Force -ErrorAction SilentlyContinue
+    Reset-SchedLog
+    (Get-Item -LiteralPath $sessionFile).LastWriteTime = (Get-Date).AddMinutes(-730)
     $run = Invoke-Wrapper
     Assert-Equal 0 $run.ExitCode 'the wrapper exits 0 on the no-state path'
     Assert-Contains $run.Output 'expiring it' 'the wrapper expires a due session even with no state file'
@@ -422,7 +427,11 @@ try {
     $statusOut = (& $bw status | Out-String | ConvertFrom-Json)
     Assert-Equal 'locked' $statusOut.status 'sleeper e2e: bw status reports locked (the cli stays signed in) after the TTL mark'
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'sleeper e2e: expiry.json is cleaned up after firing'
-    Assert-True (-not (Test-ProcessAlive $e2ePid)) 'sleeper e2e: no sleeper process is left behind'
+    # the file disappears mid-cleanup - give the sleeper a few seconds to
+    # finish its verify + unregister and exit before asserting it is gone
+    # (an immediate check raced and failed once, 2026-11-22).
+    $exited = Wait-ForCondition -Test { -not (Test-ProcessAlive $e2ePid) } -TimeoutSeconds 15
+    Assert-True $exited 'sleeper e2e: no sleeper process is left behind'
 
     # 8. END TO END (real systemd timer, linux only): the preferred linux
     # mechanism fires the real wrapper through the real system bus. if the

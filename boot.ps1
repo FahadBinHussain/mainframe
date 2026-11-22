@@ -337,7 +337,7 @@ if ($bwStatus.status -ne 'unlocked') {
     # vault module, so the file is 0600 + atomic and a scheduled expiry
     # runs at the default TTL even with no vault use after boot (the same
     # mechanism as the approval flow).
-    Set-VaultSessionKey -SessionKey $session -ScheduleExpiry | Out-Null
+    Set-VaultSessionKey -SessionKey $session | Out-Null
 } else {
     Write-Host 'vault already unlocked'
 }

@@ -36,7 +36,7 @@ and the two modules it uses - and both machines run it.
 | ADB auto-popup of the page | ✅ | ✅ (same module) | ✅ |
 | stale marker (`mf:expired`) | ✅ | ✅ (same module) | ✅ |
 | relay-configurable server + page | env + config | env + config + `--ntfy-server/--ntfy-topic/--pages-base` | ✅ |
-| 1-hour session cache | `%APPDATA%\mainframe\accounts\bitwarden\session.key` | `$XDG_CONFIG_HOME/mainframe/accounts/bitwarden/session.key` (mode 600) | ✅ |
+| 12-hour session cache (default) | `%APPDATA%\mainframe\accounts\bitwarden\session.key` | `$XDG_CONFIG_HOME/mainframe/accounts/bitwarden/session.key` (mode 600) | ✅ |
 | TTL key + precedence | `vaultTtlMinutes` (env > config > 60) | same | ✅ |
 | expired session locks and purges | ✅ | ✅ (same module) | ✅ |
 | lock on demand | `windows/mainframe.ps1 vault lock` | `--lock-vault` → `windows/mainframe.ps1 vault unlock -Lock` | ✅ |

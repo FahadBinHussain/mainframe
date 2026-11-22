@@ -44,6 +44,12 @@ if ($env:OS -eq 'Windows_NT') {
         '  exit /b 1'
         ')'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
+    # fake schedulers: log the call, exit 0 - Set-VaultSessionKey
+    # registers the expiry unconditionally now (enforced), so section 3's
+    # unlock must hit the fakes, never a real schtasks task.
+    @('@echo off', "echo schtasks %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'schtasks.cmd') -Encoding ASCII
+    @('@echo off', "echo systemd-run %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemd-run.cmd') -Encoding ASCII
+    @('@echo off', "echo systemctl %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemctl.cmd') -Encoding ASCII
 } else {
     $bw = Join-Path $bin 'bw'
     @(
@@ -54,12 +60,22 @@ if ($env:OS -eq 'Windows_NT') {
         'esac'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
     & chmod 755 $bw
+    # fake schedulers: log the call, exit 0 - Set-VaultSessionKey
+    # registers the expiry unconditionally now (enforced), so section 3's
+    # unlock must hit the fakes, never a real systemd timer (or a real
+    # 12-hour sleeper when systemd-run fails on a container).
+    @('#!/bin/sh', "echo `"schtasks `$*`" >> `"$root/sched-calls`"", 'exit 0') | Set-Content -LiteralPath (Join-Path $bin 'schtasks') -Encoding ASCII
+    @('#!/bin/sh', "echo `"systemd-run `$*`" >> `"$root/sched-calls`"", 'exit 0') | Set-Content -LiteralPath (Join-Path $bin 'systemd-run') -Encoding ASCII
+    @('#!/bin/sh', "echo `"systemctl `$*`" >> `"$root/sched-calls`"", 'exit 0') | Set-Content -LiteralPath (Join-Path $bin 'systemctl') -Encoding ASCII
+    & chmod 755 (Join-Path $bin 'schtasks')
+    & chmod 755 (Join-Path $bin 'systemd-run')
+    & chmod 755 (Join-Path $bin 'systemctl')
 }
 
 $savedPath = $env:PATH
 $savedProfile = $env:MAINFRAME_PROFILE_ROOT
 
-# 1. Standard plaintext master password (1-hour default)
+# 1. Standard plaintext master password (no approved TTL - the 12-hour default applies)
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 try {
     $env:PATH = "$bin$([IO.Path]::PathSeparator)$savedPath"
@@ -118,7 +134,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $sessionPath)) 'session.key removed after lock'
     Assert-True (-not (Test-Path -LiteralPath $ttlPath)) 'session.ttl removed after lock'
     Assert-True (-not $env:MAINFRAME_VAULT_APPROVED_TTL) 'env variable cleared after lock'
-    Assert-Equal 60 (Get-VaultSessionTtlMinutes) 'default TTL returns to 60'
+    Assert-Equal 720 (Get-VaultSessionTtlMinutes) 'default TTL returns to 720 (12 hours)'
 } finally {
     $rsa.Dispose()
     Remove-Item Env:MAINFRAME_VAULT_APPROVED_TTL -ErrorAction SilentlyContinue

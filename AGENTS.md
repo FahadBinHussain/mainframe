@@ -2709,7 +2709,7 @@ mark until something touched the vault. a direct
   `MAINFRAME_VAULT_SESSION_STARTED_UNIX` at unlock; an env-only session
   without the marker is refused and cleared in-process.
 - **`-AllowExpired` is gone** (zero callers). `boot.ps1` persists through
-  `Set-VaultSessionKey -ScheduleExpiry` too, so a boot unlock expires on
+  `Set-VaultSessionKey` too, so a boot unlock expires on
   the same schedule, and it uses `--passwordfile` (0600 temp file) instead
   of `BW_PASSWORD` everywhere — same as the vault modules.
 - tests: `tests/vault-session-scheduled-expiry.Tests.ps1` proves with a
@@ -2727,7 +2727,7 @@ machines drive it through `windows/mainframe.ps1 vault unlock`:
 
     pwsh -NoProfile -File windows/mainframe.ps1 vault unlock -Json [-Checkout DIR] [-BwPath PATH]
          [-NtfyTopic T] [-Server URL] [-PagesBase URL] [-OutputPath FILE]
-         [-Lock | -LockIfStale] [-ScheduleExpiry]
+         [-Lock | -LockIfStale]
 
 - `-Json` prints the result document on stdout and logs to stderr. the master
   password is NEVER in the output.
@@ -3041,12 +3041,13 @@ mainframe-json, mainframe-sync) all live in `windows/mainframe.ps1`
 now, as `vault unlock|lock|status|expire|seal-email|bootstrap-link|
 rotate-topic`. the old files are deleted. every caller dotsources the
 god script instead of Import-Module, and the linux side shells out to
-`mainframe.ps1 vault unlock`. expiry registration is OPT-IN now:
-`vault unlock` no longer registers the MainframeVaultExpiry task
-unless -ScheduleExpiry is passed (the user deleted that task the same
-day). merge tooling (AST extractor + assembler + caller updaters) is
-saved in the muse workspace under mainframe-god-script/ for the next
-groups (backup, restore).
+`mainframe.ps1 vault unlock`. expiry is ENFORCED (user order the same
+day, reversing a brief opt-in experiment): every unlock registers the
+one-shot expiry job, and the default TTL is 12 hours (720 minutes) -
+change it with vaultTtlMinutes in mainframe.config.json or the
+MAINFRAME_VAULT_TTL_MINUTES env var. merge tooling (AST extractor +
+assembler + caller updaters) is saved in the muse workspace under
+mainframe-god-script/ for the next groups (backup, restore).
 
 two traps the merge proved, both module-vs-dot-source differences:
 1. dot-sourcing a script with a top-level param block BINDS ITS PARAMS

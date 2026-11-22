@@ -15,9 +15,11 @@
       vault-secret.psm1, vault-approval.psm1, vault-ntfy-server.psm1,
       mainframe-paths.psm1, mainframe-json.psm1, mainframe-sync.psm1
 
-    the vault expiry task is OPT-IN now: `vault unlock` no longer
-    registers the MainframeVaultExpiry scheduled task unless
-    -ScheduleExpiry is passed (the user deleted that task 2026-11-22).
+    the vault expiry is ENFORCED (user order 2026-11-22): every unlock
+    registers the one-shot expiry job (schtasks / systemd / sleeper) -
+    the session ALWAYS expires at its TTL mark. default TTL is 12 hours
+    (720 minutes); change it with vaultTtlMinutes in mainframe.config.json
+    or the MAINFRAME_VAULT_TTL_MINUTES env var.
 
     dot-sourcing this file loads every function without running anything,
     so the tests import it that way instead of the old modules.
@@ -144,8 +146,8 @@ $script:VaultNtfyServerVaultItemName = 'github.com/FahadBinHussain/mainframe / m
     and listens on the single-use relay topic for client-side encrypted master password.
 #>
 
-# the profile root is resolved by one shared module, so windows and linux read
-# the same place (see mainframe-paths.psm1).
+# the profile root is resolved by one shared script, so windows and linux read
+# the same place (see Get-MainframeProfileRoot below).
 
 
 # topic-only auth: there is no ntfy credential in the design any more.
@@ -292,9 +294,9 @@ $script:VaultApprovalLockSettleSeconds = 20   # keep the turn while the caller w
 #
 # Session: read from %APPDATA%\mainframe\accounts\bitwarden\session.key (written
 # by automata-private\bitwarden.com\unlock.ps1 or 1-tap mobile approval) or $env:BW_SESSION.
-# Sessions expire after 1 hour by default (configurable via MAINFRAME_VAULT_TTL_MINUTES or
-# mainframe.config.json vaultTtlMinutes); a 1-tap mobile approval grants up to 12 hours
-# (720 minutes, the max - the approval page's ttl, clamped in vault-approval.psm1).
+# Sessions expire after 12 hours by default (configurable via MAINFRAME_VAULT_TTL_MINUTES or
+# mainframe.config.json vaultTtlMinutes); the phone approval page's 12-hour
+# checkbox now matches the default (720 minutes, the max - clamped here).
 # Expiry is TIME-based, not use-based: every unlock registers a one-shot
 # scheduled expiry (schtasks on Windows, a systemd transient timer on Linux,
 # a detached sleeper as fallback) that runs the full Expire-VaultSession
@@ -316,10 +318,10 @@ $script:VaultApprovalLockSettleSeconds = 20   # keep the turn while the caller w
 $script:VaultItemsCache = $null
 $script:VaultItemsCacheSession = $null
 $script:VaultSessionOkSession = $null
-$script:DefaultSessionTtlMinutes = 60
+$script:DefaultSessionTtlMinutes = 720  # 12 hours (user order 2026-11-22); vaultTtlMinutes / MAINFRAME_VAULT_TTL_MINUTES overrides
 
-# the profile root is resolved by one shared module, so windows and linux read
-# the same place (see mainframe-paths.psm1).
+# the profile root is resolved by one shared script, so windows and linux read
+# the same place (see Get-MainframeProfileRoot below).
 
 
 # --- scheduled expiry -------------------------------------------------------
@@ -2640,7 +2642,7 @@ function Get-VaultSessionTtlMinutes {
     if ($env:MAINFRAME_VAULT_TTL_MINUTES) {
         try { return [int]$env:MAINFRAME_VAULT_TTL_MINUTES } catch {}
     }
-    # the config lookup lives in mainframe-paths.psm1, so linux reads the
+    # the config lookup lives in this script, so linux reads the
     # profile root the same way windows does.
     foreach ($key in @('vaultTtlMinutes', 'sessionTtlMinutes')) {
         $value = Get-MainframeConfigValue -Key $key
@@ -3229,8 +3231,7 @@ function Ensure-VaultSession {
         [switch]$NoPrompt,
         [string]$Agent,
         [string]$Model,
-        [string]$PromptContext = 'vault access',
-        [switch]$ScheduleExpiry
+        [string]$PromptContext = 'vault access'
     )
 
     if (Test-VaultSession) {
@@ -3249,7 +3250,9 @@ function Ensure-VaultSession {
         }
 
         $promptStartTimeUtc = [DateTime]::UtcNow
-        Write-Host "`n==> vault session is locked or expired (1-hour TTL)." -ForegroundColor Yellow
+        $ttlMinutes = Get-VaultSessionTtlMinutes
+        $ttlDesc = if ($ttlMinutes -ge 60) { "$([math]::Round($ttlMinutes / 60))-hour TTL" } else { "$ttlMinutes-minute TTL" }
+        Write-Host "`n==> vault session is locked or expired ($ttlDesc)." -ForegroundColor Yellow
         Write-Host "triggering 1-tap mobile approval prompt on phone..." -ForegroundColor Cyan
         $pw = Get-VaultMasterPassword -PromptContext $PromptContext -TimeoutSeconds $TimeoutSeconds -Agent $Agent -Model $Model -StartTimeUtc $promptStartTimeUtc
         if ($pw -eq '__SESSION_ALREADY_UNLOCKED__') {
@@ -3277,7 +3280,7 @@ function Ensure-VaultSession {
                 $unlockOut = @(& bw unlock --raw --passwordfile $pwFile 2>&1)
                 $rawKey = $unlockOut | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z0-9+/=]{20,}$' } | Select-Object -Last 1
                 if ($rawKey) {
-                    if ($ScheduleExpiry) { $sessionFile = Set-VaultSessionKey -SessionKey $rawKey -ScheduleExpiry } else { $sessionFile = Set-VaultSessionKey -SessionKey $rawKey }
+                    $sessionFile = Set-VaultSessionKey -SessionKey $rawKey
                     $env:BW_SESSION = $rawKey.Trim()
                     # the start marker is the env session's proof of age
                     # (Get-VaultSession refuses an unmarked env session once
@@ -3329,8 +3332,7 @@ function Set-VaultSessionKey {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$SessionKey,
-        [int]$TtlMinutes = 0,
-        [switch]$ScheduleExpiry
+        [int]$TtlMinutes = 0
     )
 
     if ($TtlMinutes -le 0 -and $env:MAINFRAME_VAULT_APPROVED_TTL) {
@@ -3353,22 +3355,21 @@ function Set-VaultSessionKey {
         Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
     }
 
-    if ($ScheduleExpiry) {
-        # time-based expiry: register the one-shot job that runs the full
-        # Expire-VaultSession at the TTL mark. best-effort - a failed
-        # registration must never fail the unlock; the lazy check in
-        # Get-VaultSession is the backstop, and Register warns loudly.
-        $effectiveTtl = $TtlMinutes
-        if ($effectiveTtl -le 0) { $effectiveTtl = Get-VaultSessionTtlMinutes }
-        if ($effectiveTtl -gt 0) {
-            try {
-                $scheduled = Register-VaultSessionExpiry -TtlMinutes $effectiveTtl -SessionKey $SessionKey
-                if (-not $scheduled) {
-                    Write-MainframeWarning 'could not register the scheduled expiry for this session - the lazy expiry check on next vault use is the only backstop'
-                }
-            } catch {
-                Write-MainframeWarning "scheduled-expiry registration failed ($_) - the lazy expiry check on next vault use is the only backstop"
+    # time-based expiry is ENFORCED (user order 2026-11-22): every unlock
+    # registers the one-shot job that runs the full Expire-VaultSession at
+    # the TTL mark. best-effort - a failed registration must never fail
+    # the unlock; the lazy check in Get-VaultSession is the backstop, and
+    # Register warns loudly.
+    $effectiveTtl = $TtlMinutes
+    if ($effectiveTtl -le 0) { $effectiveTtl = Get-VaultSessionTtlMinutes }
+    if ($effectiveTtl -gt 0) {
+        try {
+            $scheduled = Register-VaultSessionExpiry -TtlMinutes $effectiveTtl -SessionKey $SessionKey
+            if (-not $scheduled) {
+                Write-MainframeWarning 'could not register the scheduled expiry for this session - the lazy expiry check on next vault use is the only backstop'
             }
+        } catch {
+            Write-MainframeWarning "scheduled-expiry registration failed ($_) - the lazy expiry check on next vault use is the only backstop"
         }
     }
     return $sessionFile
@@ -4545,7 +4546,7 @@ function Convert-RestToArgs {
 function Show-MainframeUsage {
     @'
 mainframe: the ONE script. usage:
-  mainframe.ps1 vault unlock        [-BwPath <path>] [-Json] [-PromptContext <text>] [-TimeoutSeconds <n>] [-ScheduleExpiry] [-Lock] [-LockIfStale] [-OutputPath <path>] [-NtfyTopic <t>] [-Server <url>] [-PagesBase <url>] [-Checkout <path>]
+  mainframe.ps1 vault unlock        [-BwPath <path>] [-Json] [-PromptContext <text>] [-TimeoutSeconds <n>] [-Lock] [-LockIfStale] [-OutputPath <path>] [-NtfyTopic <t>] [-Server <url>] [-PagesBase <url>] [-Checkout <path>]
   mainframe.ps1 vault lock
   mainframe.ps1 vault status        [-BwPath <path>] [-Json]
   mainframe.ps1 vault expire        [-BwPath <path>] [-ProfileRoot <path>] [-DelaySeconds <n>]
@@ -4572,7 +4573,7 @@ mainframe: the ONE script. usage:
     What it does, in order:
 
       1. if a fresh cached session exists (the profile root's
-         accounts/bitwarden/session.key, 60 minute TTL), it is reused and the
+         accounts/bitwarden/session.key, 12-hour TTL by default), it is reused and the
          phone is NOT asked for anything.
       2. otherwise the master password is fetched with the 1-tap phone
          approval, exactly like the windows flow: an RSA-2048 keypair, a
@@ -4621,8 +4622,7 @@ function Invoke-VaultUnlock {
         [switch]$Lock,
         [switch]$LockIfStale,
         [string]$OutputPath = $null,
-        [switch]$Json,
-        [switch]$ScheduleExpiry
+        [switch]$Json
     )
 
     # stdout belongs to the result document. the modules narrate with Write-Host,
@@ -4746,9 +4746,9 @@ function Invoke-VaultUnlock {
         }
         $session = $unlockOut | Where-Object { $_ -is [string] -and $_ -match '^[A-Za-z0-9+/=]{20,}$' } | Select-Object -Last 1
         if (-not $session) { throw "bw unlock did not return a session key: $($unlockOut -join ' ')" }
-        # -ScheduleExpiry registers the one-shot job that runs the full
-        # Expire-VaultSession at the TTL mark (time-based expiry, not lazy).
-        if ($ScheduleExpiry) { Set-VaultSessionKey -SessionKey $session -ScheduleExpiry | Out-Null } else { Set-VaultSessionKey -SessionKey $session | Out-Null }
+        # Set-VaultSessionKey registers the one-shot expiry job (time-based
+        # expiry is enforced - the session always expires at its TTL mark).
+        Set-VaultSessionKey -SessionKey $session | Out-Null
         # self-heal (C1): the unlock just proved a live session - cache the
         # shared approval signing key now if this machine lacks it, so the NEXT
         # approval is signed. best-effort, never fails the flow.
