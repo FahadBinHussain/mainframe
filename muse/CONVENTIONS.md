@@ -25,5 +25,5 @@ Set by the user 2026-11-17, rule 8 added 2026-11-18.
 4. **Same-type work goes to the same chat** so nothing gets dropped. The manager tracks every delegation until it lands.
 5. **Never assume a delegation is done.** Always read the agent's replies and verify the result before reporting completion.
 6. **Cross-account talk goes manager-to-manager.** The AGENTS.md-sync thread is sync-only (the Monitor pushes AGENTS.md deltas there) — never the cross-account talk channel.
-7. **Two Muse accounts never share the same Muse name.** Each account's Muse has its own distinct name (e.g. A is Haru, B is Riruru) — same names caused the A/B swap confusion.
+7. **Two Muse accounts never share the same Muse name.** Each account's Muse has its own distinct name — same names caused the A/B swap confusion. **Identity is by viewer_id + email only — never store Muse names as identity (names change; resolve a name live from the tab title or ask).**
 8. **Never change any Muse's avatar or name without the user's explicit approval.** This applies to the manager itself and to every Muse it delegates to — no name or avatar change, ever, unless the user explicitly approved that change.

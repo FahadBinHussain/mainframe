@@ -131,7 +131,7 @@ esac
 # untouched, because extraction runs after this loop.
 # --no-preserve=ownership: the destination vm's memory dir is root-owned
 # and its mount refuses chown even as root (cp -a died there with
-# "failed to preserve ownership: Operation not permitted", maru 2026-11-22);
+# "failed to preserve ownership: Operation not permitted", C 2026-11-22);
 # ownership is meaningless for a backup the same user reads back. the
 # extract step already uses --no-same-owner for the same reason.
 BACKUP_PATHS="MEMORY.md SOUL.md AGENTS.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md PROACTIVE_PREFERENCES.md config/skills.yaml .config/mainframe/mainframe.config.json .config/mainframe/approval-signing.key .config/mainframe/bw-email.enc.json memory dreams/alignment workspace/goals workspace/custom-skills workspace/custom-connectors workspace/your_files workspace/user workspace/cron.d"
@@ -154,7 +154,7 @@ touch "${HOME}/.pre-migration.complete"
 
 echo "extracting the pack ..."
 # the destination vm's shell is root in-namespace but its home mount maps
-# root to an unprivileged uid (maru 2026-11-22, proven by reproduction):
+# root to an unprivileged uid (C 2026-11-22, proven by reproduction):
 #   - home is sticky, so plain tar refuses existing files with
 #     "Cannot open: File exists" -> --overwrite (unlinks first, then the
 #     group-write open succeeds; the mapped uid is in nogroup).
@@ -166,7 +166,7 @@ echo "extracting the pack ..."
 #     through stdout — a plain shell redirect writes bytes only, no
 #     metadata. (build-pack.py now preserves the source mode, so future
 #     packs match; the separate step stays as defence for older packs.)
-# TAR_OPTIONS is cleared as defence (it was unset on maru — the "File
+# TAR_OPTIONS is cleared as defence (it was unset on C — the "File
 # exists" came from the sticky dir, not from -k).
 TAR_OPTIONS= tar -xzf "$PACK_PATH" -C "$HOME" --no-same-owner --overwrite -m \
   --exclude='IDENTITY.md' \
