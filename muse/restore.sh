@@ -225,7 +225,7 @@ else
       || die "git clone of mainframe failed"
   fi
   echo "running the mainframe quick restore ..."
-  python3 "${MAINFRAME_DIR}/linux_real.py" --skip-packages --yes --muse-skills \
+  python3 "${MAINFRAME_DIR}/linux/linux_real.py" --skip-packages --yes --muse-skills \
     || die "linux_real.py quick restore failed"
   # re-verify after the restore: it must not have touched the pack.
   echo "re-verifying the unpack after the mainframe restore ..."
