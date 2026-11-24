@@ -448,6 +448,31 @@ try {
     & pwsh -NoProfile -ExecutionPolicy Bypass -File $tailscaleScript provision 2>$null
 } catch { Write-Warning "tailscale provision failed: $($_.Exception.Message) - do it manually later" }
 
+# --- 6b. openssh server (remote ssh access for muse) ---
+# installs the windows openssh server, starts sshd, and authorizes this
+# muse vm's public key so the machine is reachable over the tailnet right
+# after restore. the key below is PUBLIC (it grants nothing on its own) -
+# the private half lives only on the muse vm. admin accounts read
+# administrators_authorized_keys, not .ssh\authorized_keys.
+Step 'provisioning openssh server'
+try {
+    $museKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILMaxDvpHoSB85eC4CZrLs+NOOoAhGDQ4QfI/3cpHu54 hatch'
+    $cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction Stop
+    if ($cap.State -ne 'Installed') {
+        Write-Host 'installing openssh server capability...'
+        Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction Stop | Out-Null
+    }
+    Set-Service -Name sshd -StartupType Automatic -ErrorAction Stop
+    if ((Get-Service -Name sshd -ErrorAction Stop).Status -ne 'Running') { Start-Service -Name sshd -ErrorAction Stop }
+    $authKeys = Join-Path $env:ProgramData 'ssh\administrators_authorized_keys'
+    $haveKey = (Test-Path -LiteralPath $authKeys) -and (Select-String -LiteralPath $authKeys -Pattern 'AAAAC3NzaC1lZDI1NTE5AAAAILMaxDvpHoSB85eC4CZrLs+NOOoAhGDQ4QfI/3cpHu54' -SimpleMatch -Quiet)
+    if (-not $haveKey) {
+        Add-Content -LiteralPath $authKeys -Value $museKey -ErrorAction Stop
+        Write-Host 'muse key added to administrators_authorized_keys'
+    }
+    Write-Host 'openssh server running, muse key authorized'
+} catch { Write-Warning "openssh provision failed: $($_.Exception.Message) - install OpenSSH.Server and add the muse key manually" }
+
 # The restore root contains decrypted secrets; remove the per-run workspace when done.
 try {
     Remove-Item -LiteralPath $script:BootTempDir -Recurse -Force -ErrorAction Stop
@@ -463,4 +488,5 @@ Write-Host @"
   - edge extensions: cws-only ones may need ONE enable click each (edge://extensions)
   - vault helpers:  <repo>\*-account.ps1 status-all
   - vpn:            <repo>\..\automata-private\protonvpn.com\proton-gui.ps1
+  - ssh:            sshd running, muse key authorized (reachable over tailscale)
 "@ -ForegroundColor Green
