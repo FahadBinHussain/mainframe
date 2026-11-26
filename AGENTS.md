@@ -2692,19 +2692,24 @@ whole ecosystem, not one per machine).
 
 ### the 12h session expires for real (2026-11-15)
 
-the 12-hour TTL stays (clamped to 720 max), but expiry used to be lazy:
-`Get-VaultSession` only checked age-vs-TTL on the next vault use, so
-`session.key` sat on disk — and the server session stayed live — past the
-mark until something touched the vault. a direct
-`BW_SESSION=$(cat session.key) bw ...` bypassed the check entirely.
+the 12-hour TTL stays (clamped to 720 max). expiry used to be lazy and
+then scheduled; both are gone (2026-11-26, user order: single/central,
+no timer): `Get-VaultSession` only checked age-vs-TTL on the next vault
+use, so `session.key` sat on disk — and the server session stayed live —
+past the mark until something touched the vault. the scheduled job that
+replaced it (a one-shot schtasks task `MainframeVaultExpiry`, a
+systemd-run timer, a detached sleeper) was a second part with its own
+lifecycle, so it is removed too.
 
-- **every unlock registers a one-shot expiry job** that runs the full
-  `Expire-VaultSession` (`bw lock` + purge + `bw status` verify) at
-  the TTL mark with zero vault use needed: a one-shot schtasks task
-  (`MainframeVaultExpiry`) on windows, a `systemd-run` transient timer
-  (`mainframe-vault-expiry`) on linux, a detached sleeper only as a
-  fallback. the lazy check remains the backstop. the job cleans up after
-  itself; re-unlock replaces it; a manual lock/expire cancels it.
+- **every unlock writes an expiry record** (`expiry.json` next to
+  `session.key`: absolute expiry time + the session-key hash, 0600),
+  and every mainframe run enforces it: the CLI dispatcher sweeps before
+  any command, and `Get-VaultSession` enforces it on every vault use.
+  the record, not the file's mtime, is the age authority - touching the
+  file cannot extend the session, and a swapped key is refused by its
+  hash (fail-closed). with no record, the check falls back to file age
+  vs TTL. a re-unlock overwrites the record; a manual lock or an expiry
+  deletes it with the session files.
 - **the env fallback is TTL-gated too.** `Set-VaultSessionKey` stamps
   `MAINFRAME_VAULT_SESSION_STARTED_UNIX` at unlock; an env-only session
   without the marker is refused and cleared in-process.
@@ -2712,9 +2717,15 @@ mark until something touched the vault. a direct
   `Set-VaultSessionKey` too, so a boot unlock expires on
   the same schedule, and it uses `--passwordfile` (0600 temp file) instead
   of `BW_PASSWORD` everywhere — same as the vault modules.
-- tests: `tests/vault-session-scheduled-expiry.Tests.ps1` proves with a
-  1-minute TTL that the file is gone and `bw status` is unauthenticated
-  after the mark with zero vault use in between.
+- tests: `tests/vault-session-expire.Tests.ps1` proves the record rules:
+  an expired record refuses the session even with a fresh mtime, a
+  swapped key is refused by its hash, and the sweep purges a due session
+  without a vault use in between.
+- **residual, stated plainly:** a direct `BW_SESSION=$(cat session.key)
+  bw ...` still bypasses the check itself - the record only shrinks the
+  window to the next mainframe run, when the sweep purges the file.
+  closing it entirely needs the server to enforce the TTL, which
+  vaultwarden does not.
 
 ## one vault flow, one implementation
 

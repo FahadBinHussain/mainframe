@@ -334,9 +334,9 @@ if ($bwStatus.status -ne 'unlocked') {
     Remove-Item -Path 'Env:\BW_PASSWORD' -ErrorAction SilentlyContinue
     $obtainedMasterPw = $null
     # persist for the restore helpers that read session.key - through the
-    # vault module, so the file is 0600 + atomic and a scheduled expiry
-    # runs at the default TTL even with no vault use after boot (the same
-    # mechanism as the approval flow).
+    # vault module, so the file is 0600 + atomic and the expiry record
+    # is written at the default TTL (enforced on the next mainframe run
+    # or vault use - the same mechanism as the approval flow).
     Set-VaultSessionKey -SessionKey $session | Out-Null
 } else {
     Write-Host 'vault already unlocked'

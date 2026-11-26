@@ -16,10 +16,11 @@
       mainframe-paths.psm1, mainframe-json.psm1, mainframe-sync.psm1
 
     the vault expiry is ENFORCED (user order 2026-11-22): every unlock
-    registers the one-shot expiry job (schtasks / systemd / sleeper) -
-    the session ALWAYS expires at its TTL mark. default TTL is 12 hours
-    (720 minutes); change it with vaultTtlMinutes in mainframe.config.json
-    or the MAINFRAME_VAULT_TTL_MINUTES env var.
+    writes the expiry record (expiry.json) and every mainframe run
+    enforces it from the TTL mark on - no scheduled job, no background
+    process (user order 2026-11-26: single/central). default TTL is
+    12 hours (720 minutes); change it with vaultTtlMinutes in
+    mainframe.config.json or the MAINFRAME_VAULT_TTL_MINUTES env var.
 
     dot-sourcing this file loads every function without running anything,
     so the tests import it that way instead of the old modules.
@@ -297,16 +298,17 @@ $script:VaultApprovalLockSettleSeconds = 20   # keep the turn while the caller w
 # Sessions expire after 12 hours by default (configurable via MAINFRAME_VAULT_TTL_MINUTES or
 # mainframe.config.json vaultTtlMinutes); the phone approval page's 12-hour
 # checkbox now matches the default (720 minutes, the max - clamped here).
-# Expiry is TIME-based, not use-based: every unlock registers a one-shot
-# scheduled expiry (schtasks on Windows, a systemd transient timer on Linux,
-# a detached sleeper as fallback) that runs the full Expire-VaultSession
-# (bw lock + purge + verify) at the TTL mark with no vault use needed.
-# The lazy check in Get-VaultSession (file age vs TTL) remains the backstop
-# for the restart window - a reboot between unlock and TTL kills the
-# scheduled job, so the session file is still on disk until the next vault
-# use expires it. Re-unlock replaces the pending job (fixed name,
-# unregister-first), and a manual lock/expire cancels it. An env-only
-# session ($env:BW_SESSION with no session file) is only trusted when
+# Expiry is TIME-based and enforced in ONE place, with no scheduled job
+# and no background process (user order 2026-11-26 - everything
+# single/central): every unlock writes an expiry record (expiry.json
+# next to session.key: absolute expiry time + the session-key hash,
+# 0600), and every mainframe run enforces it - the CLI dispatcher sweeps
+# before any command, and Get-VaultSession enforces it on every vault
+# use. the record, not the file's mtime, is the age authority: touching
+# the file cannot extend the session, and a swapped key is refused by
+# its hash (fail-closed). with no record (a session written by an older
+# flow), the check falls back to file age vs TTL. An env-only session
+# ($env:BW_SESSION with no session file) is only trusted when
 # MAINFRAME_VAULT_SESSION_STARTED_UNIX proves its age - an unmarked env
 # session is refused, because the file (the age authority) is gone.
 #
@@ -324,25 +326,19 @@ $script:DefaultSessionTtlMinutes = 720  # 12 hours (user order 2026-11-22); vaul
 # the same place (see Get-MainframeProfileRoot below).
 
 
-# --- scheduled expiry -------------------------------------------------------
-# expiry is TIME-based: every unlock registers a one-shot job that runs the
-# full Expire-VaultSession at the TTL mark with no vault use needed. the
-# lazy check in Get-VaultSession stays as the backstop for the restart
-# window (a reboot between unlock and TTL kills the scheduled job - the
-# systemd timer is transient, the sleeper is a process, and a schtasks
-# one-shot task survives a reboot but the wrapper's age/hash guards still
-# apply - so the session file is still on disk until the next vault use
-# expires it). mechanisms, in preference order:
-#   windows: schtasks one-shot (fixed name MainframeVaultExpiry) -> sleeper
-#   linux:   systemd-run transient timer (fixed unit mainframe-vault-expiry)
-#            -> sleeper
-# the sleeper is a detached pwsh process running the wrapper with
-# -DelaySeconds; it dies on reboot, which is why it is only the fallback.
-# registration is replace-on-register (fixed name, unregister-first), so a
-# re-unlock can never leave a stale job that fires early and kills the
-# fresh session. the wrapper (mainframe.ps1 vault expire) double-checks age
-# + key hash before expiring, and every path unregisters the job when it
-# is done, so no orphaned task/timer/sleeper is left behind.
+# --- session expiry (record-based, no timer) ------------------------------
+# expiry is TIME-based: every unlock writes the expiry record
+# (Set-VaultSessionExpiryState: expiresAtUnix + session-key hash, 0600
+# next to session.key), and the check runs on every mainframe run - the
+# CLI dispatcher sweeps before any command, and Get-VaultSession checks
+# on every vault use. there is no scheduled job, no systemd timer, no
+# detached sleeper (removed 2026-11-26, user order: single/central).
+# the record is the age authority: its expiresAtUnix stands no matter
+# what the file's mtime says, and its hash refuses a swapped key. with
+# no record, the check falls back to file age vs TTL. a re-unlock
+# overwrites the record; a manual lock or an expiry deletes it with the
+# session files. Expire-VaultSession is the one purge (bw lock + purge +
+# verify), called by the sweep and by Get-VaultSession alike.
 
 
 # Upsert the secret into an existing item's notes: replace the value under the
@@ -2681,10 +2677,6 @@ function Get-VaultBwServer {
 
 function Lock-VaultSession {
     param([string]$BwPath = 'bw')
-    # a manual lock cancels the pending scheduled expiry too - the session
-    # is already gone, so the job must not fire later against a fresh
-    # session (and must not leave an orphan behind).
-    try { Unregister-VaultSessionExpiry | Out-Null } catch {}
     $sessionFile = Get-MainframeSessionKeyPath
     if (Test-Path -LiteralPath $sessionFile) {
         Remove-Item -LiteralPath $sessionFile -Force -ErrorAction SilentlyContinue
@@ -2692,6 +2684,10 @@ function Lock-VaultSession {
     $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
     if (Test-Path -LiteralPath $ttlFile) {
         Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
+    }
+    $statePath = Get-VaultSessionExpiryStatePath
+    if (Test-Path -LiteralPath $statePath) {
+        Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
     Remove-Item -Path 'Env:\MAINFRAME_VAULT_SESSION_STARTED_UNIX' -ErrorAction SilentlyContinue
@@ -2720,9 +2716,9 @@ function Expire-VaultSession {
         taken BEFORE the expiry had nothing left to decrypt. the CLI's local
         encrypted cache now stays on disk, so such a copy can still decrypt
         a copy of that cache. the live session is still dead - the session
-        key, the ttl, the env vars and the in-process caches are purged here.
+        key, the ttl, the expiry record, the env vars and the in-process caches are purged here.
 
-        the local purge never depends on the CLI: session.key, session.ttl
+        the local purge never depends on the CLI: session.key, session.ttl, expiry.json
         and the env vars go even when the lock fails (no network, no CLI).
         the lock is verified with `bw status` afterwards - a CLI that is
         still unlocked is reported LOUDLY and locked again, and a CLI that
@@ -2730,10 +2726,6 @@ function Expire-VaultSession {
         LOUDLY too, never silently left half-expired.
     #>
     param([string]$BwPath = 'bw')
-    # a manual expire cancels the pending scheduled expiry first - the job
-    # is redundant now, and cancelling it keeps the next unlock's job the
-    # only one that can fire.
-    try { Unregister-VaultSessionExpiry | Out-Null } catch {}
     $sessionFile = Get-MainframeSessionKeyPath
     $locked = $false
     try {
@@ -2751,6 +2743,10 @@ function Expire-VaultSession {
     $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
     if (Test-Path -LiteralPath $ttlFile) {
         Remove-Item -LiteralPath $ttlFile -Force -ErrorAction SilentlyContinue
+    }
+    $statePath = Get-VaultSessionExpiryStatePath
+    if (Test-Path -LiteralPath $statePath) {
+        Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -Path 'Env:\BW_SESSION' -ErrorAction SilentlyContinue
     Remove-Item -Path 'Env:\MAINFRAME_VAULT_SESSION_STARTED_UNIX' -ErrorAction SilentlyContinue
@@ -2794,323 +2790,98 @@ function Get-VaultSessionExpiryState {
     try { return (Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json) } catch { return $null }
 }
 
-function Invoke-VaultExpiryNativeCommand {
-    param([string]$Command, [string[]]$Arguments)
-    try {
-        $out = @(& $Command @Arguments 2>&1)
-        return @{ ExitCode = $LASTEXITCODE; Output = ($out -join ' ') }
-    } catch {
-        return @{ ExitCode = -1; Output = "$_" }
-    }
-}
-
-function Register-VaultSessionExpirySchTasks {
-    param([datetime]$ExpiresAt, [string]$PwshPath, [string]$WrapperPath, [string]$ProfileRoot, [string]$BwPath)
-    if (-not (Get-Command schtasks -ErrorAction SilentlyContinue)) { return $false }
-    # schtasks ONCE is minute-granular: round the trigger UP to the next
-    # minute boundary, so the job never fires before the TTL mark (at most
-    # ~1 minute late). /SD is required - without it schtasks assumes today,
-    # and a 12h expiry would fire up to 12h early. /SD parses in the
-    # system locale, so format the date with the current culture.
-    $trigger = $ExpiresAt.AddSeconds(-$ExpiresAt.Second)
-    if ($trigger -le $ExpiresAt) { $trigger = $trigger.AddMinutes(1) }
-    $culture = Get-Culture
-    $dateStr = $trigger.ToString($culture.DateTimeFormat.ShortDatePattern, $culture)
-    $timeStr = $trigger.ToString('HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
-    # the FULL pwsh path, never bare `pwsh`: bare pwsh is not on PATH in
-    # the scheduled-task context (the MojifyReload task failed exactly
-    # this way, Last Result -2147024894 = file not found).
-    $tr = "`"$PwshPath`" -NoProfile -NonInteractive -File `"$WrapperPath`" vault expire -ProfileRoot `"$ProfileRoot`" -BwPath `"$BwPath`""
-    $result = Invoke-VaultExpiryNativeCommand -Command 'schtasks' -Arguments @('/Create', '/TN', 'MainframeVaultExpiry', '/TR', $tr, '/SC', 'ONCE', '/SD', $dateStr, '/ST', $timeStr, '/F')
-    if ($result.ExitCode -ne 0) {
-        Write-MainframeWarning "schtasks could not create the expiry task ($($result.Output))"
-        return $false
-    }
-    return $true
-}
-
-function Register-VaultSessionExpirySystemd {
-    param([int]$Seconds, [string]$PwshPath, [string]$WrapperPath, [string]$ProfileRoot, [string]$BwPath)
-    if (-not (Get-Command systemd-run -ErrorAction SilentlyContinue)) { return $false }
-    # measured 2026-11-15 on this VM: a systemd-run transient service runs
-    # with an EMPTY HOME and a private /tmp, so HOME (and XDG_CONFIG_HOME
-    # when set) must be passed explicitly or `bw` cannot find its CLI
-    # state. transient units self-remove after firing (verified), and a
-    # duplicate unit name fails, so registration always unregisters first.
-    $homeDir = if ($env:HOME) { $env:HOME } else { [Environment]::GetFolderPath('UserProfile') }
-    $arguments = @("--on-active=$($Seconds)s", '--unit=mainframe-vault-expiry', '--description=mainframe vault session expiry')
-    if ($homeDir) { $arguments += "--setenv=HOME=$homeDir" }
-    if ($env:XDG_CONFIG_HOME) { $arguments += "--setenv=XDG_CONFIG_HOME=$($env:XDG_CONFIG_HOME)" }
-    $arguments += $PwshPath
-    $arguments += @('-NoProfile', '-NonInteractive', '-File', $WrapperPath, 'vault', 'expire', '-ProfileRoot', $ProfileRoot, '-BwPath', $BwPath)
-    $result = Invoke-VaultExpiryNativeCommand -Command 'systemd-run' -Arguments $arguments
-    if ($result.ExitCode -ne 0) {
-        Write-MainframeWarning "systemd-run could not create the expiry timer ($($result.Output))"
-        return $false
-    }
-    return $true
-}
-
-function Register-VaultSessionExpirySleeper {
-    param([int]$Seconds, [string]$PwshPath, [string]$WrapperPath, [string]$ProfileRoot, [string]$BwPath)
-    $logDir = Split-Path (Get-MainframeSessionKeyPath)
-    # one pre-built argument string, not an array: Windows PowerShell 5.1
-    # joins an array with bare spaces (paths with spaces break), while a
-    # single string is passed verbatim on both editions.
-    $arguments = "-NoProfile -NonInteractive -File `"$WrapperPath`" vault expire -ProfileRoot `"$ProfileRoot`" -BwPath `"$BwPath`" -DelaySeconds $Seconds"
-    $startArgs = @{
-        FilePath               = $PwshPath
-        ArgumentList           = $arguments
-        RedirectStandardOutput = (Join-Path $logDir 'expiry.log')
-        RedirectStandardError  = (Join-Path $logDir 'expiry.err.log')
-        PassThru               = $true
-    }
-    if ($env:OS -eq 'Windows_NT') { $startArgs['WindowStyle'] = 'Hidden' }
-    try {
-        return (Start-Process @startArgs)
-    } catch {
-        Write-MainframeWarning "could not start the expiry sleeper ($_) "
-        return $null
-    }
-}
-
-function Register-VaultSessionExpiry {
+function Set-VaultSessionExpiryState {
     <#
     .SYNOPSIS
-        schedule the real expiry of the current session at its TTL mark.
+        write the session's expiry record (expiry.json, 0600) at unlock.
 
     .DESCRIPTION
-        registers a one-shot job (schtasks on windows, a systemd transient
-        timer on linux, a detached sleeper as fallback) that runs
-        mainframe.ps1 vault expire at unlock + TTL, which calls the full
-        Expire-VaultSession (bw lock + purge + verify). the job's state
-        (expiry time, TTL, session key hash, session mtime, mechanism) is
-        recorded 0600 in expiry.json next to session.key, so the wrapper
-        can refuse to expire a session that was re-unlocked after the job
-        was registered.
-
-        replace-on-register: any pending job is cancelled FIRST, then the
-        new one is registered, under a fixed name - a stale job can never
-        fire early and kill a fresh session.
-
-        best-effort from the unlock's perspective: returns $false (and
-        warns loudly) when no mechanism works, and the unlock still
-        succeeds - the lazy check in Get-VaultSession is the backstop.
-        -Mechanism forces one mechanism (used by the tests, which fake the
-        scheduler binaries on PATH); Auto tries the platform order.
+        the record is the age authority for the expiry check: the absolute
+        expiry time (expiresAtUnix) and the hash of the session key it was
+        written for. no timer, no scheduled job, no background process -
+        the record is only READ by the check, never acted on by anything
+        else. a re-unlock overwrites it; a manual lock or an expiry
+        deletes it with the session files.
     #>
     param(
         [Parameter(Mandatory = $true)][int]$TtlMinutes,
-        [string]$SessionKey,
-        [ValidateSet('Auto', 'SchTasks', 'Systemd', 'Sleeper')][string]$Mechanism = 'Auto'
+        [Parameter(Mandatory = $true)][string]$SessionKey
     )
-    if ($TtlMinutes -le 0) { return $false }
-    $sessionFile = Get-MainframeSessionKeyPath
-    if (-not (Test-Path -LiteralPath $sessionFile)) { return $false }
-
-    $wrapperPath = Join-Path $PSScriptRoot 'mainframe.ps1'
-    if (-not (Test-Path -LiteralPath $wrapperPath)) {
-        Write-MainframeWarning "scheduled expiry unavailable: the wrapper is missing at $wrapperPath"
-        return $false
-    }
-
-    $keyForHash = if ([string]::IsNullOrWhiteSpace($SessionKey)) { (Get-Content -LiteralPath $sessionFile -Raw).Trim() } else { $SessionKey.Trim() }
-    $fileInfo = Get-Item -LiteralPath $sessionFile
-    $expiresAt = (Get-Date).AddMinutes($TtlMinutes)
-    $seconds = $TtlMinutes * 60
-
-    # replace-on-register: cancel the old entry FIRST.
-    try { Unregister-VaultSessionExpiry | Out-Null } catch {}
-
-    $pwshPath = (Get-Process -Id $PID).Path
-    $profileRoot = Get-MainframeProfileRoot
-    $bwPath = 'bw'
-    $bwCmd = Get-Command bw -ErrorAction SilentlyContinue
-    if ($bwCmd -and $bwCmd.Source) { $bwPath = $bwCmd.Source }
-
-    # NOTE: named $onWindows, not $isWindows - $IsWindows is a read-only
-    # automatic variable and the name is case-insensitive, so $isWindows
-    # = ... throws in a dot-sourced script (it only worked in the old
-    # module because a module's session state let it shadow).
-    $onWindows = ($env:OS -eq 'Windows_NT')
-    $order = if ($Mechanism -eq 'Auto') {
-        if ($onWindows) { @('SchTasks', 'Sleeper') } else { @('Systemd', 'Sleeper') }
-    } else {
-        @($Mechanism)
-    }
-
-    $chosen = $null
-    $sleeper = $null
-    foreach ($candidate in $order) {
-        switch ($candidate) {
-            'SchTasks' {
-                if (Register-VaultSessionExpirySchTasks -ExpiresAt $expiresAt -PwshPath $pwshPath -WrapperPath $wrapperPath -ProfileRoot $profileRoot -BwPath $bwPath) { $chosen = 'schtasks' }
-            }
-            'Systemd' {
-                if (Register-VaultSessionExpirySystemd -Seconds $seconds -PwshPath $pwshPath -WrapperPath $wrapperPath -ProfileRoot $profileRoot -BwPath $bwPath) { $chosen = 'systemd' }
-            }
-            'Sleeper' {
-                $sleeper = Register-VaultSessionExpirySleeper -Seconds $seconds -PwshPath $pwshPath -WrapperPath $wrapperPath -ProfileRoot $profileRoot -BwPath $bwPath
-                if ($sleeper) { $chosen = 'sleeper' }
-            }
-        }
-        if ($chosen) { break }
-    }
-    if (-not $chosen) {
-        Write-MainframeWarning "no scheduled-expiry mechanism worked on this machine (tried: $($order -join ', ')) - the lazy expiry check on next vault use is the only backstop"
-        return $false
-    }
-
-    $state = [ordered]@{
-        expiresAtUnix     = [DateTimeOffset]::UtcNow.AddMinutes($TtlMinutes).ToUnixTimeSeconds()
-        ttlMinutes        = $TtlMinutes
-        sessionHash       = Get-VaultSessionKeyHash -SessionKey $keyForHash
-        sessionMtimeUnix  = [DateTimeOffset]::new($fileInfo.LastWriteTimeUtc).ToUnixTimeSeconds()
-        mechanism         = $chosen
-        taskName          = 'MainframeVaultExpiry'
-        unitName          = 'mainframe-vault-expiry'
-        sleeperPid        = if ($sleeper) { $sleeper.Id } else { $null }
-        sleeperStartedUnix = if ($sleeper) { [DateTimeOffset]::new($sleeper.StartTime.ToUniversalTime()).ToUnixTimeSeconds() } else { $null }
-        pwshPath          = $pwshPath
-        wrapperPath       = $wrapperPath
-        profileRoot       = $profileRoot
-        bwPath            = $bwPath
-        registeredAtUnix  = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    }
     $statePath = Get-VaultSessionExpiryStatePath
+    $sessionFile = Get-MainframeSessionKeyPath
+    $mtimeUnix = $null
+    if (Test-Path -LiteralPath $sessionFile) {
+        $mtimeUnix = [DateTimeOffset]::new((Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc).ToUnixTimeSeconds()
+    }
+    $state = [ordered]@{
+        expiresAtUnix    = [DateTimeOffset]::UtcNow.AddMinutes($TtlMinutes).ToUnixTimeSeconds()
+        ttlMinutes       = $TtlMinutes
+        sessionHash      = Get-VaultSessionKeyHash -SessionKey $SessionKey
+        sessionMtimeUnix = $mtimeUnix
+        registeredAtUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    }
     New-Item -ItemType Directory -Force -Path (Split-Path $statePath) | Out-Null
     Write-MainframePrivateFile -Path $statePath -Content ($state | ConvertTo-Json -Depth 4) | Out-Null
-    Write-Host "vault session will expire automatically at $($expiresAt.ToString('yyyy-MM-dd HH:mm')) (in $TtlMinutes minutes, via $chosen)" -ForegroundColor Green
-    return $true
+    return $statePath
 }
 
-function Unregister-VaultSessionExpiry {
+function Test-VaultSessionExpired {
     <#
     .SYNOPSIS
-        cancel the pending scheduled expiry, if any. never throws.
+        the ONE expiry rule: is the current session due? fail-closed.
 
     .DESCRIPTION
-        removes the job for the mechanism recorded in expiry.json (schtasks
-        /Delete, systemctl stop of the TIMER only - never the service, which
-        is the wrapper itself while firing - or killing the sleeper - the
-        sleeper is only killed when its start time matches the recorded one,
-        so a reused PID is never killed), then deletes expiry.json. with no
-        state file it still attempts the schtasks + systemd removals by
-        fixed name (a job whose state file was deleted by hand must not
-        survive); a sleeper without state cannot be found and is left to
-        its wrapper guard, which stands down on a fresh session.
+        the expiry record (expiry.json, written at unlock) is the age
+        authority: the session is due once now has passed its recorded
+        expiresAtUnix. the recorded key hash must match the session file -
+        a swapped key is refused, never trusted. touching the session
+        file cannot move the expiry: the record's expiresAtUnix does not
+        move with the file's mtime. with no record (a session written by
+        an older flow, or a hand-written file), the check falls back to
+        file age vs TTL - the old rule. returns $true when the session
+        must be expired (or refused), $false when it is still valid or
+        absent.
     #>
-    $state = Get-VaultSessionExpiryState
-    $mechanisms = if ($state -and $state.mechanism) { @([string]$state.mechanism) } else { @('schtasks', 'systemd') }
-    foreach ($mechanism in $mechanisms) {
-        switch ($mechanism) {
-            'schtasks' {
-                if (Get-Command schtasks -ErrorAction SilentlyContinue) {
-                    $null = Invoke-VaultExpiryNativeCommand -Command 'schtasks' -Arguments @('/Delete', '/TN', 'MainframeVaultExpiry', '/F')
-                }
-            }
-            'systemd' {
-                if (Get-Command systemctl -ErrorAction SilentlyContinue) {
-                    # stop ONLY the timer, never the service: the service is
-                    # the wrapper itself while it is firing, and stopping it
-                    # kills the wrapper mid-expiry (proven 2026-11-15: the
-                    # journal showed the service stopping the same second
-                    # the wrapper printed "expiring it", and nothing after
-                    # it ran). the service is transient and exits on its
-                    # own; the pending job is the timer, and stopping a
-                    # fired timer is a harmless no-op.
-                    $null = Invoke-VaultExpiryNativeCommand -Command 'systemctl' -Arguments @('stop', 'mainframe-vault-expiry.timer')
-                }
-            }
-            'sleeper' {
-                if ($state -and $state.sleeperPid) {
-                    try {
-                        $sleeperPid = [int]$state.sleeperPid
-                        if ($sleeperPid -eq $PID) {
-                            # never suicide: the caller IS the sleeper (the
-                            # wrapper expiring its own session calls Expire,
-                            # which unregisters) - just drop the state file
-                            # below and let this process finish and exit.
-                        } else {
-                            $proc = Get-Process -Id $sleeperPid -ErrorAction Stop
-                            $startedUnix = [DateTimeOffset]::new($proc.StartTime.ToUniversalTime()).ToUnixTimeSeconds()
-                            if ($null -eq $state.sleeperStartedUnix -or [math]::Abs($startedUnix - [long]$state.sleeperStartedUnix) -le 2) {
-                                # Kill + WaitForExit (not Stop-Process): the wait
-                                # reaps the child, so it is really gone when
-                                # Unregister returns - Stop-Process returns
-                                # before the process exits and a zombie lingers.
-                                $proc.Kill()
-                                $null = $proc.WaitForExit(5000)
-                            }
-                        }
-                    } catch {}
-                }
-            }
-        }
-    }
-    $statePath = Get-VaultSessionExpiryStatePath
-    if (Test-Path -LiteralPath $statePath) {
-        Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
-    }
-    return $true
-}
-
-function Invoke-VaultSessionExpiryCheck {
-    <#
-    .SYNOPSIS
-        the scheduled-expiry entry point: expire the session if it is due,
-        otherwise stand down. called by mainframe.ps1 vault expire.
-
-    .DESCRIPTION
-        guards (a stale job must NEVER kill a fresh session):
-        - no session file -> nothing to expire (a manual lock or an earlier
-          expiry already handled it).
-        - session file younger than the recorded TTL -> the user re-unlocked
-          after this job was registered; stand down.
-        - session key hash or mtime differs from the recorded values -> the
-          session was re-unlocked after this job was registered; stand down.
-        - no state file -> fall back to the lazy rule (file age vs
-          Get-VaultSessionTtlMinutes); the job still expires the session
-          if it is due.
-        always unregisters the pending job before returning (self-cleanup),
-        so no orphaned task/timer/sleeper is left behind. returns
-        'expired', 'skipped-fresh', or 'skipped-missing'.
-    #>
-    param([string]$BwPath = 'bw')
     $sessionFile = Get-MainframeSessionKeyPath
+    if (-not (Test-Path -LiteralPath $sessionFile)) { return $false }
     $state = Get-VaultSessionExpiryState
-    $outcome = 'skipped-missing'
-    try {
-        if (-not (Test-Path -LiteralPath $sessionFile)) {
-            Write-Host 'scheduled expiry: no session file - nothing to expire (already locked or expired).'
-            $outcome = 'skipped-missing'
-        } else {
-            $fileInfo = Get-Item -LiteralPath $sessionFile
-            $ageMinutes = ((Get-Date) - $fileInfo.LastWriteTime).TotalMinutes
-            $ttlMinutes = if ($state -and $state.ttlMinutes) { [int]$state.ttlMinutes } else { Get-VaultSessionTtlMinutes }
-            $key = (Get-Content -LiteralPath $sessionFile -Raw).Trim()
-            $hashOk = $true
-            if ($state -and $state.sessionHash) {
-                $hashOk = ((Get-VaultSessionKeyHash -SessionKey $key) -eq [string]$state.sessionHash)
-            }
-            $mtimeOk = $true
-            if ($state -and $state.sessionMtimeUnix) {
-                $mtimeOk = ([DateTimeOffset]::new($fileInfo.LastWriteTimeUtc).ToUnixTimeSeconds() -eq [long]$state.sessionMtimeUnix)
-            }
-            if ($ttlMinutes -gt 0 -and $ageMinutes -ge $ttlMinutes -and $hashOk -and $mtimeOk) {
-                Write-Host "scheduled expiry: session is $([math]::Round($ageMinutes))m old (>= ${ttlMinutes}m TTL) - expiring it (lock + purge)."
-                Expire-VaultSession -BwPath $BwPath | Out-Null
-                $outcome = 'expired'
-            } else {
-                $reason = if (-not $hashOk -or -not $mtimeOk) { 'the session was re-unlocked after this job was registered' } else { "the session is only $([math]::Round($ageMinutes))m old (< ${ttlMinutes}m TTL)" }
-                Write-Host "scheduled expiry: standing down - $reason."
-                $outcome = 'skipped-fresh'
-            }
+    if ($state -and $state.expiresAtUnix) {
+        $key = (Get-Content -LiteralPath $sessionFile -Raw).Trim()
+        if ($state.sessionHash -and ((Get-VaultSessionKeyHash -SessionKey $key) -ne [string]$state.sessionHash)) {
+            return $true
         }
-    } finally {
-        try { Unregister-VaultSessionExpiry | Out-Null } catch {}
+        return ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge [long]$state.expiresAtUnix)
     }
-    return $outcome
+    $ttlMinutes = Get-VaultSessionTtlMinutes
+    if ($ttlMinutes -le 0) { return $false }
+    $ageMinutes = ((Get-Date) - (Get-Item -LiteralPath $sessionFile).LastWriteTime).TotalMinutes
+    return ($ageMinutes -ge $ttlMinutes)
+}
+
+function Invoke-VaultSessionExpirySweep {
+    <#
+    .SYNOPSIS
+        expire the session NOW if it is due; otherwise do nothing.
+
+    .DESCRIPTION
+        the eager half of the record-based expiry: the CLI dispatcher
+        calls this before every command, so an expired session is purged
+        on the next mainframe run of any kind - not just the next vault
+        use. cheap when nothing is due (two small file reads, no bw
+        call). never throws: a sweep failure warns loudly and the command
+        proceeds - the lazy check in Get-VaultSession re-checks on vault
+        use anyway.
+    #>
+    try {
+        if (Test-VaultSessionExpired) {
+            Write-Host 'vault session expired (past its TTL) - expiring it (lock + purge).' -ForegroundColor Yellow
+            Expire-VaultSession | Out-Null
+            return $true
+        }
+    } catch {
+        Write-MainframeWarning "the expiry sweep failed ($_) - the session was NOT purged; the next vault use will re-check it"
+    }
+    return $false
 }
 
 function Get-VaultSession {
@@ -3118,19 +2889,23 @@ function Get-VaultSession {
     $ttlMinutes = Get-VaultSessionTtlMinutes
 
     if (Test-Path -LiteralPath $sessionFile) {
-        $fileInfo = Get-Item -LiteralPath $sessionFile
-        $age = (Get-Date) - $fileInfo.LastWriteTime
-
-        if ($ttlMinutes -gt 0 -and $age.TotalMinutes -ge $ttlMinutes) {
-            Write-Host "vault session expired ($([math]::Round($age.TotalMinutes))m >= ${ttlMinutes}m TTL) - expiring it (lock + purge)" -ForegroundColor Yellow
+        if (Test-VaultSessionExpired) {
+            Write-Host "vault session expired (past its TTL) - expiring it (lock + purge)" -ForegroundColor Yellow
             Expire-VaultSession | Out-Null
             return $null
         }
 
-        # the file is the age authority: stamp its mtime into the env
-        # marker, so a BW_SESSION copied from this file later carries a
-        # provable age (see the env branch below).
-        $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX = [string][DateTimeOffset]::new($fileInfo.LastWriteTimeUtc).ToUnixTimeSeconds()
+        # stamp the session's START into the env marker, so a BW_SESSION
+        # copied from this file later carries a provable age (see the env
+        # branch below). the start comes from the expiry record when one
+        # exists (expiresAt minus TTL); otherwise it is the file's mtime.
+        $state = Get-VaultSessionExpiryState
+        if ($state -and $state.expiresAtUnix -and $state.ttlMinutes) {
+            $startUnix = [long]$state.expiresAtUnix - ([long]$state.ttlMinutes * 60)
+        } else {
+            $startUnix = [DateTimeOffset]::new((Get-Item -LiteralPath $sessionFile).LastWriteTimeUtc).ToUnixTimeSeconds()
+        }
+        $env:MAINFRAME_VAULT_SESSION_STARTED_UNIX = [string]$startUnix
         return (Get-Content -LiteralPath $sessionFile -Raw).Trim()
     }
 
@@ -3371,20 +3146,19 @@ function Set-VaultSessionKey {
     }
 
     # time-based expiry is ENFORCED (user order 2026-11-22): every unlock
-    # registers the one-shot job that runs the full Expire-VaultSession at
-    # the TTL mark. best-effort - a failed registration must never fail
-    # the unlock; the lazy check in Get-VaultSession is the backstop, and
-    # Register warns loudly.
+    # writes the expiry record (expiry.json: absolute expiry time + the
+    # session-key hash), and every mainframe run enforces it - no timer,
+    # no background process (user order 2026-11-26: single/central). a
+    # failed record write must never fail the unlock; the mtime fallback
+    # in the check still applies, and the failure warns loudly.
     $effectiveTtl = $TtlMinutes
     if ($effectiveTtl -le 0) { $effectiveTtl = Get-VaultSessionTtlMinutes }
     if ($effectiveTtl -gt 0) {
         try {
-            $scheduled = Register-VaultSessionExpiry -TtlMinutes $effectiveTtl -SessionKey $SessionKey
-            if (-not $scheduled) {
-                Write-MainframeWarning 'could not register the scheduled expiry for this session - the lazy expiry check on next vault use is the only backstop'
-            }
+            $null = Set-VaultSessionExpiryState -TtlMinutes $effectiveTtl -SessionKey $SessionKey
+            Write-Host "vault session will expire automatically at $((Get-Date).AddMinutes($effectiveTtl).ToString('yyyy-MM-dd HH:mm')) (in $effectiveTtl minutes)" -ForegroundColor Green
         } catch {
-            Write-MainframeWarning "scheduled-expiry registration failed ($_) - the lazy expiry check on next vault use is the only backstop"
+            Write-MainframeWarning "could not write the session expiry record ($_) - the file-age fallback still applies"
         }
     }
     return $sessionFile
@@ -4564,7 +4338,6 @@ mainframe: the ONE script. usage:
   mainframe.ps1 vault unlock        [-BwPath <path>] [-Json] [-PromptContext <text>] [-TimeoutSeconds <n>] [-Lock] [-LockIfStale] [-OutputPath <path>] [-NtfyTopic <t>] [-Server <url>] [-PagesBase <url>] [-Checkout <path>]
   mainframe.ps1 vault lock
   mainframe.ps1 vault status        [-BwPath <path>] [-Json]
-  mainframe.ps1 vault expire        [-BwPath <path>] [-ProfileRoot <path>] [-DelaySeconds <n>]
   mainframe.ps1 vault seal-email
   mainframe.ps1 vault bootstrap-link [-BwPath <path>] [-DryRun] [-PushOnly]
   mainframe.ps1 vault rotate-topic  [-BwPath <path>] [-Topic <topic>] [-ShowTopic] [-ShowCurrent]
@@ -4673,9 +4446,9 @@ function Invoke-VaultUnlock {
         $sessionFile = Get-MainframeSessionKeyPath
         $fresh = $false
         if ($LockIfStale -and (Test-Path -LiteralPath $sessionFile)) {
-            $age = (Get-Date) - (Get-Item -LiteralPath $sessionFile).LastWriteTime
-            $ttl = Get-VaultSessionTtlMinutes
-            $fresh = ($ttl -le 0 -or $age.TotalMinutes -lt $ttl)
+            # ONE expiry rule: the record (or the file-age fallback) decides
+            # freshness - never a second mtime check here.
+            $fresh = -not (Test-VaultSessionExpired)
         }
         if ($fresh) {
             Write-FlowLog 'the cached session is still fresh - leaving the vault unlocked'
@@ -4825,57 +4598,6 @@ function Invoke-VaultUnlock {
 
 function Invoke-VaultLock {
     Lock-VaultSession
-}
-
-
-# ======================================================================
-# action: Invoke-VaultExpire
-# ======================================================================
-
-# vault expire - the scheduled-expiry entry point.
-#
-# invoked by the one-shot scheduled job registered at unlock (schtasks on
-# windows, a systemd transient timer on linux, a detached sleeper as
-# fallback) - never run by hand unless you mean to expire the session NOW.
-# runs Invoke-VaultSessionExpiryCheck, which
-# expires the session only if it is actually due (age + key-hash guards
-# stop a stale job from killing a fresh session) and always unregisters
-# the pending job before returning, so no orphaned task/timer is left.
-#
-# the scheduler passes -ProfileRoot and -BwPath explicitly (full paths):
-# a scheduled context has no guarantee of the user's env. measured on this
-# VM 2026-11-15: a systemd-run service runs with an EMPTY HOME (so `bw`
-# would look for its CLI state in the wrong place) and a private /tmp, so
-# the registration passes HOME via --setenv and the wrapper takes the bw
-# path as an argument. on windows, bare `pwsh` is NOT on PATH in the
-# scheduled-task context (the MojifyReload task failed exactly this way),
-# so the registration records the full pwsh path in the task command.
-
-function Invoke-VaultExpire {
-    [CmdletBinding()]
-    param(
-        [string]$ProfileRoot,
-        [string]$BwPath = 'bw',
-        [int]$DelaySeconds = 0
-    )
-
-    if ($ProfileRoot) { $env:MAINFRAME_PROFILE_ROOT = $ProfileRoot }
-
-    # the sleeper mechanism starts this script at registration time and waits
-    # out the TTL here; the scheduler mechanisms invoke it at the TTL mark
-    # with no delay.
-    if ($DelaySeconds -gt 0) {
-        Start-Sleep -Seconds $DelaySeconds
-    }
-
-    try {
-        $outcome = Invoke-VaultSessionExpiryCheck -BwPath $BwPath
-        Write-Host "scheduled expiry finished: $outcome"
-        return
-    } catch {
-        Write-Warning "scheduled expiry FAILED: $_"
-        throw
-    }
 }
 
 
@@ -5403,7 +5125,6 @@ if ($MyInvocation.InvocationName -ne '.') {
         'vault unlock'         = 'Invoke-VaultUnlock'
         'vault lock'           = 'Invoke-VaultLock'
         'vault status'         = 'Invoke-VaultStatus'
-        'vault expire'         = 'Invoke-VaultExpire'
         'vault seal-email'     = 'Invoke-SealBwEmail'
         'vault bootstrap-link' = 'Invoke-NewBootstrapLink'
         'vault rotate-topic'   = 'Invoke-RotateNtfyTopic'
@@ -5423,6 +5144,10 @@ if ($MyInvocation.InvocationName -ne '.') {
         exit 2
     }
     $fn = $actions[$key]
+    # record-based expiry, enforced on every run: an expired session is
+    # purged here, before any command runs - not just on the next vault
+    # use. the sweep never fails the command (it warns loudly instead).
+    Invoke-VaultSessionExpirySweep | Out-Null
     try {
         $splat = Convert-RestToArgs -FunctionName $fn -Rest $Rest
         & $fn @splat

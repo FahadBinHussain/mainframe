@@ -62,12 +62,6 @@ if ($env:OS -eq 'Windows_NT') {
         '  exit /b 1'
         ')'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
-    # fake schedulers: log the full command line, exit 0 - so the
-    # unlock in section 5b registers a scheduled expiry against
-    # the fakes, never a real schtasks task / systemd timer.
-    @('@echo off', "echo schtasks %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'schtasks.cmd') -Encoding ASCII
-    @('@echo off', "echo systemd-run %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemd-run.cmd') -Encoding ASCII
-    @('@echo off', "echo systemctl %*>>`"$root\sched-calls`"", 'exit /b 0') | Set-Content -LiteralPath (Join-Path $bin 'systemctl.cmd') -Encoding ASCII
 } else {
     $bw = Join-Path $bin 'bw'
     @(
@@ -86,31 +80,12 @@ if ($env:OS -eq 'Windows_NT') {
         'esac'
     ) | Set-Content -LiteralPath $bw -Encoding ASCII
     & chmod 755 $bw
-    @(
-        '#!/bin/sh'
-        "echo `"schtasks `$*`" >> `"$root/sched-calls`""
-        'exit 0'
-    ) | Set-Content -LiteralPath (Join-Path $bin 'schtasks') -Encoding ASCII
-    @(
-        '#!/bin/sh'
-        "echo `"systemd-run `$*`" >> `"$root/sched-calls`""
-        'exit 0'
-    ) | Set-Content -LiteralPath (Join-Path $bin 'systemd-run') -Encoding ASCII
-    @(
-        '#!/bin/sh'
-        "echo `"systemctl `$*`" >> `"$root/sched-calls`""
-        'exit 0'
-    ) | Set-Content -LiteralPath (Join-Path $bin 'systemctl') -Encoding ASCII
-    & chmod 755 (Join-Path $bin 'schtasks')
-    & chmod 755 (Join-Path $bin 'systemd-run')
-    & chmod 755 (Join-Path $bin 'systemctl')
 }
 
 $sessionFile = Join-Path (Join-Path (Join-Path $profile 'accounts') 'bitwarden') 'session.key'
 $ttlFile = [System.IO.Path]::ChangeExtension($sessionFile, '.ttl')
 $expiryFile = Join-Path (Join-Path (Join-Path $profile 'accounts') 'bitwarden') 'expiry.json'
 $callsFile = Join-Path $root 'calls'
-$schedCallsFile = Join-Path $root 'sched-calls'
 $stateFile = Join-Path $root 'state-unauth'
 
 function Reset-FakeBw {
@@ -130,12 +105,6 @@ function Reset-FakeBw {
 }
 function Get-Calls {
     if (Test-Path -LiteralPath $callsFile) { return (Get-Content -LiteralPath $callsFile -Raw) } else { return '' }
-}
-function Reset-SchedLog {
-    if (Test-Path -LiteralPath $schedCallsFile) { Remove-Item -LiteralPath $schedCallsFile -Force }
-}
-function Get-SchedCalls {
-    if (Test-Path -LiteralPath $schedCallsFile) { return (Get-Content -LiteralPath $schedCallsFile -Raw) } else { return '' }
 }
 
 $savedPath = $env:PATH
@@ -201,10 +170,6 @@ try {
     # 5. the first use after an expiry is an UNLOCK, not a login: the expiry
     # locked the cli and it stayed signed in.
     Reset-FakeBw -State 'locked'
-    # sections 1-4 already wrote to the sched log (every expiry/lock
-    # unregisters the pending job) - reset it so 5b measures only this
-    # unlock's own scheduler activity.
-    Reset-SchedLog
     $env:MAINFRAME_BW_EMAIL = 't@example.invalid'
     function global:Get-VaultMasterPassword {
         param([string]$PromptContext, [int]$TimeoutSeconds, [string]$Agent, [string]$Model, [DateTime]$StartTimeUtc)
@@ -220,34 +185,76 @@ try {
     Assert-NotContains (Get-Calls) 'login' 'a signed-in cli does NOT need a login after an expiry'
     Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key is cached after the unlock'
     Assert-True (-not (Test-Path -LiteralPath $stateFile)) 'the CLI is still signed in after the unlock'
-    # 5b. expiry is ENFORCED (user order 2026-11-22): the plain unlock
-    # registers the scheduled expiry (time-based, not lazy): expiry.json
-    # exists and the fake scheduler was called, 12 hours out (the 720
-    # minute default - the mock approval sends no TTL, so the default
-    # applies).
-    Assert-True (Test-Path -LiteralPath $expiryFile) 'the unlock registers a scheduled expiry (expiry.json exists)'
-    if ($env:OS -eq 'Windows_NT') {
-        Assert-Contains (Get-SchedCalls) '/Create' 'the unlock registration creates a schtasks task (fake schtasks)'
-    } else {
-        Assert-Contains (Get-SchedCalls) 'systemd-run --on-active=43200s' 'the unlock registration schedules 12 hours out (fake systemd-run)'
-    }
-    $null = Unregister-VaultSessionExpiry
-    Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'unregister removes expiry.json after the unlock'
+    # 5b. expiry is ENFORCED (user order 2026-11-22) and record-based
+    # (user order 2026-11-26 - no timer): the unlock writes expiry.json
+    # (absolute expiry + key hash) and no scheduler is ever called. the
+    # TTL here is whatever the flow resolved (the repo config says 60
+    # here, a phone approval says 720) - so this pins consistency,
+    # not a hardcoded value: expiresAt is now + TTL minutes.
+    Assert-True (Test-Path -LiteralPath $expiryFile) 'the unlock writes the expiry record (expiry.json exists)'
+    $record = Get-Content -LiteralPath $expiryFile -Raw | ConvertFrom-Json
+    Assert-True ($record.ttlMinutes -gt 0) 'the record carries a positive TTL'
+    $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Assert-True ($record.expiresAtUnix -gt ($nowUnix + ($record.ttlMinutes * 60) - 120)) 'the record expires at now + TTL (lower bound)'
+    Assert-True ($record.expiresAtUnix -lt ($nowUnix + ($record.ttlMinutes * 60) + 120)) 'the record expires at now + TTL (upper bound)'
+    Assert-Equal (Get-VaultSessionKeyHash -SessionKey 'fakesessionkey0123456789abcdef') $record.sessionHash 'the record hashes the cached key'
 
-    # 6. a manual lock cancels the pending scheduled expiry: re-register,
-    # lock, and the job is gone (fake scheduler log proves the removal).
-    Reset-SchedLog
-    $ok = Register-VaultSessionExpiry -TtlMinutes 60
-    Assert-True $ok 're-registration succeeds before the lock'
+    # 6. a manual lock deletes the expiry record with the session files.
+    Reset-FakeBw -State 'locked'
+    Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' -TtlMinutes 60
     Assert-True (Test-Path -LiteralPath $expiryFile) 'expiry.json exists before the lock'
-    Reset-SchedLog
     Lock-VaultSession
     Assert-True (-not (Test-Path -LiteralPath $expiryFile)) 'a manual lock deletes expiry.json'
-    if ($env:OS -eq 'Windows_NT') {
-        Assert-Contains (Get-SchedCalls) '/Delete' 'a manual lock deletes the schtasks entry'
-    } else {
-        Assert-Contains (Get-SchedCalls) 'systemctl stop' 'a manual lock stops the systemd timer'
-    }
+    Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'a manual lock deletes session.key too'
+
+    # 7. the record rules, not the file's mtime: a session whose record
+    # has expired is dead even when the file looks fresh (touching the
+    # file cannot extend it).
+    Reset-FakeBw -State 'locked'
+    Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' -TtlMinutes 720
+    $rec = Get-Content -LiteralPath $expiryFile -Raw | ConvertFrom-Json
+    $rec.expiresAtUnix = [DateTimeOffset]::UtcNow.AddMinutes(-10).ToUnixTimeSeconds()
+    $rec | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $expiryFile -NoNewline
+    (Get-Item -LiteralPath $sessionFile).LastWriteTime = Get-Date
+    $expired = Get-VaultSession
+    Assert-True ([string]::IsNullOrWhiteSpace($expired)) 'an expired record refuses the session even with a fresh mtime'
+    Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'the refused session.key is purged'
+
+    # 8. a swapped key is refused by its hash: the record was written for
+    # another key, so the file is not trusted even though it is fresh.
+    Reset-FakeBw -State 'locked'
+    Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' -TtlMinutes 720
+    Set-Content -LiteralPath $sessionFile -Value 'adifferentkey0123456789abcdef' -NoNewline
+    $swapped = Get-VaultSession
+    Assert-True ([string]::IsNullOrWhiteSpace($swapped)) 'a key that does not match the record is refused'
+    Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'the refused session.key is purged'
+
+    # 9. with no record, the old file-age rule still applies: a fresh
+    # file is valid, a stale one expires.
+    Reset-FakeBw -State 'locked'
+    Set-Content -LiteralPath $sessionFile -Value 'fakesessionkey0123456789abcdef' -NoNewline
+    Set-Content -LiteralPath $ttlFile -Value '720' -NoNewline
+    $noRecord = Get-VaultSession
+    Assert-Equal 'fakesessionkey0123456789abcdef' $noRecord 'no record + fresh file returns the key'
+    (Get-Item -LiteralPath $sessionFile).LastWriteTime = (Get-Date).AddMinutes(-800)
+    $stale = Get-VaultSession
+    Assert-True ([string]::IsNullOrWhiteSpace($stale)) 'no record + stale file expires by age'
+
+    # 10. the sweep purges an expired session without a vault use and
+    # leaves a fresh one alone.
+    Reset-FakeBw -State 'locked'
+    Set-VaultSessionKey -SessionKey 'fakesessionkey0123456789abcdef' -TtlMinutes 720
+    $swept = Invoke-VaultSessionExpirySweep
+    Assert-True (-not $swept) 'the sweep leaves a fresh session alone'
+    Assert-True (Test-Path -LiteralPath $sessionFile) 'a fresh session.key survives the sweep'
+    $rec = Get-Content -LiteralPath $expiryFile -Raw | ConvertFrom-Json
+    $rec.expiresAtUnix = [DateTimeOffset]::UtcNow.AddMinutes(-10).ToUnixTimeSeconds()
+    $rec | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $expiryFile -NoNewline
+    $swept = Invoke-VaultSessionExpirySweep
+    Assert-True $swept 'the sweep expires a due session'
+    Assert-True (-not (Test-Path -LiteralPath $sessionFile)) 'the swept session.key is purged'
+    Assert-Contains (Get-Calls) 'lock' 'the sweep locks the CLI when it expires'
+
 } finally {
     $env:PATH = $savedPath
     $env:MAINFRAME_PROFILE_ROOT = $savedProfile
