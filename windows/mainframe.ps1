@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     mainframe: the ONE script. every mainframe operation lives here.
 
@@ -853,8 +853,9 @@ function Get-CallerIdentity {
     #      - a harness env var leaks DOWN into long-lived services (the
     #        monitor api inherits the agent that started it), and
     #      - a compatibility flag can lie: MiniMax Code sets
-    #        OPENCODE_DISABLE_CHANNEL_DB for opencode compatibility, so the
-    #        env branch read every MiniMax Code request as 'opencode'.
+    #        OPENCODE_DISABLE_CHANNEL_DB for opencode compatibility, and the
+    #        flag is set machine-wide on this laptop - so the env branch
+    #        must never treat the bare flag as an identity (2026-11-26).
     #    The process tree cannot be inherited wrongly, so it decides first.
     if (-not $Agent) {
         $p = $null
@@ -906,12 +907,11 @@ function Get-CallerIdentity {
             $Agent = 'aider'
         } elseif ($env:ANTIGRAVITY_AGENT -or $env:ANTIGRAVITY_CONVERSATION_ID) {
             $Agent = 'antigravity'
-        } elseif ($env:OPENCODE_DISABLE_CHANNEL_DB) {
-            # the compat flag ALONE, with no harness-specific marker. it is
-            # the weakest signal there is - MiniMax Code sets it as well - so
-            # it goes last, after every marker above has had its chance.
-            $Agent = 'opencode'
         } else {
+            # the OPENCODE_DISABLE_CHANNEL_DB compat flag is deliberately NOT
+            # an identity signal: it is set machine-wide on this laptop, so
+            # every agent's unlock read as 'opencode' when nothing else
+            # identified the caller (2026-11-26). a bare flag means unknown.
             $Agent = 'terminal'
         }
     }
@@ -1602,7 +1602,7 @@ function Get-NtfyTopicFingerprint {
 
     if (-not $Topic) { return '?' }
     $head = $Topic.Substring(0, [Math]::Min(4, $Topic.Length))
-    return "$head…"
+    return "$headâ€¦"
 }
 
 function Get-VaultApprovalUrl {
@@ -4094,9 +4094,9 @@ function Set-VaultBootstrapLink {
         return
     }
     # the item is built explicitly: the bw CLI's (2026.10.0) `get
-    # template item.securenote` returns just {"type":0} — no
+    # template item.securenote` returns just {"type":0} â€” no
     # name/notes fields to fill in, and the wrong type for a
-    # SecureNote (2) — so the template is worse than useless here
+    # SecureNote (2) â€” so the template is worse than useless here
     # (measured 2026-11-15: the first real link creation died
     # setting .name on it).
     $newItem = [pscustomobject]@{
@@ -4337,9 +4337,9 @@ function Set-VaultNtfyTopic {
         return
     }
     # the item is built explicitly: the bw CLI's (2026.10.0) `get
-    # template item.securenote` returns just {"type":0} — no
+    # template item.securenote` returns just {"type":0} â€” no
     # name/notes fields to fill in, and the wrong type for a
-    # SecureNote (2) — so the template is worse than useless here
+    # SecureNote (2) â€” so the template is worse than useless here
     # (measured 2026-11-15: the first real link creation died
     # setting .name on it, and the rotate script had the same
     # latent call).
@@ -5036,7 +5036,7 @@ function Invoke-NewBootstrapLink {
     # Add-Member, not direct assignment: a config created before the
     # bootstrapToken field existed has no such property, and assigning
     # a new property to a ConvertFrom-Json object throws (measured
-    # 2026-11-15 — the first real link creation died here, after the
+    # 2026-11-15 â€” the first real link creation died here, after the
     # vault item was already created). -Force replaces the value when
     # the property already exists (rotation).
     $config | Add-Member -NotePropertyName 'bootstrapToken' -NotePropertyValue $newToken -Force
