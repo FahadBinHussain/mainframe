@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     mainframe: the ONE script. every mainframe operation lives here.
 
@@ -1602,7 +1602,7 @@ function Get-NtfyTopicFingerprint {
 
     if (-not $Topic) { return '?' }
     $head = $Topic.Substring(0, [Math]::Min(4, $Topic.Length))
-    return "$headâ€¦"
+    return "$head…"
 }
 
 function Get-VaultApprovalUrl {
@@ -4094,9 +4094,9 @@ function Set-VaultBootstrapLink {
         return
     }
     # the item is built explicitly: the bw CLI's (2026.10.0) `get
-    # template item.securenote` returns just {"type":0} â€” no
+    # template item.securenote` returns just {"type":0} — no
     # name/notes fields to fill in, and the wrong type for a
-    # SecureNote (2) â€” so the template is worse than useless here
+    # SecureNote (2) — so the template is worse than useless here
     # (measured 2026-11-15: the first real link creation died
     # setting .name on it).
     $newItem = [pscustomobject]@{
@@ -4337,9 +4337,9 @@ function Set-VaultNtfyTopic {
         return
     }
     # the item is built explicitly: the bw CLI's (2026.10.0) `get
-    # template item.securenote` returns just {"type":0} â€” no
+    # template item.securenote` returns just {"type":0} — no
     # name/notes fields to fill in, and the wrong type for a
-    # SecureNote (2) â€” so the template is worse than useless here
+    # SecureNote (2) — so the template is worse than useless here
     # (measured 2026-11-15: the first real link creation died
     # setting .name on it, and the rotate script had the same
     # latent call).
@@ -5036,7 +5036,7 @@ function Invoke-NewBootstrapLink {
     # Add-Member, not direct assignment: a config created before the
     # bootstrapToken field existed has no such property, and assigning
     # a new property to a ConvertFrom-Json object throws (measured
-    # 2026-11-15 â€” the first real link creation died here, after the
+    # 2026-11-15 — the first real link creation died here, after the
     # vault item was already created). -Force replaces the value when
     # the property already exists (rotation).
     $config | Add-Member -NotePropertyName 'bootstrapToken' -NotePropertyValue $newToken -Force
