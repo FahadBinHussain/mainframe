@@ -1166,9 +1166,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       el.querySelector('.tag-text').textContent = model;
       el.style.display = 'inline-flex';
     }
-    if (ctx) {
+    // no fabricated reason: a link with no ctx still says so (2026-11-26).
+    {
       const el = document.getElementById('meta-ctx');
-      el.querySelector('.tag-text').textContent = ctx;
+      el.querySelector('.tag-text').textContent = ctx || 'no reason specified';
       el.style.display = 'inline-flex';
     }
     const badge = document.getElementById('host-badge');

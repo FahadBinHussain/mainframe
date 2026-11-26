@@ -181,7 +181,7 @@ $script:VaultNtfyServerVaultItemName = 'github.com/FahadBinHussain/mainframe / m
 # that still has an OLD page cached fetches the new one instead of using it.
 # bump it whenever the page changes in a way that matters for an already
 # opened link.
-$script:VaultApprovalPageVersion = 'topic1'
+$script:VaultApprovalPageVersion = 'topic2'
 
 
 # --- link signing (C1): ONE shared EC P-256 key for the whole ecosystem -----
@@ -1610,7 +1610,7 @@ function Get-VaultApprovalUrl {
         [Parameter(Mandatory = $true)]
         [System.Security.Cryptography.RSA]$Rsa,
         [string]$ToolRepo = 'FahadBinHussain/mainframe',
-        [string]$PromptContext = 'vault access',
+        [string]$PromptContext = $null,
         [string]$HostName = $env:COMPUTERNAME,
         [string]$Agent = $null,
         [string]$Model = $null,
@@ -1620,6 +1620,9 @@ function Get-VaultApprovalUrl {
         [string]$PagesBase = $null,
         [string]$Server = $null
     )
+    # no fabricated reason: if the caller gave none, the phone shows that
+    # plainly (2026-11-26). a wrong reason is worse than no reason.
+    if ([string]::IsNullOrWhiteSpace($PromptContext)) { $PromptContext = 'no reason specified' }
 
     $identity = Get-CallerIdentity -Agent $Agent -Model $Model -PromptContext $PromptContext
     $resolvedAgent = $identity.Agent
@@ -1707,11 +1710,14 @@ function Send-VaultApprovalNotification {
         [string]$Url,
         [string]$HostName = $env:COMPUTERNAME,
         [string]$Code = $null,
-        [string]$PromptContext = "vault access",
+        [string]$PromptContext = $null,
         [string]$Agent = $null,
         [string]$Model = $null,
         [string]$Server = $null
     )
+    # no fabricated reason: if the caller gave none, the phone shows that
+    # plainly (2026-11-26). a wrong reason is worse than no reason.
+    if ([string]::IsNullOrWhiteSpace($PromptContext)) { $PromptContext = 'no reason specified' }
 
     $resolvedServer = Get-VaultNtfyServer -Server $Server
     # topic-only auth: every publish is anonymous. knowing the topic name
@@ -2205,7 +2211,7 @@ function Enter-VaultApprovalRequest {
         releases, an unreadable lock path), so a stuck queue is never silent.
     #>
     param(
-        [string]$PromptContext = 'vault access',
+        [string]$PromptContext = $null,
         [int]$TimeoutSeconds = 300,
         [string]$Agent = $null,
         [string]$Model = $null,
@@ -2213,6 +2219,9 @@ function Enter-VaultApprovalRequest {
         [DateTime]$SinceUtc = [DateTime]::MinValue,
         [int]$QueueTimeoutSeconds = 0
     )
+    # no fabricated reason: if the caller gave none, the phone shows that
+    # plainly (2026-11-26). a wrong reason is worse than no reason.
+    if ([string]::IsNullOrWhiteSpace($PromptContext)) { $PromptContext = 'no reason specified' }
 
     $path = Get-VaultApprovalLockPath
     $sessionFile = Get-MainframeSessionKeyPath
@@ -2352,7 +2361,7 @@ function Get-VaultMasterPassword {
     [CmdletBinding()]
     param(
         [string]$NtfyTopic = $null,
-        [string]$PromptContext = "vault access",
+        [string]$PromptContext = $null,
         [int]$TimeoutSeconds = 300,
         [string]$Agent = $null,
         [string]$Model = $null,
@@ -2362,6 +2371,9 @@ function Get-VaultMasterPassword {
         [string]$PagesBase = $null,
         [int]$QueueTimeoutSeconds = 0
     )
+    # no fabricated reason: if the caller gave none, the phone shows that
+    # plainly (2026-11-26). a wrong reason is worse than no reason.
+    if ([string]::IsNullOrWhiteSpace($PromptContext)) { $PromptContext = 'no reason specified' }
 
     # Resolve ntfy topic
     if (-not $NtfyTopic) {
@@ -3231,8 +3243,11 @@ function Ensure-VaultSession {
         [switch]$NoPrompt,
         [string]$Agent,
         [string]$Model,
-        [string]$PromptContext = 'vault access'
+        [string]$PromptContext = $null
     )
+    # no fabricated reason: if the caller gave none, the phone shows that
+    # plainly (2026-11-26). a wrong reason is worse than no reason.
+    if ([string]::IsNullOrWhiteSpace($PromptContext)) { $PromptContext = 'no reason specified' }
 
     if (Test-VaultSession) {
         return $true
@@ -4617,13 +4632,16 @@ function Invoke-VaultUnlock {
         [string]$Server = $null,
         [string]$PagesBase = $null,
         [int]$TimeoutSeconds = 600,
-        [string]$PromptContext = 'vault restore',
+        [string]$PromptContext = $null,
         [string]$BwPath = 'bw',
         [switch]$Lock,
         [switch]$LockIfStale,
         [string]$OutputPath = $null,
         [switch]$Json
     )
+    # no fabricated reason: if the caller gave none, the phone shows that
+    # plainly (2026-11-26). a wrong reason is worse than no reason.
+    if ([string]::IsNullOrWhiteSpace($PromptContext)) { $PromptContext = 'no reason specified' }
 
     # stdout belongs to the result document. the modules narrate with Write-Host,
     # which lands in the information stream - silencing it keeps stdout a clean
